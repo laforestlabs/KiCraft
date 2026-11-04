@@ -57,6 +57,9 @@ def jev_decider(
     model: str = DEFAULT_MODEL,
     *,
     recorder=None,
+    guard=None,
+    run_id=None,
+    stage=None,
 ) -> Decider:
     """A decider backed by Jev: one call per batch of questions.
 
@@ -67,7 +70,14 @@ def jev_decider(
 
     def decide_batch(state: Any, questions: Sequence[Question]) -> Mapping[str, Any]:
         try:
-            answers = decide(state, questions, model=model, recorder=recorder)
+            options = {"model": model, "recorder": recorder}
+            if guard is not None:
+                options["guard"] = guard
+            if run_id is not None:
+                options["run_id"] = run_id
+            if stage is not None:
+                options["stage"] = stage
+            answers = decide(state, questions, **options)
         except Exception:
             return {}
         return {answer.key: answer for answer in answers}

@@ -22,6 +22,8 @@ Pure module-function + store tests: no NiceGUI client, no LLM, no build.
 """
 from __future__ import annotations
 
+from account_fixtures import seed_project
+
 import json
 
 import pytest
@@ -48,7 +50,9 @@ def store(tmp_path, monkeypatch):
 
 @pytest.fixture
 def user_id(store):
-    return store.create_user("dev@example.com", "hunter2hunter2").id
+    user = store.create_user("dev@example.com", "hunter2hunter2")
+    store.consume_verification_token(store.create_verification_token(user.id))
+    return user.id
 
 
 # ---- the failure text a person may be shown --------------------------------
@@ -104,6 +108,30 @@ def test_run_finished_without_a_recorded_cause_lifts_the_dumps_sentences():
     assert "'ok': False" not in act["failure"]["message"]
 
 
+def test_run_finished_preserves_exception_type_from_run_error():
+    act = activity.reduce_activity(None, {
+        "kind": "run_error", "stage": "wiring", "failure_kind": "unexpected_error",
+        "exception_type": "TimeoutError", "message": "Provider timed out",
+    })
+    act = activity.reduce_activity(act, {
+        "kind": "run_finished", "status": "failed", "stage": "wiring",
+    })
+    assert act["phase_status"] == "failed"
+    assert act["failure"]["exception_type"] == "TimeoutError"
+    assert act["failure"]["message"] == "Provider timed out"
+
+
+def test_failed_orphan_tool_result_is_recorded_as_failed():
+    act = activity.reduce_activity(None, {
+        "kind": "tool_result", "call_id": "missing", "name": "lookup",
+        "ok": False, "output": "lookup failed",
+    })
+    assert len(act["tools"]) == 1
+    assert act["tools"][0]["orphan"] is True
+    assert act["tools"][0]["status"] == "failed"
+    assert act["tools"][0]["output"] == "lookup failed"
+
+
 # ---- what a reopened project reports ---------------------------------------
 
 
@@ -133,7 +161,7 @@ def _failed_workspace(root, *, failing_stage: str, pending_question: bool):
 
 
 def _failed_project(store, user_id, brief, *, failing_stage, pending_question=False):
-    pid = store.create_project(user_id, brief)
+    pid = seed_project(store, user_id, brief)
     root = store.projects_dir / str(user_id) / str(pid)
     _failed_workspace(root, failing_stage=failing_stage,
                       pending_question=pending_question)
@@ -187,7 +215,7 @@ def test_failed_last_stage_offers_finishing_the_design(store, user_id,
 def test_failure_of_a_committed_design_still_offers_a_rebuild(store, user_id):
     """The opposite case is unchanged: when every design stage committed, a
     failed board build is a rebuild, not a design re-drive."""
-    pid = store.create_project(user_id, "a routed board")
+    pid = seed_project(store, user_id, "a routed board")
     root = store.projects_dir / str(user_id) / str(pid)
     (root / ".kicraft").mkdir(parents=True, exist_ok=True)
     (root / ".kicraft" / "state.json").write_text(json.dumps({

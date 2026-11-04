@@ -308,9 +308,6 @@ def test_a4988_function_gates_require_carrier_controls_safe_state_and_motor_term
     assert facts["gates"] == {
         "a4988_driver_socket": "pass",
         "a4988_socket_motor_terminal_binding": "pass",
-        "external_motor_controller_function": "pass",
-        "external_motor_screw_terminal_binding": "pass",
-        "external_actuator_driver_function": "pass",
     }
 
     assert not _a4988_socket_facts(unsafe_default=True)["gates"]
@@ -320,7 +317,6 @@ def test_a4988_function_gates_require_carrier_controls_safe_state_and_motor_term
     )
     assert generic["gates"] == {
         "a4988_driver_socket": "pass",
-        "external_actuator_driver_function": "pass",
     }
 
 
@@ -629,3 +625,14 @@ def test_final_bom_realizes_composite_relay_count_before_wiring_stage():
         Architecture.model_validate(architecture), BOM.model_validate(payload)
     )
     assert result.ok, result.offenders
+
+
+@pytest.mark.parametrize("rail", ["VMOTOR", "3V3", "GND"])
+def test_a4988_socket_rejects_coil_output_short_to_supply(rail):
+    ports = {
+        "vmotor": "VMOTOR", "vdd": "3V3", "gnd": "GND", "enable_n": "ENABLE_N",
+        "ms1": "MS1", "ms2": "MS2", "ms3": "MS3", "reset_n": "RESET_N",
+        "sleep_n": "SLEEP_N", "step": "STEP", "dir": "DIR",
+        "coil_1a": rail, "coil_1b": "1B", "coil_2a": "2A", "coil_2b": "2B",
+    }
+    assert _a4988_socket(_requirement("a4988-driver-socket", ports, channels=2)) is None

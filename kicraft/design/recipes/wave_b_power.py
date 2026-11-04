@@ -163,8 +163,8 @@ _ENABLE_CONTROL_MAX_V: dict[str, float] = {
     "tlv62569-3v3@1": 5.5,
     "ap63203-3v3@1": 32.0,
     "ap63205-5v@1": 32.0,
-    "tps54331-adjustable@1": 6.0,
-    "tps54331-12v-1a@1": 6.0,
+    "tps54331-adjustable@2": 6.0,
+    "tps54331-12v-1a@2": 6.0,
     "lm2577t-adj-12v-boost@1": 18.0,
     "lm2577t-adj-2s-12v-boost@1": 18.0,
     "tps61088-2s-12v-1a@1": 18.0,
@@ -1226,7 +1226,7 @@ def _tps54331_buck(
 
 
 TPS54331_ADJUSTABLE = _tps54331_buck(
-    recipe="tps54331-adjustable@1",
+    recipe="tps54331-adjustable@2",
     family="tps54331-adjustable",
     exact_part="TPS54331DDAR",
     output_voltage=3.3,
@@ -1347,7 +1347,7 @@ YLPTEC_K7803M_1000R3 = YLPTEC_K7803M_1000R3.model_copy(update={
 
 
 TPS54331_12V_1A = _tps54331_buck(
-    recipe="tps54331-12v-1a@1",
+    recipe="tps54331-12v-1a@2",
     family="tps54331-12v-1a",
     exact_part=None,
     output_voltage=12.0,
@@ -1424,14 +1424,17 @@ def expand_tps54331_buck(resolved):
                 group for group in definition.parts if group.role != "enable_jumper"
             ),
             "pins": tuple(
-                pin
-                for pin in definition.pins
+                pin for pin in definition.pins
                 if pin.role != "enable_jumper"
-                and not (pin.role == "converter" and pin.pin == "3")
+                and not (
+                    pin.role == "converter" and pin.pin == "3"
+                    and "enable" not in resolved.selection.port_bindings
+                )
             ),
             "no_connects": (
                 *definition.no_connects,
-                NoConnect(role="converter", pin="3"),
+                *((NoConnect(role="converter", pin="3"),)
+                  if "enable" not in resolved.selection.port_bindings else ()),
             ),
         }
     )

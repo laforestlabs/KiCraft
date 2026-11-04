@@ -12,14 +12,19 @@ SNAP_DIR="${1:?usage: phase0_restore.sh <snapshot-dir>}"
 
 PY=".venv/bin/python"; [ -x "$PY" ] || PY="python3"
 eval "$("$PY" - <<'EOF'
-import os
+import os, shlex
 from kicraft.server.config import load_dotenv
 load_dotenv()
 home = os.path.expanduser("~/.kicraft")
-print(f"ACCT_DB={os.environ.get('KICRAFT_USERS_DB', f'{home}/accounts.db')!r}")
-print(f"LEDGER_DB={os.environ.get('KICRAFT_SPEND_LEDGER', f'{home}/spend_ledger.db')!r}")
+print(f"ACCT_DB={shlex.quote(os.environ.get('KICRAFT_USERS_DB', f'{home}/accounts.db'))}")
+print(f"LEDGER_DB={shlex.quote(os.environ.get('KICRAFT_SPEND_LEDGER', f'{home}/spend_ledger.db'))}")
 EOF
 )"
+if [ "$(basename "$ACCT_DB")" = "$(basename "$LEDGER_DB")" ]; then
+  echo "[restore] database basenames must differ" >&2
+  exit 2
+fi
+
 
 echo "[restore] stopping services (best effort)"
 systemctl stop kicraft-build-worker 2>/dev/null || true

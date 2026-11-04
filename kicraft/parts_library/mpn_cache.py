@@ -66,9 +66,10 @@ def cacheable(mpn: str) -> bool:
 
 def _load() -> dict:
     try:
-        return json.loads(cache_path().read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        data = json.loads(cache_path().read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
         return {}
+    return data if isinstance(data, dict) else {}
 
 
 def get(mpn: str) -> dict | None:

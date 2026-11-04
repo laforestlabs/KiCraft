@@ -1,5 +1,5 @@
-"""Tests for the /billing/webhook endpoint: signature verification, replay
-dedupe, claim-release on failure, and the happy-path tier sync.
+"""Tests for /billing/webhook signature verification, completion dedupe,
+retry after failure, and the happy-path tier sync.
 
 The endpoint is called directly with a hand-built Starlette Request (the house
 style: no HTTP client). Payloads are signed with Stripe's documented
@@ -119,7 +119,7 @@ def test_replayed_event_is_acked_but_not_reprocessed(billing_env, monkeypatch):
     assert gw.retrieve_count == 1                       # ... without rework
 
 
-def test_handler_failure_releases_claim_for_retry(billing_env, monkeypatch):
+def test_handler_failure_keeps_event_retryable(billing_env, monkeypatch):
     store = billing_env
     u = store.create_user("payer@example.com", "hunter2hunter2")
     store.set_stripe_customer(u.id, "cus_1")
@@ -133,11 +133,36 @@ def test_handler_failure_releases_claim_for_retry(billing_env, monkeypatch):
     assert _post(body, _sign(body)).status_code == 500
     assert store.get_user(u.id).tier == DEFAULT_TIER
 
-    # Stripe retries the same event id; the released claim lets it process.
+    # Stripe retries the same event id; no completion marker was written.
     monkeypatch.setattr(web.billing, "gateway", lambda s: FakeGateway(
         subs={"sub_1": _sub()}))
     assert _post(body, _sign(body)).status_code == 200
     assert store.get_user(u.id).tier == "pro"
+
+
+def test_worker_death_before_sync_does_not_ack_retry(billing_env, monkeypatch):
+    store = billing_env
+    user = store.create_user("crash@example.com", "hunter2hunter2")
+    store.set_stripe_customer(user.id, "cus_1")
+    gateway = FakeGateway(subs={"sub_1": _sub()})
+    monkeypatch.setattr(web.billing, "gateway", lambda settings: gateway)
+    real_handler = web.billing.handle_event
+
+    class WorkerDied(BaseException):
+        pass
+
+    def crash(*args, **kwargs):
+        raise WorkerDied()
+
+    monkeypatch.setattr(web.billing, "handle_event", crash)
+    body = _event_payload("evt_crash", "customer.subscription.updated", _sub())
+    with pytest.raises(WorkerDied):
+        _post(body, _sign(body))
+    assert not store.billing_event_processed("evt_crash")
+    monkeypatch.setattr(web.billing, "handle_event", real_handler)
+    assert _post(body, _sign(body)).status_code == 200
+    assert store.get_user(user.id).tier == "pro"
+    assert store.billing_event_processed("evt_crash")
 
 
 def test_unknown_event_type_acked(billing_env, monkeypatch):

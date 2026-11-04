@@ -1077,6 +1077,7 @@ window.kicraftInitLayoutCanvas = function(cfg) {
     svg.querySelectorAll('.ml-leaf').forEach(g => {
       const ip = g.getAttribute('data-instance-path');
       g.addEventListener('pointerdown', (e) => {
+        if (e.button !== 0) return;
         if (e.target && e.target.getAttribute('data-role') === 'rotate') {
           startRotate(svg, ip, e);
         } else {
@@ -1333,6 +1334,7 @@ window.kicraftInitLayoutCanvas = function(cfg) {
     svg.querySelectorAll('.ml-edge').forEach(el => {
       const side = el.getAttribute('data-edge');
       el.addEventListener('pointerdown', (e) => {
+        if (e.button !== 0) return;
         // Capture the screen-to-viewBox scale ONCE at mousedown.
         // Edge drags grow/shrink the outline, which changes the
         // viewBox, which shifts the live CTM. If we reused
@@ -1512,12 +1514,9 @@ window.kicraftInitLayoutCanvas = function(cfg) {
       return deepCopy(state.outline_shape);
     },
     setMountingHoles: function(holes) {
-      // Replace the entire mounting-holes list. Caller (Python side)
-      // owns count + per-hole corner/inset choices; the canvas owns
-      // positions: a pushed hole without pos keeps the live pos of the
-      // hole it replaces (matched by index). Defaulting a pos-less hole
-      // to the outline min corner used to teleport every unpinned hole
-      // to the board's top-left, which Save then persisted.
+      // The panel owns the hole settings; the canvas owns its live
+      // position. Prefer the current position over a stale saved pos
+      // supplied again by the panel after an outline or corner change.
       applyWithHistory(() => {
         const prevByIndex = {};
         for (const h of state.mounting_holes) prevByIndex[h.index] = h;
@@ -1528,12 +1527,12 @@ window.kicraftInitLayoutCanvas = function(cfg) {
           return {
             index: idx,
             corner: h.corner || null,
-            inset_mm: Number(h.inset_mm) || 5.0,
+            inset_mm: h.inset_mm == null ? 5.0 : Number(h.inset_mm),
             screw: typeof h.screw === 'string' && h.screw ? h.screw : 'M3',
-            pos: h.pos ? { x: Number(h.pos.x) || 0, y: Number(h.pos.y) || 0 }
-                 : (prev ? prev.pos
-                         : { x: (out.min.x + out.max.x) / 2,
-                             y: (out.min.y + out.max.y) / 2 }),
+            pos: prev ? prev.pos
+                 : (h.pos ? { x: Number(h.pos.x) || 0, y: Number(h.pos.y) || 0 }
+                          : { x: (out.min.x + out.max.x) / 2,
+                              y: (out.min.y + out.max.y) / 2 }),
           };
         });
       });

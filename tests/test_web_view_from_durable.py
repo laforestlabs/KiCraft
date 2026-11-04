@@ -18,6 +18,8 @@ from pathlib import Path
 import pytest
 from nicegui.testing.user_simulation import user_simulation
 
+from account_fixtures import seed_project
+
 from kicraft.server import web
 from kicraft.server.accounts import AccountStore
 from kicraft.server.config import LEGAL_VERSION
@@ -44,7 +46,8 @@ def test_ensure_workspace_resolves_durable_project_dir(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-not-used")
     store = AccountStore(tmp_path / "accounts.db", tmp_path / "projects")
     acct = store.create_user("ew@example.com", "hunter2hunter2")
-    pid = store.create_project(acct.id, "bmp280 reader")
+    acct = store.consume_verification_token(store.create_verification_token(acct.id))
+    pid = seed_project(store, acct.id, "bmp280 reader")
     base = store.projects_dir / str(acct.id) / str(pid)  # the durable build dir
     (base / ".kicraft").mkdir(parents=True)               # the build's native layout
     shutil.copy2(STATE_FIXTURE, base / ".kicraft" / "state.json")
@@ -65,6 +68,35 @@ def test_ensure_workspace_resolves_durable_project_dir(tmp_path, monkeypatch):
         assert web._ensure_workspace(state) == base  # idempotent no-op
     finally:
         web._STORE = prev
+
+
+def test_attempt_archive_contains_only_current_project(tmp_path):
+    import json
+    import zipfile
+
+    metadata = tmp_path / ".kicraft"
+    metadata.mkdir()
+    old = tmp_path / "generated" / "attempt-1" / "BOARD"
+    current = tmp_path / "generated" / "attempt-2" / "BOARD"
+    for directory, content in ((old, "old"), (current, "current")):
+        directory.mkdir(parents=True)
+        (directory / "BOARD.kicad_sch").write_text(content)
+    (current / ".experiments").mkdir()
+    (current / ".experiments" / "internal").write_text("internal")
+    state_path = metadata / "state.json"
+    state_path.write_text(json.dumps({"project_stem": "BOARD",
+                                      "artifacts": {"project_dir": str(old)}}))
+    assert web._current_attempt_project_dir(tmp_path, 2, "build") is None
+    assert web._zip_generated(tmp_path, None) is None
+    state_path.write_text(json.dumps({"project_stem": "BOARD",
+                                      "artifacts": {"project_dir": str(current)}}))
+    resolved = web._current_attempt_project_dir(tmp_path, 2, "build")
+    assert resolved == current
+    archive = web._zip_generated(tmp_path, resolved)
+    with zipfile.ZipFile(archive) as zf:
+        assert zf.namelist() == ["BOARD/BOARD.kicad_sch"]
+        assert zf.read("BOARD/BOARD.kicad_sch") == b"current"
+    assert web._project_signals(tmp_path)["generated"] == str(current)
 
 
 # --------------- integration: reopen reads durable, makes NO workspace -----------
@@ -95,6 +127,7 @@ async def reopen_harness(tmp_path):
         real_fetch = web_mod._safe_fetch
         web_mod._safe_fetch = lambda key: web_mod._FETCH_ERROR
         acct = store.create_user(EMAIL, PASSWORD)
+        acct = store.consume_verification_token(store.create_verification_token(acct.id))
         store.record_consent(acct.id, LEGAL_VERSION)
         try:
             yield u, web_mod, store, acct, work_dir
@@ -112,7 +145,7 @@ async def reopen_harness(tmp_path):
 def _persist_durable(store, user_id, brief, stem):
     """A finished project laid down as build-in-place does (.kicraft/state.json), WITH
     a generated tree so reopen resolves the schematic dir."""
-    pid = store.create_project(user_id, brief)
+    pid = seed_project(store, user_id, brief)
     base = store.projects_dir / str(user_id) / str(pid)
     (base / ".kicraft").mkdir(parents=True)
     (base / "brief.txt").write_text(brief, encoding="utf-8")

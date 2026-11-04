@@ -94,21 +94,29 @@
       if (localStorage.getItem('kc_welcome_dismissed')) {
         var nodes = document.querySelectorAll('.kc-welcome');
         for (var i = 0; i < nodes.length; i++) { nodes[i].style.display = 'none'; }
+        return nodes.length > 0;
       }
     } catch (e) { /* private mode / disabled storage: leave the card visible */ }
+    return true;
   }
 
   function boot() {
-    dismissWelcome();
-    // NiceGUI mounts elements over the socket after load, so poll for the textarea.
-    var tries = 0;
+    // NiceGUI mounts elements over the socket after load, so wait for both the
+    // textarea and any previously dismissed welcome card.
+    var tries = 0, boxReady = false, welcomeReady = false;
     var iv = setInterval(function () {
-      var el = findBox();
-      if (el && !el.dataset.kcAnim) {
-        el.dataset.kcAnim = '1';
-        clearInterval(iv);
-        start(el);
-      } else if (++tries > 300) {       // ~60s ceiling, then give up quietly
+      if (!welcomeReady) welcomeReady = dismissWelcome();
+      if (!boxReady) {
+        var el = findBox();
+        if (el) {
+          boxReady = true;
+          if (!el.dataset.kcAnim) {
+            el.dataset.kcAnim = '1';
+            start(el);
+          }
+        }
+      }
+      if ((boxReady && welcomeReady) || ++tries > 300) {
         clearInterval(iv);
       }
     }, 200);

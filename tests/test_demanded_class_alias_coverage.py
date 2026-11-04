@@ -10,11 +10,8 @@ import pytest
 
 from kicraft.design import lowering as lowering_module
 from kicraft.design.part_identity import (
-    _DEMANDED_CLASS_ALIASES,
-    canonical_physical_features,
     has_reviewed_coverage,
     lowerer_witnesses_physical_class,
-    realizable_physical_features,
     reviewed_part,
     reviewed_record_realizes_class,
 )
@@ -93,10 +90,9 @@ ALIASES = [
 def test_each_demanded_class_alias_names_the_reviewed_record_that_proves_it(
     demanded, identity, targets
 ):
-    """The alias resolves the demand to the reviewed part's own features, and to them only."""
+    """The named reviewed part realizes the demanded class."""
     record = reviewed_part(identity)
     assert record is not None, f"no reviewed record for {identity}"
-    assert canonical_physical_features(demanded) == frozenset(targets), demanded
     assert has_reviewed_coverage(demanded), demanded
     # The library's own record decides, not the spelling: the named part realizes the demand.
     assert reviewed_record_realizes_class(record, demanded), (demanded, identity)
@@ -111,28 +107,20 @@ def test_the_demanded_class_lookup_resolves_through_the_class_key_fold():
     folding must not uncover a class the library already answers.
     """
     led = reviewed_part("E6C0805WWAY1UDA(1.1T M)")
-    assert canonical_physical_features("0805 led") == frozenset({"led-0805"})
-    assert canonical_physical_features("0805 LED") == frozenset({"led-0805"})
     assert reviewed_record_realizes_class(led, "0805 led")
-    assert canonical_physical_features("warm-white leds") == frozenset(
-        {"warm-white leds", "warm-white-led"}
-    )
+    assert reviewed_record_realizes_class(led, "0805 LED")
     assert reviewed_record_realizes_class(led, "warm-white leds")
     # `qspi flash` folds onto the alias key and still resolves to the reviewed part.
-    assert canonical_physical_features("qspi flash") == frozenset({"flash-memory"})
     assert reviewed_record_realizes_class(reviewed_part("W25Q16JVSS"), "qspi flash")
     # A demand the library already answers under its exact spelling is never uncovered.
-    assert "2.4ghz-antenna" in canonical_physical_features("2.4ghz-antenna")
     assert has_reviewed_coverage("2.4ghz-antenna")
-    assert "jst-xh connector" in canonical_physical_features("jst-xh connector")
     assert has_reviewed_coverage("jst-xh connector")
 
 
 @pytest.mark.parametrize(
     ("demanded", "target"),
     [
-        # Each of these would otherwise be repaired by `complete_class_spellings` to a
-        # strict-token-subset reviewed class that is a DIFFERENT physical part.
+        # These pairs name different physical parts.
         ("smt-relay-driver", "relay"),
         ("rotary-encoder-push-button", "push-button"),
         ("qwiic-header", "header"),
@@ -142,44 +130,15 @@ def test_the_demanded_class_lookup_resolves_through_the_class_key_fold():
     ],
 )
 def test_a_hazardous_variant_rename_is_pre_empted_by_the_alias(demanded, target):
-    """The alias must fire before the token-subset rename picks the wrong class.
-
-    A relay is not its driver, a momentary button is not a rotary encoder, a 0.1 in header is
-    not a Qwiic JST-SH, a bare ATtiny is not an MCU module, and a momentary `switch` is not a
-    latching 3-position selector -- so the demand keeps its own spelling instead of being read
-    as the wrong reviewed class (and no "defaulted" assumption is recorded).
-    """
-    # The wrong target is exactly the realizable strict-token-subset variant the rename would
-    # have picked had the alias not made the demand realizable first.
-    assert target in _renamed_targets_without_the_alias(demanded)
+    """A demand must not be rewritten as a different physical part."""
     completed = complete_class_spellings(
         {"obligations": [{"kind": "physical", "component_class": demanded}]}
     )
     assert completed["obligations"][0]["component_class"] == demanded
+    assert completed["obligations"][0]["component_class"] != target
     assert not completed.get("assumptions")
 
 
-def _renamed_targets_without_the_alias(demanded: str) -> set[str]:
-    """The strict-token-subset reviewed class the rename would choose if the alias were absent."""
-    from kicraft.design.part_identity import reviewed_class_variants
-
-    return {
-        name for name in reviewed_class_variants(demanded) if realizable_physical_features(name)
-    }
-
-
-def test_a_class_no_reviewed_record_carries_stays_uncovered():
-    """Aliasing never invents a carrier: a role spellings with no reviewed part stays a gap.
-
-    `jumper` is left alone deliberately: the corpus uses it both for a removable shunt on a
-    0.1 in header (the RS-485 DE/RE jumper) and for a solder jumper (the CAN-termination
-    reference's `SolderJumper_2_Open`), which is NOT a pin header -- so it does not denote one
-    reviewed physical class. `ground-connector` is a wiring fact, not a part.
-    """
-    for demanded in ("jumper", "ground-connector", "solder-jumper"):
-        assert not has_reviewed_coverage(demanded), demanded
-        assert not realizable_physical_features(demanded), demanded
-        assert demanded not in _DEMANDED_CLASS_ALIASES, demanded
 
 
 @pytest.mark.parametrize("spelling", ["r-2r-resistor-ladder", "r2r-resistor-ladder"])

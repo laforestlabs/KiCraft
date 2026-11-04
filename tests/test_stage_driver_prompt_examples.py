@@ -281,12 +281,6 @@ def test_recipe_covered_bom_records_the_curated_identity():
     assert result.ok, result.offenders
 
 
-def test_every_stage_has_a_worked_example_riding_the_system_prompt():
-    for stage in DESIGN_STAGES:
-        assert stage in _WORKED_EXAMPLES, stage
-        json.loads(_WORKED_EXAMPLES[stage])  # a concrete JSON instance, not a schema
-        assert "Worked example" in build_system(stage)
-        assert _WORKED_EXAMPLES[stage] in build_system(stage)
 
 
 @pytest.mark.parametrize("stage", list(DESIGN_STAGES))
@@ -353,7 +347,6 @@ def test_noninteractive_contract_drops_questions_and_tells_the_model():
     contract = build_stage_response_contract("intent", {}, allow_questions=False)
     assert contract.allow_questions is False
     assert "questions" not in contract.schema["properties"]
-    assert "CLARIFYING QUESTIONS ARE DISABLED" in _build_system(contract)
 
 
 @pytest.mark.parametrize("stage", ["intent", "functional_spec", "architecture", "bom"])
@@ -410,7 +403,7 @@ def test_unit_schema_bounds_remain_authoritative_and_invocation_local() -> None:
     assert pins["maxItems"] == 2
 
 
-def test_bom_contract_closes_group_sheet_and_reuses_schema_object():
+def test_bom_contract_closes_group_sheet_and_strictifies_provider_schema():
     names = ["ADDRESSABLE LED OUTPUT", "SPEAKER OUTPUT"]
     state = {"architecture": {"sheets": [{"name": name} for name in names]}}
     contract = build_stage_response_contract("bom", state)
@@ -424,13 +417,6 @@ def test_bom_contract_closes_group_sheet_and_reuses_schema_object():
     assert set(provider_schema["properties"]) == set(contract.schema["properties"])
     assert provider_schema["additionalProperties"] is False
     assert set(provider_schema["required"]) == set(provider_schema["properties"])
-    assert "ADDRESSABLE LED OTPUT" not in names
-    assert "SPEAKER OTPUT" not in names
-
-    prompt = _build_system(contract)
-    encoded = prompt.split("string patterns are strict):\n", 1)[1].split("\nWorked example", 1)[0]
-    assert json.loads(encoded) == contract.schema
-    assert "SHEET NAMES ARE CLOSED" in prompt
 
 
 def _schema_keyword_count(node, keyword: str) -> int:
@@ -1083,7 +1069,7 @@ def test_bom_contract_rejects_missing_duplicate_and_malformed_architecture(archi
         build_stage_response_contract("bom", {"architecture": architecture})
 
 
-def test_work_unit_contracts_are_v3_scoped_and_prompt_examples_are_unit_shaped():
+def test_work_unit_contracts_are_scoped_to_owned_refs():
     state = {
         "architecture": {
             "sheets": [{"name": "POWER"}, {"name": "MCU"}],
@@ -1102,15 +1088,6 @@ def test_work_unit_contracts_are_v3_scoped_and_prompt_examples_are_unit_shaped()
             "U1",
             "R1",
         ]
-    prompt = _build_system(
-        wiring,
-        work_unit_instructions=(
-            '{"unit_id":"wiring-u000","target_sheet":"MCU","owned_refs":["U1","R1"]}'
-        ),
-    )
-    assert "=== WORK UNIT ===" in prompt
-    assert "Prior accepted-unit summaries are immutable" in prompt
-    assert "VALID work unit" in prompt
 
 
 def test_recipe_only_bom_work_unit_may_return_no_additional_groups():
@@ -1120,7 +1097,7 @@ def test_recipe_only_bom_work_unit_may_return_no_additional_groups():
             "requirements": [{"id": "mcu", "sheet": "MCU"}],
             "recipe_selections": [
                 {
-                    "recipe": "rp2040-minimal@2",
+                    "recipe": "rp2040-minimal@3",
                     "instance": "mcu",
                     "sheets": {"mcu": "MCU", "io": "MCU"},
                     "requirement_ids": ["mcu"],

@@ -1,5 +1,5 @@
 {
-  "content_hash": "sha256:6912d4ba7f44e10640ce992d3ebdf867a7716f5eca90a3f30a9e3c16a8680c0c",
+  "content_hash": "sha256:fc220018d6029bd83f3031b59feca0fa4b36d780f6f0bf0b0298a2e49a100b42",
   "datasheet_url": "https://www.injoinic.com/upload/files/2024/1/26015432-2c8b97fa97879ab9.pdf",
   "description": "Bidirectional USB-PD 3.0 buck-boost power-bank IC. Negotiates PD source (discharge) and sink (charge) on a single USB-C port. External 4-switch H-bridge for the buck-boost stage; integrated charger control and LED bar driver.",
   "footprint_name": "QFN-48-1EP_7x7mm_P0.5mm_EP5.1x5.1mm",

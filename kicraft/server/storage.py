@@ -74,17 +74,29 @@ def _read_project_stem(ws: Path) -> str | None:
     return None
 
 
-def _discover_generated_dir(ws: Path | None) -> Path | None:
-    """The synthesized project dir (``generated/<STEM>/``) in a workspace, found by
-    inspection so the schematic stays viewable even when a run FAILS and no
-    project_stem was recorded. Prefers the committed stem, then any subdir that
-    actually holds schematic sheets. None until synthesis has written a sheet."""
+def _discover_generated_dir(ws: Path | None, *, stem: str | None = None) -> Path | None:
+    """Resolve the current artifact directory, falling back only for legacy state."""
     if ws is None:
         return None
     gen = ws / "generated"
     if not gen.is_dir():
         return None
-    stem = _read_project_stem(ws)
+    try:
+        state = json.loads(_state_path(ws).read_text(encoding="utf-8"))
+        artifacts = state.get("artifacts") or {}
+        recorded = artifacts.get("project_dir") if isinstance(artifacts, dict) else None
+    except (OSError, ValueError, AttributeError):
+        recorded = None
+    if recorded:
+        project = Path(recorded)
+        if not project.is_absolute():
+            project = ws / project
+        try:
+            project.resolve().relative_to(gen.resolve())
+        except ValueError:
+            return None
+        return project if project.is_dir() and any(project.glob("*.kicad_sch")) else None
+    stem = stem or _read_project_stem(ws)
     if stem and any((gen / stem).glob("*.kicad_sch")):
         return gen / stem
     for d in sorted(gen.iterdir()):
@@ -98,8 +110,4 @@ def _persisted_generated_dir(dir_path, stem) -> Path | None:
     stem first then by inspection, so it resolves even for legacy/odd-named runs."""
     if not dir_path:
         return None
-    base = Path(dir_path)
-    if stem and (base / "generated" / stem).is_dir() \
-            and any((base / "generated" / stem).glob("*.kicad_sch")):
-        return base / "generated" / stem
-    return _discover_generated_dir(base)
+    return _discover_generated_dir(Path(dir_path), stem=stem)

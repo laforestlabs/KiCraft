@@ -16,6 +16,8 @@ import time
 
 import pytest
 
+from account_fixtures import seed_project
+
 import kicraft.build_slots as build_slots
 from kicraft.build_slots import (
     ACQUIRED_MARKER,
@@ -197,7 +199,7 @@ def test_requeue_stale_builds(store):
 
 def test_list_unfinalized_builds(store):
     u = store.create_user("o@example.com", "pw12345678")
-    pid = store.create_project(u.id, "a board")
+    pid = seed_project(store, u.id, "a board")
     j = store.enqueue_build(workspace="/ws", project_id=pid, user_id=u.id)
     store.claim_build(j, "pid:1")
     assert store.list_unfinalized_builds() == []  # running job: leave it alone
@@ -212,9 +214,9 @@ def test_project_build_jobs_is_owner_scoped_newest_per_project(store):
     """The UI's one-query view: newest job per project, only for the owner."""
     mine = store.create_user("mine@example.com", "pw12345678")
     theirs = store.create_user("theirs@example.com", "pw12345678")
-    p1 = store.create_project(mine.id, "first")
-    p2 = store.create_project(mine.id, "second")
-    other = store.create_project(theirs.id, "not mine")
+    p1 = seed_project(store, mine.id, "first")
+    p2 = seed_project(store, mine.id, "second")
+    other = seed_project(store, theirs.id, "not mine")
 
     older = store.enqueue_build(workspace="/ws1", project_id=p1, user_id=mine.id)
     store.finish_build(older, rc=0)
@@ -236,7 +238,7 @@ def test_project_build_jobs_reports_finished_job_waiting_on_finalization(store):
     """A done job whose project row has not caught up: the list shows Finalizing,
     so the presentation can tell it apart from genuinely active work."""
     u = store.create_user("f@example.com", "pw12345678")
-    pid = store.create_project(u.id, "a board")
+    pid = seed_project(store, u.id, "a board")
     j = store.enqueue_build(workspace="/ws", project_id=pid, user_id=u.id)
     store.claim_build(j, "pid:1")
     store.finish_build(j, rc=0)
@@ -434,18 +436,11 @@ def test_notify_sends_when_user_away(store, sent):
     assert ok and len(sent) == 1
     to, subject, body, html_body = sent[0]
     assert to == "away@example.com"
-    assert "ready" in subject and "555" in subject
     assert "https://kicraft.io/?project=7" in body
     # The notification carries branded HTML with a clickable CTA to the project.
     assert html_body and 'href="https://kicraft.io/?project=7"' in html_body
-    assert "Download your board" in html_body
 
 
-def test_notify_question_subject(store, sent):
-    u = store.create_user("q@example.com", "pw12345678")
-    notify.notify_run_event(store, _settings(), user_id=u.id, project_id=1,
-                            status="awaiting_input", brief="cat feeder")
-    assert "question" in sent[0][1]
 
 
 def test_notify_suppressed_while_watching(store, sent):

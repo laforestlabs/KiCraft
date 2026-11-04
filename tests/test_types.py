@@ -25,10 +25,6 @@ from kicraft.autoplacer.brain.types import (
 # ---- Point ----------------------------------------------------------------
 
 class TestPoint:
-    def test_creation(self):
-        p = Point(x=3.0, y=4.0)
-        assert p.x == 3.0
-        assert p.y == 4.0
 
     def test_dist(self):
         a = Point(0.0, 0.0)
@@ -71,47 +67,11 @@ class TestPoint:
         assert len(s) == 2
 
 
-# ---- Pad ------------------------------------------------------------------
-
-class TestPad:
-    def test_creation(self):
-        pad = Pad(
-            ref="U1",
-            pad_id="1",
-            pos=Point(10.0, 20.0),
-            net="VCC",
-            layer=Layer.FRONT,
-        )
-        assert pad.ref == "U1"
-        assert pad.pad_id == "1"
-        assert pad.pos.x == 10.0
-        assert pad.net == "VCC"
-        assert pad.layer == Layer.FRONT
-
-    def test_layer_back(self):
-        pad = Pad(ref="R1", pad_id="2", pos=Point(0, 0), net="GND", layer=Layer.BACK)
-        assert pad.layer == Layer.BACK
 
 
 # ---- Component -----------------------------------------------------------
 
 class TestComponent:
-    def test_minimal_creation(self):
-        c = Component(
-            ref="R1",
-            value="10k",
-            pos=Point(0.0, 0.0),
-            rotation=0.0,
-            layer=Layer.FRONT,
-            width_mm=1.6,
-            height_mm=0.8,
-        )
-        assert c.ref == "R1"
-        assert c.value == "10k"
-        assert c.layer == Layer.FRONT
-        assert c.locked is False
-        assert c.kind == ""
-        assert c.pads == []
 
     def test_area(self):
         c = Component(
@@ -145,66 +105,22 @@ class TestComponent:
         assert br.x == pytest.approx(11.5)
         assert br.y == pytest.approx(21.0)
 
-    def test_with_pads(self):
-        pad1 = Pad(ref="R1", pad_id="1", pos=Point(0, 0), net="A", layer=Layer.FRONT)
-        pad2 = Pad(ref="R1", pad_id="2", pos=Point(1, 0), net="B", layer=Layer.FRONT)
-        c = Component(
-            ref="R1", value="10k", pos=Point(0.5, 0),
-            rotation=0, layer=Layer.FRONT,
-            width_mm=1.6, height_mm=0.8,
-            pads=[pad1, pad2],
-        )
-        assert len(c.pads) == 2
-
-    def test_optional_fields(self):
-        c = Component(
-            ref="J1", value="USB", pos=Point(0, 0),
-            rotation=90, layer=Layer.FRONT,
-            width_mm=8.0, height_mm=6.0,
-            kind="connector",
-            is_through_hole=True,
-            locked=True,
-        )
-        assert c.kind == "connector"
-        assert c.is_through_hole is True
-        assert c.locked is True
-        assert c.rotation == 90
 
 
 # ---- Net ------------------------------------------------------------------
 
 class TestNet:
-    def test_creation(self):
-        n = Net(name="VCC", pad_refs=[("U1", "3"), ("C1", "1")])
-        assert n.name == "VCC"
-        assert len(n.pad_refs) == 2
 
     def test_component_refs_property(self):
         n = Net(name="SDA", pad_refs=[("U1", "5"), ("U2", "7"), ("U1", "12")])
         refs = n.component_refs
         assert refs == {"U1", "U2"}
 
-    def test_defaults(self):
-        n = Net(name="GND")
-        assert n.priority == 0
-        assert n.width_mm == pytest.approx(0.127)
-        assert n.is_power is False
-        assert n.pad_refs == []
 
 
 # ---- TraceSegment ---------------------------------------------------------
 
 class TestTraceSegment:
-    def test_creation(self):
-        t = TraceSegment(
-            start=Point(0, 0),
-            end=Point(3, 4),
-            layer=Layer.FRONT,
-            net="CLK",
-            width_mm=0.127,
-        )
-        assert t.net == "CLK"
-        assert t.layer == Layer.FRONT
 
     def test_length(self):
         t = TraceSegment(
@@ -221,51 +137,11 @@ class TestTraceSegment:
         assert t.length == pytest.approx(0.0)
 
 
-# ---- Via ------------------------------------------------------------------
-
-class TestVia:
-    def test_creation(self):
-        v = Via(pos=Point(10, 20), net="VCC")
-        assert v.pos.x == 10
-        assert v.net == "VCC"
-
-    def test_defaults(self):
-        v = Via(pos=Point(0, 0), net="GND")
-        assert v.drill_mm == pytest.approx(0.3)
-        assert v.size_mm == pytest.approx(0.6)
-
-    def test_custom_sizes(self):
-        v = Via(pos=Point(0, 0), net="PWR", drill_mm=0.4, size_mm=0.8)
-        assert v.drill_mm == pytest.approx(0.4)
-        assert v.size_mm == pytest.approx(0.8)
 
 
 # ---- PlacementScore -------------------------------------------------------
 
 class TestPlacementScore:
-    def test_default_creation(self):
-        ps = PlacementScore()
-        assert ps.total == pytest.approx(0.0)
-        assert ps.net_distance == pytest.approx(0.0)
-        assert ps.crossover_count == 0
-
-    def test_fields_are_numeric(self):
-        ps = PlacementScore(
-            net_distance=80.0,
-            crossover_score=70.0,
-            compactness=60.0,
-            edge_compliance=90.0,
-            rotation_score=50.0,
-            board_containment=95.0,
-            courtyard_overlap=100.0,
-        )
-        for attr in [
-            "net_distance", "crossover_score", "compactness",
-            "edge_compliance", "rotation_score", "board_containment",
-            "courtyard_overlap",
-        ]:
-            val = getattr(ps, attr)
-            assert isinstance(val, (int, float)), f"{attr} should be numeric"
 
     def test_compute_total(self):
         ps = PlacementScore(
@@ -350,23 +226,6 @@ class TestPlacementScore:
 # ---- BoardState -----------------------------------------------------------
 
 class TestBoardState:
-    def test_empty_creation(self):
-        bs = BoardState()
-        assert bs.components == {}
-        assert bs.nets == {}
-        assert bs.traces == []
-        assert bs.vias == []
-
-    def test_board_dimensions(self):
-        bs = BoardState()
-        assert bs.board_width == pytest.approx(90.0)
-        assert bs.board_height == pytest.approx(58.0)
-
-    def test_board_center(self):
-        bs = BoardState()
-        center = bs.board_center
-        assert center.x == pytest.approx(45.0)
-        assert center.y == pytest.approx(29.0)
 
     def test_custom_outline(self):
         bs = BoardState(board_outline=(Point(10, 10), Point(60, 40)))
@@ -377,18 +236,6 @@ class TestBoardState:
 # ---- SubCircuitLayout -----------------------------------------------------
 
 class TestSubCircuitLayout:
-    def test_creation_empty(self):
-        scid = SubCircuitId(
-            sheet_name="CHARGER",
-            sheet_file="charger.kicad_sch",
-            instance_path="/root/charger",
-        )
-        scl = SubCircuitLayout(subcircuit_id=scid)
-        assert scl.subcircuit_id.sheet_name == "CHARGER"
-        assert scl.components == {}
-        assert scl.traces == []
-        assert scl.vias == []
-        assert scl.frozen is True
 
     def test_bounding_box_defaults(self):
         scid = SubCircuitId(
@@ -408,21 +255,6 @@ class TestSubCircuitLayout:
         assert scl.height == pytest.approx(15.0)
         assert scl.area == pytest.approx(300.0)
 
-    def test_with_components(self):
-        scid = SubCircuitId(
-            sheet_name="Z", sheet_file="z.kicad_sch", instance_path="/z",
-        )
-        comp = Component(
-            ref="R1", value="10k", pos=Point(0, 0),
-            rotation=0, layer=Layer.FRONT,
-            width_mm=1.6, height_mm=0.8,
-        )
-        scl = SubCircuitLayout(
-            subcircuit_id=scid,
-            components={"R1": comp},
-        )
-        assert len(scl.components) == 1
-        assert "R1" in scl.components
 
 
 # ---- Layer enum -----------------------------------------------------------

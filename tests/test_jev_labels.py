@@ -61,8 +61,8 @@ def test_answers_are_cached_content_addressed(tmp_path, monkeypatch):
 
     monkeypatch.setattr(jev_labels, "decide", fake_decide)
     cache = tmp_path / "cache"
-    first = label_hits([_hit(run_dir)], cache_dir=cache)
-    second = label_hits([_hit(run_dir)], cache_dir=cache)
+    first = label_hits([_hit(run_dir)], cache_dir=cache, guard=object())
+    second = label_hits([_hit(run_dir)], cache_dir=cache, guard=object())
 
     assert len(calls) == 1, "the second pass must read the cache, not the provider"
     assert first[0].value == second[0].value
@@ -87,10 +87,9 @@ def test_below_floor_answers_are_kept_but_flag_not_confident(tmp_path, monkeypat
             for question in questions
         ],
     )
-    labels = label_hits([_hit(run_dir)], cache_dir=tmp_path / "cache", confidence=0.7)
-    assert labels[0].value == labels[0].value  # the reading is kept as data
+    labels = label_hits([_hit(run_dir)], cache_dir=tmp_path / "cache", confidence=0.7, guard=object())
     assert labels[0].confident is False
-    assert "below confidence floor" in labels[0].notes[0]
+    assert labels[0].value == jev_labels._GROUND_RETURN_MISSING
 
 
 def test_agreement_compares_hand_labels_only():
@@ -117,3 +116,36 @@ def test_agreement_compares_hand_labels_only():
     }}
     assert agreement([label], disagreeing)["agreed"] == 0
     assert agreement([label], {})["checked"] == 0
+
+
+def test_unavailable_and_malformed_cached_labels_are_not_confident(tmp_path, monkeypatch):
+    from kicraft.server.decision_layer import DecisionUnavailable
+
+    run_dir = _run_with_candidate(tmp_path)
+    def unavailable(*args, **kwargs):
+        raise DecisionUnavailable("offline")
+    monkeypatch.setattr(jev_labels, "decide", unavailable)
+    label = label_hits([_hit(run_dir)], cache_dir=tmp_path / "cache", guard=object())[0]
+    assert label.confident is False
+    assert label.notes == ("unavailable: offline",)
+
+    question = question_for(_hit(run_dir))
+    cached = jev_labels._label_from_record(
+        str(run_dir), "functional_spec", "functional_spec_partial_ground_flow", question,
+        {"value": question.options[0], "confidence": 0.9, "confident": ["unavailable"]},
+        cached=True, floor=0.7,
+    )
+    assert cached.confident is False
+
+
+def test_label_call_respects_real_spend_guard_kill_switch(tmp_path, monkeypatch):
+    import pytest
+    from kicraft.server import decision_layer
+    from kicraft.server.config import Settings
+    from kicraft.server.spend_guard import KillSwitchEngaged, SpendGuard
+
+    run_dir = _run_with_candidate(tmp_path)
+    monkeypatch.setattr(decision_layer, "_api_key", lambda: "offline")
+    guard = SpendGuard(Settings(api_key="offline", ledger_path=tmp_path / "ledger.db", kill_switch=True))
+    with pytest.raises(KillSwitchEngaged):
+        label_hits([_hit(run_dir)], cache_dir=tmp_path / "cache", guard=guard, run_id="jev-test")

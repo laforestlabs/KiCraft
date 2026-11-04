@@ -67,25 +67,23 @@ done
 # KiCraft process, and this script must agree with what the running processes actually use.
 slot_count() {
     local raw="" n=""
-    raw="$(grep -E '^KICRAFT_BUILD_SLOTS=' "$REPO/.env" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"'"'"' ')"
-    if [ -n "$raw" ] && [ "$raw" -ge 0 ] 2>/dev/null; then
+    if [ "${KICRAFT_BUILD_SLOTS+x}" ]; then
+        raw="$KICRAFT_BUILD_SLOTS"
+    else
+        raw="$(grep -E '^KICRAFT_BUILD_SLOTS=' "$REPO/.env" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"'"'"' ')"
+    fi
+    if [[ "$raw" =~ ^-?[0-9]+$ ]]; then
+        [ "$raw" -lt 0 ] && raw=0
         echo "$raw"; return
     fi
-    n=$(( $(nproc) / 6 ))
+    n=$(( $(nproc --all) / 6 ))
     [ "$n" -lt 1 ] && n=1
     echo "$n"
 }
 
-# "held" when a non-blocking flock on the slot file fails (flock is the authoritative owner).
-slot_held() {
-    if command -v flock >/dev/null 2>&1; then
-        ! flock -n "$1" true 2>/dev/null
-    else
-        return 1   # cannot tell without flock: report free
-    fi
-}
-
-slot_holders() { lsof -t "$1" 2>/dev/null | sort -u; }
+# The helper checks /proc/locks against the file's device/inode and confirms
+# that flock is held. An invisible owner or a changing file is an error.
+slot_holders() { python3 "$REPO/deploy/build-slot-process.py" owners "$1"; }
 
 ppid_of()   { ps -o ppid= -p "$1" 2>/dev/null | tr -d ' '; }
 etimes_of() { ps -o etimes= -p "$1" 2>/dev/null | tr -d ' '; }
@@ -95,14 +93,57 @@ cmdline_of() { tr '\0' ' ' < "/proc/$1/cmdline" 2>/dev/null | sed 's/ *$//'; }
 is_build_cmd() { printf '%s' "$1" | grep -Eq "$BUILD_CMD_RE"; }
 
 declare -a FINDINGS=()
+declare -A STARTS=() UIDS=() IDENTITY_SEEN=() LOCK_FILES=()
+
+# Capture kernel process identity, not just a reusable PID. A missing or
+# malformed proc entry is never eligible for a signal.
+snapshot_identity() {
+    local pid="$1" line rest start uid
+    local -a fields
+    [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+    IFS= read -r line < "/proc/$pid/stat" 2>/dev/null || return 1
+    rest="${line##*) }"
+    [[ "$rest" != "$line" ]] || return 1
+    read -r -a fields <<< "$rest"
+    start="${fields[19]:-}"
+    uid="$(stat -c %u "/proc/$pid" 2>/dev/null)" || return 1
+    [[ "$start" =~ ^[0-9]+$ && "$uid" =~ ^[0-9]+$ ]] || return 1
+    printf '%s %s\n' "$start" "$uid"
+}
+
+remember_identity() {
+    local pid="$1" identity start uid
+    [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+    [[ -z "${IDENTITY_SEEN[$pid]:-}" ]] || return 0
+    IDENTITY_SEEN["$pid"]=1
+    identity="$(snapshot_identity "$pid")" || return 1
+    read -r start uid <<< "$identity"
+    STARTS["$pid"]="$start"
+    UIDS["$pid"]="$uid"
+}
+
+identity_still_reapable() {
+    local pid="$1" identity start uid cmd
+    [[ -n "${STARTS[$pid]:-}" && -n "${UIDS[$pid]:-}" ]] || return 1
+    identity="$(snapshot_identity "$pid")" || return 1
+    read -r start uid <<< "$identity"
+    [[ "$start" = "${STARTS[$pid]}" && "$uid" = "${UIDS[$pid]}" ]] || return 1
+    [ "$(ppid_of "$pid")" = 1 ] || return 1
+    cmd="$(cmdline_of "$pid")"
+    is_build_cmd "$cmd"
+}
 
 scan_once() {
     local total held=0 idx file pid ppid age rss cmd cls
     total="$(slot_count)"
     FINDINGS=()
+    STARTS=()
+    UIDS=()
+    IDENTITY_SEEN=()
+    LOCK_FILES=()
 
     if [ ! -d "$SLOTS_DIR" ]; then
-        echo "slots dir absent ($SLOTS_DIR): no build has ever taken a slot here"
+        [ "$JSON" -eq 1 ] || echo "slots dir absent ($SLOTS_DIR): no build has ever taken a slot here"
         return 0
     fi
 
@@ -110,32 +151,33 @@ scan_once() {
     for (( i = 0; i < total; i++ )); do
         file="$SLOTS_DIR/slot_$i.lock"
         [ -e "$file" ] || continue
-        if ! slot_held "$file"; then
+        local holders
+        if ! holders="$(slot_holders "$file")"; then
+            [ "$JSON" -eq 0 ] && printf 'slot %s/%s  owner unknown\n' "$((i + 1))" "$total"
+            FINDINGS+=("unknown|0|0|0|slot_$i owner unavailable")
+            continue
+        fi
+        if [ -z "$holders" ]; then
             [ "$QUIET" -eq 1 ] || [ "$JSON" -eq 1 ] || printf 'slot %s/%s  free\n' "$((i + 1))" "$total"
             continue
         fi
         held=$(( held + 1 ))
-        local holders
-        holders="$(slot_holders "$file")"
-        if [ -z "$holders" ]; then
-            [ "$JSON" -eq 0 ] && printf 'slot %s/%s  HELD (holder unknown: no lsof; flock is held)\n' "$((i + 1))" "$total"
-            FINDINGS+=("unknown|0|0|0|slot_$i held with no visible holder")
-            continue
-        fi
         for pid in $holders; do
+            remember_identity "$pid" || true
             ppid="$(ppid_of "$pid")"; age="$(etimes_of "$pid")"
             rss="$(rss_of "$pid")"; cmd="$(cmdline_of "$pid")"
             cls="busy"
             if [ "${ppid:-0}" = "1" ] && is_build_cmd "$cmd"; then
                 if [ "${age:-0}" -ge "$MIN_AGE_S" ]; then
                     cls="leak"
+                    LOCK_FILES["$pid"]="$file"
                     FINDINGS+=("leak|$pid|$age|$rss|$cmd")
                 else
                     cls="orphan-young"
                 fi
             fi
             { [ "$QUIET" -eq 1 ] || [ "$JSON" -eq 1 ]; } && [ "$cls" = "busy" ] && continue
-            printf 'slot %s/%s  %-12s pid=%s ppid=%s age=%ss rss=%sKB cmd=%s\n' \
+            [ "$JSON" -eq 1 ] || printf 'slot %s/%s  %-12s pid=%s ppid=%s age=%ss rss=%sKB cmd=%s\n' \
                 "$((i + 1))" "$total" "$cls" "$pid" "${ppid:-?}" "${age:-?}" "${rss:-?}" "${cmd:0:90}"
         done
     done
@@ -144,6 +186,7 @@ scan_once() {
     local orphan
     while read -r orphan; do
         [ -z "$orphan" ] && continue
+        remember_identity "$orphan" || true
         local oc
         oc="$(cmdline_of "$orphan")"
         is_build_cmd "$oc" || continue
@@ -153,7 +196,13 @@ scan_once() {
         for (( i = 0; i < total; i++ )); do
             f="$SLOTS_DIR/slot_$i.lock"
             [ -e "$f" ] || continue
-            if slot_holders "$f" | grep -qx "$orphan"; then oheld="slot_$i"; fi
+            local owners
+            if ! owners="$(slot_holders "$f")"; then
+                oheld="unknown"
+            elif printf '%s\n' "$owners" | grep -qx "$orphan"; then
+                oheld="slot_$i"
+                break
+            fi
         done
         [ "$JSON" -eq 0 ] && printf 'orphan build process pid=%s age=%ss rss=%sKB holds=%s cmd=%s\n' \
             "$orphan" "${oage:-?}" "${orss:-?}" "$oheld" "${oc:0:80}"
@@ -179,14 +228,26 @@ leak_count() {
 finding_count() { [ "${#FINDINGS[@]}" -eq 0 ] && echo 0 || printf '%s\n' "${#FINDINGS[@]}"; }
 
 reap_findings() {
-    local row pid
+    local row pid failed=0
+    local -A term_sent=()
     for row in "${FINDINGS[@]:-}"; do
         case "$row" in
             leak\|*|orphan\|*)
                 pid="${row#*|}"; pid="${pid%%|*}"
-                echo "reaping pid=$pid (${row%%|*})"
-                kill -TERM "$pid" 2>/dev/null
+                [[ -z "${term_sent[$pid]:-}" ]] || continue
+                if identity_still_reapable "$pid"; then
+                    echo "reaping pid=$pid (${row%%|*})" >&2
+                    if python3 "$REPO/deploy/build-slot-process.py" signal "$pid" "${STARTS[$pid]}" "${UIDS[$pid]}" 15 "${LOCK_FILES[$pid]:-}"; then
+                        term_sent["$pid"]=1
+                    else
+                        failed=1
+                    fi
+                else
+                    echo "refusing to signal pid=$pid: process identity or eligibility changed" >&2
+                    failed=1
+                fi
                 ;;
+            unknown\|*) failed=1 ;;
         esac
     done
     sleep 5
@@ -194,13 +255,14 @@ reap_findings() {
         case "$row" in
             leak\|*|orphan\|*)
                 pid="${row#*|}"; pid="${pid%%|*}"
-                if kill -0 "$pid" 2>/dev/null; then
-                    echo "pid=$pid survived SIGTERM; sending SIGKILL"
-                    kill -KILL "$pid" 2>/dev/null
+                if [[ -n "${term_sent[$pid]:-}" ]] && identity_still_reapable "$pid"; then
+                    echo "pid=$pid survived SIGTERM; sending SIGKILL" >&2
+                    python3 "$REPO/deploy/build-slot-process.py" signal "$pid" "${STARTS[$pid]}" "${UIDS[$pid]}" 9 "${LOCK_FILES[$pid]:-}" || true
                 fi
                 ;;
         esac
     done
+    [ "$failed" -eq 0 ] && [ "${#term_sent[@]}" -gt 0 ]
 }
 
 json_report() {
@@ -209,11 +271,13 @@ json_report() {
     for row in "${FINDINGS[@]:-}"; do
         [ -z "$row" ] && continue
         IFS='|' read -r kind pid age rss cmd <<<"$row"
-        cmd="${cmd//\"/\\\"}"
-        rows+="{\"kind\":\"$kind\",\"pid\":$pid,\"age_s\":${age:-0},\"rss_kb\":${rss:-0},\"cmd\":\"${cmd:0:160}\"},"
+        cmd="$(printf '%s' "${cmd:0:160}" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')"
+        rows+="{\"kind\":\"$kind\",\"pid\":$pid,\"age_s\":${age:-0},\"rss_kb\":${rss:-0},\"cmd\":$cmd},"
     done
-    printf '{"slots_total":%s,"findings":[%s],"slots_dir":"%s","min_age_s":%s}\n' \
-        "$total" "${rows%,}" "$SLOTS_DIR" "$MIN_AGE_S"
+    local dir_json
+    dir_json="$(printf '%s' "$SLOTS_DIR" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')"
+    printf '{"slots_total":%s,"findings":[%s],"slots_dir":%s,"min_age_s":%s}\n' \
+        "$total" "${rows%,}" "$dir_json" "$MIN_AGE_S"
 }
 
 pass() {
@@ -221,8 +285,7 @@ pass() {
     local count; count="$(finding_count)"
     if [ "$JSON" -eq 1 ]; then json_report; fi
     if [ "$count" -gt 0 ] && [ "$REAP" -eq 1 ]; then
-        reap_findings
-        return 2
+        if reap_findings; then return 2; else return 1; fi
     fi
     [ "$count" -gt 0 ] && return 1
     return 0

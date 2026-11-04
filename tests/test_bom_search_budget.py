@@ -96,6 +96,11 @@ def test_mpncache_survives_corrupt_file(monkeypatch, tmp_path):
     monkeypatch.setenv(mpn_cache.ENV_PATH, str(tmp_path / "cache.json"))
     (tmp_path / "cache.json").write_text("{not json")
     assert mpn_cache.get("anything") is None  # corrupt -> empty, no raise
+    for corrupt in (b"[]", b"null", b"\xff"):
+        (tmp_path / "cache.json").write_bytes(corrupt)
+        assert mpn_cache.get("BMP280") is None
+        mpn_cache.put("BMP280", "C83291", "test")
+        assert mpn_cache.get("BMP280")["lcsc"] == "C83291"
 
 
 def test_cacheable_only_freezes_precise_identifiers():
@@ -207,6 +212,14 @@ def test_bundle_identity_uses_named_columns():
         "bmp280-bosch-sensor:BMP280",
         "bmp280-bosch-sensor:LGA-8",
     )
+
+
+def test_bundle_sourcing_id_does_not_match_a_longer_id():
+    rows = _LIST_PARTS_SAMPLE.replace("C83291", "C832912")
+    assert _bundle_identity_from_rows(rows, "C83291") is None
+    selected = _new_bundle_rows(rows, "C83291", None)
+    assert "bmp280-bosch-sensor:BMP280" not in selected
+    assert "call list_parts" in selected
 
 
 def test_resolve_and_bundle_is_primary_atomic_tool_and_caches_success(tmp_path):

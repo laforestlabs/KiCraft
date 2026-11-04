@@ -26,6 +26,8 @@ from pathlib import Path
 import pytest
 from nicegui.testing.user_simulation import user_simulation
 
+from account_fixtures import seed_project
+
 from kicraft.server import web
 from kicraft.server.accounts import AccountStore
 from kicraft.server.config import LEGAL_VERSION
@@ -278,6 +280,70 @@ def test_recorded_user_answer_is_consent_for_a_required_part():
     assert a["level"] == "generated"  # approved: no longer a review gap
     assert any("User-approved change" in line for line in a["evidence"])
 
+@pytest.mark.parametrize("text,answer", [
+    ("Replace CP2102N with CH340C?", "No"),
+    ("What voltage for CP2102N?", "3.3V"),
+    ("Replace CP2102N with CH340C?", "Yes, but not CH340C"),
+])
+def test_required_substitution_needs_explicit_approval(text, answer):
+    state = _clean_state(
+        intent={"named_parts": ["CP2102N"]},
+        bom={"parts": [{"ref": "U1"}], "substitutions": [
+            {"wanted": "CP2102N", "got": "CH340C"}]},
+        open_questions=[{"text": text, "answer": answer}])
+    assurance = _assurance(state)
+    assert assurance["deviations"][0]["consent"] is None
+    assert assurance["level"] == "review_required"
+
+
+def test_missing_build_verdicts_do_not_claim_fabrication_clean():
+    assurance = _assurance(_clean_state(), gate={}, synth={})
+    assert assurance["level"] == "review_required"
+    assert any("fabrication gate" in item for item in assurance["limitations"])
+    assert any("synthesis-check" in item for item in assurance["limitations"])
+
+
+def test_cached_audit_is_rechecked_when_verified_artifact_changes(tmp_path):
+    from kicraft.eval.product_acceptance import _artifact_inventory
+
+    (tmp_path / ".kicraft").mkdir()
+    (tmp_path / ".kicraft" / "state.json").write_text('{"project_stem":"board"}')
+    board = tmp_path / "generated" / "board"
+    board.mkdir(parents=True)
+    schematic = board / "board.kicad_sch"
+    schematic.write_text("original")
+    (tmp_path / "eval").mkdir()
+    audit = {
+        "schema_version": 2, "product_success": True, "errors": [],
+        "obligations": {"r": {"status": "pass", "reason": None}},
+        "artifacts": [{"path": "generated/board/board.kicad_sch",
+                       "sha256": web._file_sha256(schematic)}],
+        "artifact_inventory": _artifact_inventory(tmp_path),
+    }
+    (tmp_path / "eval" / "product_acceptance.json").write_text(json.dumps(audit))
+    assert web._project_signals(tmp_path)["fulfillment"]["verified"] is True
+    schematic.write_text("changed")
+    fulfillment = web._project_signals(tmp_path)["fulfillment"]
+    assert fulfillment["verified"] is False
+    assert "changed" in fulfillment["stale"]
+
+
+def test_unhashed_acceptance_evidence_cannot_verify_current_export(tmp_path):
+    (tmp_path / "board.zip").write_bytes(b"first export")
+    (tmp_path / "eval").mkdir()
+    evidence = {
+        "schema_version": 1,
+        "generation": {"status": "pass"},
+        "fabrication": {"status": "pass", "artifact_paths": ["board.zip"]},
+        "software_fulfillment": {"status": "pass"},
+        "common_gates": {"erc": "pass", "drc": "pass"},
+        "obligations": {"r": {"status": "pass"}},
+    }
+    (tmp_path / "eval" / "acceptance_evidence.json").write_text(json.dumps(evidence))
+    assert web._verified_fulfillment(tmp_path, None)["verified"] is False
+    (tmp_path / "board.zip").write_bytes(b"different export")
+    assert web._verified_fulfillment(tmp_path, None)["verified"] is False
+
 
 def test_model_selected_substitution_is_an_automatic_action_not_a_limitation():
     state = _clean_state(
@@ -325,7 +391,7 @@ def test_reopen_derives_the_same_reading_from_persistence():
 def _write_durable_project(store, user_id: int, brief: str) -> tuple[int, Path]:
     """A finished project laid down as build-in-place does: .kicraft/state.json, a
     generated tree, and the fab package."""
-    pid = store.create_project(user_id, brief)
+    pid = seed_project(store, user_id, brief)
     root = store.projects_dir / str(user_id) / str(pid)
     (root / ".kicraft").mkdir(parents=True)
     (root / "brief.txt").write_text(brief, encoding="utf-8")
@@ -482,6 +548,7 @@ def _presentation(store, pid: int) -> dict:
 def test_current_hash_bound_audit_promotes_the_project_to_verified(tmp_path):
     store = AccountStore(tmp_path / "accounts.db", tmp_path / "projects")
     acct = store.create_user("a@example.com", "hunter2hunter2")
+    acct = store.consume_verification_token(store.create_verification_token(acct.id))
     pid, root = _write_durable_project(store, acct.id, "bmp280 reader")
     previous = web._STORE
     web._STORE = store
@@ -539,6 +606,7 @@ async def page_harness(tmp_path):
         real_fetch = web_mod._safe_fetch
         web_mod._safe_fetch = lambda key: web_mod._FETCH_ERROR
         acct = store.create_user(EMAIL, PASSWORD)
+        acct = store.consume_verification_token(store.create_verification_token(acct.id))
         store.record_consent(acct.id, LEGAL_VERSION)
         try:
             yield u, web_mod, store, acct

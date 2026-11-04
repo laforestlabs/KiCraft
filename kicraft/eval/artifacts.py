@@ -26,6 +26,34 @@ def _find_glob(run_dir: Path, pattern: str) -> Path | None:
     return hits[0] if hits else None
 
 
+def find_erc_report(run_dir: Path, synth: dict) -> Path | None:
+    """Use the current ERC receipt when present; only legacy checks use discovery."""
+    checks = synth.get("checks") or []
+    rows = [
+        row for row in checks
+        if isinstance(row, dict) and row.get("name") == "9.12 ERC"
+    ]
+    explicit = [row for row in rows if "report_path" in row]
+    if not explicit:
+        return _find_glob(run_dir, "*_erc.rpt")
+    if len(rows) != 1:
+        return None
+    name = explicit[0]["report_path"]
+    if not isinstance(name, str) or not name or Path(name).name != name:
+        return None
+    root = Path(run_dir).resolve()
+    matches = []
+    for path in root.rglob("*_erc.rpt"):
+        if path.name != name or not path.is_file():
+            continue
+        try:
+            path.resolve().relative_to(root)
+        except (OSError, ValueError):
+            continue
+        matches.append(path)
+    return matches[0] if len(matches) == 1 else None
+
+
 def _load_json(path: Path | None):
     if not path or not path.exists():
         return None
@@ -96,7 +124,25 @@ def analyze_state(path: Path | None) -> dict:
 
 
 def count_generated(run_dir: Path) -> dict:
-    pcb = list(run_dir.rglob("*.kicad_pcb"))
-    sch = list(run_dir.rglob("*.kicad_sch"))
-    pro = list(run_dir.rglob("*.kicad_pro"))
+    state = _load_json(Path(run_dir) / ".kicraft" / "state.json")
+    artifacts = state.get("artifacts") if isinstance(state, dict) else None
+    directory = artifacts.get("project_dir") if isinstance(artifacts, dict) else None
+    if directory is not None:
+        root = Path(run_dir).resolve()
+        if not isinstance(directory, str) or not directory:
+            return {"pcb": 0, "sch": 0, "pro": 0, "synthesized": False}
+        project = Path(directory)
+        if not project.is_absolute():
+            project = root / project
+        try:
+            project.resolve().relative_to((root / "generated").resolve())
+        except (OSError, ValueError):
+            return {"pcb": 0, "sch": 0, "pro": 0, "synthesized": False}
+        pcb = list(project.glob("*.kicad_pcb"))
+        sch = list(project.glob("*.kicad_sch"))
+        pro = list(project.glob("*.kicad_pro"))
+    else:
+        pcb = list(run_dir.rglob("*.kicad_pcb"))
+        sch = list(run_dir.rglob("*.kicad_sch"))
+        pro = list(run_dir.rglob("*.kicad_pro"))
     return {"pcb": len(pcb), "sch": len(sch), "pro": len(pro), "synthesized": bool(pcb or sch)}

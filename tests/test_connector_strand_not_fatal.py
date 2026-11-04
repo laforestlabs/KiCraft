@@ -155,6 +155,23 @@ def test_verify_gate_fails_on_courtyard_overlap(monkeypatch, tmp_path):
     assert gate["courtyard"] == 2
 
 
+def test_verify_gate_rejects_unmeasured_or_empty_courtyard(monkeypatch, tmp_path):
+    _patch_validate(
+        monkeypatch, accepted=True,
+        drc={"shorts": 0, "unconnected": 0, "courtyard": 1},
+    )
+    monkeypatch.setattr(cli_app, "_connector_stranded_refs", lambda _pcb: [])
+    for measured in (None, []):
+        monkeypatch.setattr(
+            "kicraft.autoplacer.courtyard_overlap.measure_courtyard_overlaps",
+            lambda _p, result=measured: result,
+        )
+        gate = cli_app._verify_routed_board(tmp_path / "board.kicad_pcb")
+        assert gate["fab_acceptable"] is False
+        assert gate["courtyard_minor_only"] is False
+        assert "courtyard_unmeasured" in gate["reasons"]
+
+
 def test_verify_gate_minor_courtyard_is_warning_not_fail(monkeypatch, tmp_path):
     # A fraction-of-a-mm courtyard clip on an electrically-perfect board is a
     # WARNING (board still fab-acceptable + 3D-rendered), not a hard failure.

@@ -48,9 +48,9 @@ def _bound_source(voltage: float):
 @pytest.mark.parametrize(
     ("recipe", "output_voltage", "input_voltage"),
     (
-        ("tps54331-adjustable@1", 3.3, 18.0),
-        ("tps54331-adjustable@1", 3.3, 24.0),
-        ("tps54331-12v-1a@1", 12.0, 18.0),
+        ("tps54331-adjustable@2", 3.3, 18.0),
+        ("tps54331-adjustable@2", 3.3, 24.0),
+        ("tps54331-12v-1a@2", 12.0, 18.0),
     ),
 )
 def test_fxl_max_and_typical_test_points_do_not_prove_a_current_rating(

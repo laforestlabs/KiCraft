@@ -64,6 +64,7 @@ def test_build_maps_rotation_invariant_footprint_match():
     # That is the SAME footprint and must still match (real KC-8AG6FU stepper
     # leaves differ only this way).
     rep = _rep_components()
+    rep["U1"]["width_mm"], rep["U1"]["height_mm"] = 7.0, 4.0
     sib = _sib_components()
     # swap w/h on the sibling driver to mimic a 90deg-rotated solve
     sib["U2"]["width_mm"], sib["U2"]["height_mm"] = (

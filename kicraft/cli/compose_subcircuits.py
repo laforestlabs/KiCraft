@@ -1795,11 +1795,13 @@ def _compose_artifacts(
         parent_local_solved = {
             ref: copy.deepcopy(comp) for ref, comp in parent_local.items()
         }
+        user_positioned_refs: set[str] = set()
         manual_pl_by_ref = manual_layout.parent_local_by_ref()
         for ref, mpl in manual_pl_by_ref.items():
             comp = parent_local_solved.get(ref)
             if comp is not None:
-                comp.pos = mpl.pos
+                _move_component_to(comp, mpl.pos)
+                user_positioned_refs.add(ref)
 
         # Editor mounting-hole panel: holes map onto the parent's
         # existing parent-local mounting-hole footprints in alphabetical
@@ -1811,7 +1813,6 @@ def _compose_artifacts(
         # the stamp subprocess executes (see _parent_stamp_subprocess
         # synthesize_footprints). All are marked user-positioned so the
         # constraint snap below leaves them alone.
-        user_positioned_refs: set[str] = set()
         gui_holes = sorted(
             getattr(manual_layout, "mounting_holes", []) or [],
             key=lambda h: h.index,
@@ -3712,6 +3713,17 @@ def main(argv: list[str] | None = None) -> int:
         pin_status = pins.ensure_applied(project_dir / ".experiments")
         for leaf_key, status in pin_status.items():
             print(f"[pins] {leaf_key}: {status}")
+        missing_pins = sorted(
+            leaf_key for leaf_key, status in pin_status.items()
+            if status == "snapshot-missing"
+        )
+        if missing_pins:
+            print(
+                "error: pinned leaf snapshots are missing or incomplete: "
+                + ", ".join(missing_pins),
+                file=sys.stderr,
+            )
+            return 1
 
     try:
         loaded_artifacts = load_solved_artifacts(list(artifact_dirs))

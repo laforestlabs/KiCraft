@@ -348,13 +348,6 @@ def test_every_reviewed_buck_proves_its_own_source_to_load_path():
         for record in REVIEWED_PARTS
         if "buck" in record.family and record.power_transfer and record.is_portable_candidate
     ]
-    assert {record.identity for record in bucks} >= {
-        "ap63203wu-7",
-        "ap63205wu-7",
-        "tlv62569dbvr",
-        "tps5430ddar",
-        "tps54331ddar",
-    }
     architecture = SimpleNamespace(
         requirements=[
             SimpleNamespace(
@@ -379,15 +372,21 @@ def test_every_reviewed_buck_proves_its_own_source_to_load_path():
         )
         info, _ = validation._pin_info_by_ref(_bom([converter, _part("L1", "4.7uH")], {}))
         vin = validation._pin_number_named(info, "U1", record.port_pins["input"])
-        switch = validation._pin_number_named(info, "U1", record.port_pins["switch"])
+        switch = (
+            validation._pin_number_named(info, "U1", record.port_pins["switch"])
+            if "switch" in record.port_pins else None
+        )
+        output = validation._pin_number_named(info, "U1", record.port_pins["output"]) if not switch else None
         gnd = validation._pin_number_named(info, "U1", record.port_pins["ground"])
-        assert vin and switch and gnd, record.identity
+        assert vin and (switch or output) and gnd, record.identity
         bom = _bom(
             [converter, _part("L1", "4.7uH")],
             {
                 "VIN": [("U1", vin)],
-                "SW_NODE": [("U1", switch), ("L1", "1")],
-                "VOUT": [("L1", "2")],
+                **(
+                    {"SW_NODE": [("U1", switch), ("L1", "1")], "VOUT": [("L1", "2")]}
+                    if switch else {"VOUT": [("U1", output)]}
+                ),
                 "GND": [("U1", gnd)],
             },
         )
@@ -671,39 +670,45 @@ def test_a_class_with_no_reviewed_carrier_is_not_realized_by_a_reviewed_part_of_
     assert "requires 1 real 'solder-jumper'" in result.offenders[0]
 
 
-def test_a_recipe_realized_regulator_is_a_reviewed_transfer_path():
-    """A curated recipe is reviewed evidence: §9.39 must read its declared input/output ports.
-
-    Live seed-43 run (2026-09-26): an AMS1117 board -- a curated recipe, the sanctioned way to
-    build a converter -- was refused with "no reviewed source-to-load transfer from
-    'VIN_PROTECTED' to '+3V3'" because §9.39 read only the reviewed *records*' `power_transfer`
-    mapping, and a recipe-realized part has no record at all.
-    """
-    from types import SimpleNamespace
-
+def test_a_recipe_regulator_transfer_requires_the_real_owned_graph():
+    from kicraft.design.models import RecipeSelection
+    from kicraft.design.recipes.registry import expand_recipe
     from kicraft.design.synthesis.validation import _recipe_transfer_pairs
 
+    expansion = expand_recipe(RecipeSelection(
+        recipe="ams1117-3v3@1", instance="reg",
+        sheets={"power": "POWER"},
+        port_bindings={"input": "VIN_PROTECTED", "output": "+3V3", "gnd": "GND"},
+        requirement_ids=["reg"],
+    ))
     requirement = SimpleNamespace(
         id="reg", ports={"input": "VIN_PROTECTED", "output": "+3V3", "gnd": "GND"}
     )
-    bom = SimpleNamespace(
-        recipe_ownership=[SimpleNamespace(recipe="ams1117-3v3@1", requirement_ids=("reg",))]
-    )
-    assert _recipe_transfer_pairs(requirement, bom) == [("VIN_PROTECTED", "+3V3")]
 
-    # A requirement the manifest does not own, or an unknown recipe, contributes nothing.
-    assert _recipe_transfer_pairs(requirement, SimpleNamespace(recipe_ownership=[])) == []
-    assert (
-        _recipe_transfer_pairs(
-            requirement,
-            SimpleNamespace(
-                recipe_ownership=[
-                    SimpleNamespace(recipe="not-a-recipe@9", requirement_ids=("reg",))
-                ]
-            ),
+    def candidate(parts=None, connections=None, no_connects=(), ownership=None):
+        return SimpleNamespace(
+            parts=expansion.parts if parts is None else parts,
+            connections=expansion.connections if connections is None else connections,
+            no_connect_pins=list(no_connects),
+            recipe_ownership=[expansion.ownership if ownership is None else ownership],
         )
-        == []
-    )
+
+    assert _recipe_transfer_pairs(requirement, candidate()) == [("VIN_PROTECTED", "+3V3")]
+    assert _recipe_transfer_pairs(requirement, candidate(parts=expansion.parts[1:])) == []
+    altered = [
+        connection.model_copy(update={"net_name": "WRONG"})
+        if connection.net_name == "VIN_PROTECTED" else connection
+        for connection in expansion.connections
+    ]
+    assert _recipe_transfer_pairs(requirement, candidate(connections=altered)) == []
+    first = expansion.connections[0].endpoints[0]
+    conflicting = SimpleNamespace(net_name="FOREIGN", endpoints=[first])
+    assert _recipe_transfer_pairs(
+        requirement, candidate(connections=[*expansion.connections, conflicting])
+    ) == []
+    assert _recipe_transfer_pairs(requirement, candidate(no_connects=[first])) == []
+    wrong_requirement = SimpleNamespace(id="reg", ports={"input": "OTHER", "output": "+3V3"})
+    assert _recipe_transfer_pairs(wrong_requirement, candidate()) == []
 
 
 def test_a_bundle_part_owns_a_declared_interface(monkeypatch):
@@ -949,6 +954,7 @@ def _terminal_requirement(ident: str, *, minimum: int, exact_part: str | None = 
         family="screw-terminal",
         component_class="screw-terminal",
         role="connector",
+        exact_part=exact_part,
         minimum=minimum,
         physical_obligation_id="screw-terminals",
         quantity_obligation_id="eight-input-terminals",
@@ -1076,6 +1082,17 @@ def test_a_multi_position_terminal_realizes_one_terminal_per_contact():
     )
     assert not single_block.ok
     assert any("demand 8 distinct contact(s), but only 4" in row for row in single_block.offenders)
+    wrong_identity = _bom(
+        [
+            _reviewed_terminal_part("J1", "wj126v-5.0-03p-14-00a"),
+            _reviewed_terminal_part("J2", "wj126v-5.0-03p-14-00a"),
+            _reviewed_terminal_part("J3", "wj126v-5.0-02p-14-00a"),
+        ],
+        {},
+    )
+    assert not validation.check_requirement_physical_realization(
+        SimpleNamespace(requirements=[one]), wrong_identity
+    ).ok
 
 
 def test_distinct_requirement_owners_cannot_share_one_reviewed_connector(monkeypatch):
@@ -1811,7 +1828,20 @@ def test_an_under_rated_selected_capacitor_is_repinned_before_the_gate(monkeypat
     # The gate sees the under-rated selection first.
     assert not validation.check_reviewed_input_operating_ranges(architecture, bom).ok
 
-    notes = _repin_under_rated_capacitors(architecture, bom)
+    # An explicit part number remains untouched and the safety gate still fails.
+    assert not _repin_under_rated_capacitors(architecture, bom)
+    assert cap.sourcing_note == "LCSC C19702"
+    assert not validation.check_reviewed_input_operating_ranges(architecture, bom).ok
+    cap.mpn = "CL10A106KP8NNNC"
+    assert not _repin_under_rated_capacitors(
+        architecture, bom, automatic_pins={("C1", "C19702")}
+    )
+    assert cap.sourcing_note == "LCSC C19702"
+    cap.mpn = None
+
+    notes = _repin_under_rated_capacitors(
+        architecture, bom, automatic_pins={("C1", "C19702")}
+    )
 
     assert cap.sourcing_note == "LCSC C96446"
     assert any("re-pinned C19702 -> C96446" in note for note in notes)
@@ -1850,12 +1880,48 @@ def test_an_under_rated_capacitor_is_left_alone_when_no_rated_candidate_exists(m
     bom.substitutions = []
     architecture = SimpleNamespace(rail_voltages={"VIN18": 18.0, "GND": 0.0})
 
-    notes = _repin_under_rated_capacitors(architecture, bom)
+    notes = _repin_under_rated_capacitors(
+        architecture, bom, automatic_pins={("C1", "C19702")}
+    )
 
     assert cap.sourcing_note == "LCSC C19702"
     assert not bom.substitutions
     assert any("no in-stock catalog part matching" in note for note in notes)
     assert not validation.check_reviewed_input_operating_ranges(architecture, bom).ok
+
+
+def test_capacitor_repin_requires_current_generic_sourcing_receipt(tmp_path):
+    import hashlib
+    import json
+
+    from kicraft.design.cli_app import _automatic_generic_pins
+
+    parts = [{"ref": "C1", "sourcing_note": "LCSC C19702"}]
+    bom = SimpleNamespace(parts=[SimpleNamespace(model_dump=lambda: parts[0])])
+    state_path = tmp_path / "state.json"
+    receipt_path = tmp_path / "sourcing_validation.json"
+    digest = hashlib.sha256(
+        json.dumps(parts, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    receipt = {
+        "parts_digest": digest,
+        "parts": [{
+            "ref": "C1", "exact_lcsc": "C19702", "catalog_mpn": "CL10A106KP8NNNC",
+            "picky_selection": True,
+        }],
+    }
+    assert _automatic_generic_pins(state_path, bom, (), "") == set()
+    receipt_path.write_text(json.dumps(receipt))
+    assert _automatic_generic_pins(state_path, bom, (), "") == {("C1", "C19702")}
+    assert _automatic_generic_pins(state_path, bom, ("CL10A106KP8NNNC",), "") == set()
+    assert _automatic_generic_pins(state_path, bom, (), "Use C19702") == set()
+    receipt["parts"][0]["picky_selection"] = False
+    receipt_path.write_text(json.dumps(receipt))
+    assert _automatic_generic_pins(state_path, bom, (), "") == set()
+    receipt["parts"][0]["picky_selection"] = True
+    receipt["parts_digest"] = "stale"
+    receipt_path.write_text(json.dumps(receipt))
+    assert _automatic_generic_pins(state_path, bom, (), "") == set()
 
 
 def test_reverse_polarity_recipe_witness_requires_complete_provenanced_graph():

@@ -19,6 +19,16 @@ RUN_ID="${RUN_ID:-i11}"                           # admin will list this as the 
 CLOUD_DIR="${CLOUD_DIR:-.kicraft/tuning/$RUN_ID}"  # relative to the cloud user's $HOME
 SSH_KEY="${SSH_KEY:-/boot/config/ssh/kicraft_tune_id}"
 # ----------------------------------------------------------------------------
+[[ "$CLOUD_DIR" =~ ^[A-Za-z0-9_./-]+$ ]] &&
+    [[ "$CLOUD_DIR" != /* && "/$CLOUD_DIR/" != *"/../"* && "$CLOUD_DIR" != -* ]] || {
+    echo "CLOUD_DIR must be a safe relative path without .. components" >&2
+    exit 2
+}
+[[ "$CLOUD" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]*@[A-Za-z0-9_][A-Za-z0-9_.-]*$ ]] || {
+    echo "CLOUD must be user@host" >&2
+    exit 2
+}
+
 
 SRC="$RUN_DIR/progress.json"
 if [ ! -f "$SRC" ]; then
@@ -26,7 +36,8 @@ if [ ! -f "$SRC" ]; then
     exit 0
 fi
 
-SSH="ssh -i $SSH_KEY -o StrictHostKeyChecking=accept-new"
-$SSH "$CLOUD" "mkdir -p '$CLOUD_DIR'"
-rsync -az -e "$SSH" "$SRC" "$CLOUD:$CLOUD_DIR/progress.json"
+ssh_args=(-i "$SSH_KEY" -o StrictHostKeyChecking=accept-new)
+ssh "${ssh_args[@]}" "$CLOUD" "mkdir -p -- '$CLOUD_DIR'"
+printf -v ssh_command '%q ' ssh "${ssh_args[@]}"
+rsync -az -e "$ssh_command" "$SRC" "$CLOUD:$CLOUD_DIR/progress.json"
 echo "[$(date '+%F %T')] synced $RUN_ID progress -> $CLOUD:$CLOUD_DIR/"

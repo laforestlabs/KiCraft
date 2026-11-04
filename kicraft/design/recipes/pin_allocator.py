@@ -486,10 +486,24 @@ def allocate_requirement_pins(
     explicit: list[RecipePinAllocation] = []
     for port_name, net in sorted(requirement.ports.items()):
         match = re.fullmatch(r"gpio[_-]?(\d+)", port_name, re.IGNORECASE)
-        if match is None or net in requested_nets:
+        if match is None or (fixed_port_pins is None and port_name in fixed_ports):
             continue
         pin = pins_by_gpio.get(int(match.group(1)))
         if pin is None:
+            raise PinAllocationError(
+                "conflicting_pin_capability",
+                f"explicit GPIO port {port_name!r} has no available physical pin",
+                requirement_id=requirement.id,
+            )
+        previous = next((row for row in explicit if row.net == net), None)
+        if previous is not None and previous.pin != pin.pin:
+            raise PinAllocationError(
+                "conflicting_pin_capability",
+                f"net {net!r} names multiple explicit GPIO pins",
+                requirement_id=requirement.id,
+            )
+        explicit.append(RecipePinAllocation(net=net, pin=pin.pin, capability="gpio"))
+        if net in requested_nets:
             continue
         requests.append(
             PinAllocationRequest(
@@ -499,7 +513,6 @@ def allocate_requirement_pins(
                 allow_strapping=True,
             )
         )
-        explicit.append(RecipePinAllocation(net=net, pin=pin.pin, capability="gpio"))
         requested_nets.add(net)
     if required_capabilities:
         requests_by_net = {request.net: request for request in requests}
@@ -575,6 +588,16 @@ def allocate_requirement_pins(
         existing=[*(existing or []), *explicit],
         requirement_id=requirement.id,
     )
+    explicit_by_net = {allocation.net: allocation.pin for allocation in explicit}
+    for allocation in allocations:
+        expected = explicit_by_net.get(allocation.net)
+        if expected is not None and allocation.pin != expected:
+            raise PinAllocationError(
+                "conflicting_pin_capability",
+                f"net {allocation.net!r} cannot retain explicitly requested pin {expected!r}; "
+                "repair the conflicting pin assignments",
+                requirement_id=requirement.id,
+            )
     if required_capabilities:
         for allocation in allocations:
             if (

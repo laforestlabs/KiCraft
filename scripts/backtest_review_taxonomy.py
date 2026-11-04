@@ -118,7 +118,9 @@ def main() -> int:
     print("\nRECALL -- corroborated-block rate on confirmed blockers "
           "(ordered same-model pass pairs):")
     print(f"  {'design':28s} {'area':20s} {DEFAULT_MODEL:>8s}  {'others(mean)':>12s}")
-    failures = []
+    failures = sorted(MUST_BLOCK - set(natural_blockers))
+    for did in failures:
+        print(f"  {did:28s} missing confirmed-blocker label   <-- REGRESSION")
     for did in natural_blockers:
         mm = rate(_corroborated, DEFAULT_MODEL, did)
         others = [rate(_corroborated, m, did) for m in other_models]

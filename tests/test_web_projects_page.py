@@ -19,6 +19,8 @@ import sys
 import pytest
 from nicegui.testing.user_simulation import user_simulation
 
+from account_fixtures import seed_project
+
 from kicraft.server.accounts import AccountStore
 from kicraft.server.config import LEGAL_VERSION
 
@@ -42,6 +44,7 @@ async def harness(tmp_path):
         web._STORE = store
         web._safe_fetch = lambda key: web._FETCH_ERROR  # no live pricing in tests
         acct = store.create_user(EMAIL, PASSWORD)
+        acct = store.consume_verification_token(store.create_verification_token(acct.id))
         store.record_consent(acct.id, LEGAL_VERSION)
         try:
             yield u, web, store, acct
@@ -53,7 +56,7 @@ async def harness(tmp_path):
 def _ok_project(store, user_id: int, brief: str, stem: str) -> int:
     """A finished ('ok') project row with a dir on disk, so the row renders its
     Open action and the visibility control (which only shows for status=='ok')."""
-    pid = store.create_project(user_id, brief)
+    pid = seed_project(store, user_id, brief)
     base = store.projects_dir / str(user_id) / str(pid)
     base.mkdir(parents=True, exist_ok=True)
     store.finish_project(pid, "ok", stem=stem, dir_path=str(base))
@@ -119,6 +122,34 @@ async def test_paid_plan_can_publish_a_project(harness):
     assert store.get_project(pid).is_public is True
 
 
+async def test_project_visibility_refreshes_after_external_change(harness):
+    import asyncio
+    from nicegui import ui
+
+    u, _web, store, acct = harness
+    store.set_tier(EMAIL, "max")
+    pid = _ok_project(store, acct.id, "private sensor", "SENSOR")
+    await _login(u)
+    await u.open("/projects")
+    await u.should_see("SENSOR")
+    assert next(iter(u.find(kind=ui.switch).elements)).value is False
+    store.set_visibility(pid, True)
+    await asyncio.sleep(2.5)
+    assert next(iter(u.find(kind=ui.switch).elements)).value is True
+
+
+async def test_downgraded_private_project_is_not_labeled_public(harness):
+    u, _web, store, acct = harness
+    store.set_tier(EMAIL, "max")
+    pid = _ok_project(store, acct.id, "private sensor", "SENSOR")
+    store.set_tier(EMAIL, "free")
+    assert store.get_project(pid).is_public is False
+    await _login(u)
+    await u.open("/projects")
+    await u.should_see("Private (retained after downgrade)")
+    await u.should_not_see("Public in the community browser")
+
+
 async def test_delete_requires_confirmation_then_removes_project(harness):
     """Delete pops a confirm dialog (project survives until confirmed), and the
     confirm purges the row from the store and the page."""
@@ -168,7 +199,7 @@ async def test_row_is_named_from_its_brief_before_any_commit(harness):
     """A project with no committed stem yet is identifiable by its brief -- never
     an empty or "(building...)" label."""
     u, web, store, acct = harness
-    store.create_project(acct.id, "USB-C temperature logger")
+    seed_project(store, acct.id, "USB-C temperature logger")
 
     await _login(u)
     await u.open("/projects")
@@ -179,7 +210,7 @@ async def test_committed_stem_appears_without_a_page_reload(harness):
     """The row is polled: a stem committed after the page loaded replaces the
     brief-derived title in place (and the brief stays the fallback)."""
     u, web, store, acct = harness
-    pid = store.create_project(acct.id, "usb battery bank")
+    pid = seed_project(store, acct.id, "usb battery bank")
 
     await _login(u)
     await u.open("/projects")
@@ -198,8 +229,9 @@ async def test_two_rows_keep_their_own_identity_across_updates(harness):
     """Rows are updated by project id: one project changing must never rewrite or
     reorder another's row."""
     u, web, store, acct = harness
-    first = store.create_project(acct.id, "first board")
-    second = store.create_project(acct.id, "second board")
+    store.set_tier(EMAIL, "pro")  # both rows must fit within the project quota
+    first = seed_project(store, acct.id, "first board")
+    second = seed_project(store, acct.id, "second board")
     store.finish_project(second, "failed")
 
     await _login(u)
@@ -218,7 +250,7 @@ async def test_queued_build_without_a_live_registry_is_not_interrupted(harness):
     _LIVE_RUNS the row must read as queued work, not as a lost run, and must not
     offer a duplicate build."""
     u, web, store, acct = harness
-    pid = store.create_project(acct.id, "queued board")
+    pid = seed_project(store, acct.id, "queued board")
     base = store.projects_dir / str(acct.id) / str(pid)
     base.mkdir(parents=True, exist_ok=True)
     store.enqueue_build(workspace=str(base), project_id=pid, user_id=acct.id)
@@ -234,7 +266,7 @@ async def test_failed_row_with_an_old_package_offers_no_download(harness):
     """A leftover zip from an earlier build is evidence, not a deliverable: a
     failed row never offers it (the rebuild action is what it offers instead)."""
     u, web, store, acct = harness
-    pid = store.create_project(acct.id, "doomed board")
+    pid = seed_project(store, acct.id, "doomed board")
     base = store.projects_dir / str(acct.id) / str(pid)
     (base / ".kicraft").mkdir(parents=True, exist_ok=True)
     (base / ".kicraft" / "state.json").write_text(

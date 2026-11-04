@@ -416,6 +416,8 @@ For each `Sheet`:
   2. Verify dependencies: every `kicad_symbol_libs` /
      `kicad_footprint_libs` entry exists on the target system. Fail
      fast with `SynthesisValidationError` if any are missing.
+     Custom library directories specified by `KICAD9_SYMBOL_DIR` and
+     `KICAD9_FOOTPRINT_DIR` are searched by type regardless of directory name.
   3. Compute the renumber map for this instance, with
      `project_refs` = the union of (a) refs already allocated to
      prior sheets in this synthesis run and (b) refs from any
@@ -553,9 +555,10 @@ A vertical stepper / wizard:
    - If `<library_dir>/<name>/` exists and contains a leaf with
      the same `version`, refuse and show "version already exists
      — bump and retry."
-   - Otherwise, atomically write the new leaf directory (write to
-     a sibling `.tmp` dir first, `os.replace` into place to avoid
-     partial writes).
+   - Stage the complete new leaf in a sibling temporary directory. When
+     replacing an existing version, keep it in a sibling backup until the
+     final rename succeeds; restore it if that rename fails. If restoration
+     fails, retain the backup directory for recovery.
    - Compute and store the `content_hash`.
    - Render and cache the three views into `renders/` and produce
      a 256×256 `thumbnail.png` (downscaled from `copper_both`).

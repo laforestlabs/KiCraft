@@ -23,6 +23,7 @@ import hashlib
 import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+import uuid
 from typing import Any, Iterable, Mapping, Sequence
 
 from kicraft.eval.check_replay import STATE_RELATIVE
@@ -210,6 +211,8 @@ def label_hits(
     cache_dir: Path = CORPUS_DIR,
     limit: int | None = None,
     refresh: bool = False,
+    guard=None,
+    run_id: str | None = None,
 ) -> list[Label]:
     """One Jev call per (run, stage); every answer cached content-addressed."""
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -245,17 +248,28 @@ def label_hits(
             pending.append((code, question, key))
         if not pending:
             continue
+        if guard is None:
+            from kicraft.server.config import Settings
+            from kicraft.server.spend_guard import SpendGuard
+
+            guard = SpendGuard(Settings.from_env())
+        if run_id is None:
+            run_id = f"jev-label-{uuid.uuid4().hex}"
+
 
         try:
             answers = {
                 answer.key: answer
-                for answer in decide(state, [question for _code, question, _key in pending], model=model)
+                for answer in decide(
+                    state, [question for _code, question, _key in pending],
+                    model=model, guard=guard, run_id=run_id, stage=stage,
+                )
             }
         except DecisionUnavailable as exc:
             for code, question, _key in pending:
                 labels.append(
                     Label(question.key, run, stage, code, question.prompt, None, 0.0, False,
-                          (f"unavailable: {exc}",))
+                          notes=(f"unavailable: {exc}",))
                 )
             continue
 
@@ -264,7 +278,7 @@ def label_hits(
             if answer is None:
                 labels.append(
                     Label(question.key, run, stage, code, question.prompt, None, 0.0, False,
-                          ("no answer returned",))
+                          notes=("no answer returned",))
                 )
                 continue
             record = {
@@ -298,7 +312,10 @@ def _label_from_record(
     data with a flag rather than a blank -- only a gate application would drop it.
     """
     sure = float(record.get("confidence") or 0.0)
-    confident = record.get("value") is not None and sure >= floor
+    confident = (
+        record.get("value") is not None and sure >= floor
+        and ("confident" not in record or isinstance(record["confident"], bool))
+    )
     notes = () if confident else (f"below confidence floor {floor} ({sure:.2f})",)
     return Label(
         key=question.key,
@@ -338,7 +355,7 @@ def agreement(labels: Iterable[Label], hand: Mapping[tuple[str, str, str], dict]
         checked += 1
         agree = str(truth["label"]).strip().casefold() == str(label.value).strip().casefold()
         matched += int(agree)
-        if label.confident:
+        if label.confident is True:
             confident_checked += 1
             confident_matched += int(agree)
         rows.append(

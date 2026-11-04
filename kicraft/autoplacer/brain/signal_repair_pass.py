@@ -121,6 +121,13 @@ def attempt_signal_unconnected_repair(
         re_drc = revalidation.get("drc") or {}
         unconnected_after = int(re_drc.get("unconnected", 0) or 0)
         shorts_after = int(re_drc.get("shorts", 0) or 0)
+        evidence_failed = (
+            re_drc.get("timed_out")
+            or re_drc.get("missing_cli")
+            or (re_drc.get("ran") and re_drc.get("returncode", 0) != 0)
+            or revalidation.get("python_exception")
+            or "empty_board" in revalidation.get("rejection_reasons", ())
+        )
         # A tie that closes an open by stamping ILLEGAL copper trades one
         # fab-gate rejection for another (run_10: the USB_DN tie grazed a
         # foreign pad at 0.05 mm and this gate accepted it on the
@@ -135,6 +142,7 @@ def attempt_signal_unconnected_repair(
         record["shorts"] = [shorts_before, shorts_after]
         if (unconnected_after < unconnected_before
                 and shorts_after <= shorts_before
+                and not evidence_failed
                 and not geometry_worse):
             print(
                 f"  {label} KEPT: unconnected "

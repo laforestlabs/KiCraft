@@ -9,6 +9,8 @@ from pathlib import Path
 import pytest
 from nicegui.testing.user_simulation import user_simulation
 
+from account_fixtures import seed_project
+
 from kicraft.server.accounts import AccountStore
 from kicraft.server.config import LEGAL_VERSION
 
@@ -37,6 +39,9 @@ async def harness(tmp_path):
         web._safe_fetch = lambda key: web._FETCH_ERROR
         admin = store.create_user(ADMIN_EMAIL, PASSWORD)
         owner = store.create_user(OWNER_EMAIL, PASSWORD)
+        admin = store.consume_verification_token(store.create_verification_token(admin.id))
+        owner = store.consume_verification_token(store.create_verification_token(owner.id))
+        store.set_tier(OWNER_EMAIL, "pro")
         store.record_consent(admin.id, LEGAL_VERSION)
         store.record_consent(owner.id, LEGAL_VERSION)
         store.set_role(ADMIN_EMAIL, "admin")
@@ -51,7 +56,7 @@ async def harness(tmp_path):
 def _persisted_private_project(store: AccountStore, owner_id: int) -> tuple[int, Path]:
     brief = "private USB-C environmental sensor"
     stem = "PRIVATE_SENSOR"
-    pid = store.create_project(owner_id, brief, is_public=False)
+    pid = seed_project(store, owner_id, brief, is_public=False)
     base = store.projects_dir / str(owner_id) / str(pid)
     gen = base / "generated" / stem
     gen.mkdir(parents=True, exist_ok=True)

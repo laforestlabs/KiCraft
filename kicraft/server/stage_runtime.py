@@ -858,8 +858,8 @@ def _questions_need_input(
         return False
     if auto_default_questions is False:
         return True
-    # Preserve legacy callers' one-round noninteractive behavior.
-    return not auto_default and not answers and not instruction
+    # Prior answers and redrive instructions do not answer a new question.
+    return not auto_default
 
 
 def _client_model(client) -> str | None:
@@ -1240,19 +1240,19 @@ def _audit_parsed_draft(pre_audit, parsed) -> list[dict]:
     ]
 
 
-def _pre_audit_hook(client):
+def _pre_audit_hook(client, *, run_id=None):
     """The pre-derivation audit hook for the stages that have one (architecture)."""
 
     def audit(parsed: dict):
         settings = getattr(client, "s", None)
         if not getattr(settings, "enable_draft_audit", False):
             return []
-        return _audit_architecture_draft(client, parsed)
+        return _audit_architecture_draft(client, parsed, run_id=run_id)
 
     return audit
 
 
-def _audit_architecture_draft(client, candidate: dict) -> list[models.StageDiagnostic]:
+def _audit_architecture_draft(client, candidate: dict, *, run_id=None) -> list[models.StageDiagnostic]:
     """Jev's typed findings about one architecture draft, billed and never blocking.
 
     The audit is one decision call over the draft (input-only pricing, a fraction of a cent at
@@ -1264,34 +1264,20 @@ def _audit_architecture_draft(client, candidate: dict) -> list[models.StageDiagn
         return []
     from . import draft_audit
 
-    def bill(usage) -> None:
-        guard = getattr(client, "guard", None)
-        record = getattr(guard, "record", None)
-        if not callable(record):
-            return
-        try:
-            record(
-                str(getattr(settings, "draft_audit_model", draft_audit.DEFAULT_MODEL)),
-                usage.get("input_tokens"),
-                usage.get("output_tokens"),
-                float(usage.get("cost") or 0.0),
-                meta={"stage": "architecture", "phase": "draft_audit"},
-            )
-        except Exception:  # accounting must never break a stage
-            pass
-
     try:
         return draft_audit.audit_architecture(
             candidate,
             model=str(getattr(settings, "draft_audit_model", draft_audit.DEFAULT_MODEL)),
             confidence=float(getattr(settings, "draft_audit_confidence", 0.7)),
-            recorder=bill,
+            guard=getattr(client, "guard", None),
+            run_id=run_id,
+            stage="architecture",
         )
     except Exception:
         return []
 
 
-def _name_reconciliation_decider(client, *, stage: str):
+def _name_reconciliation_decider(client, *, stage: str, run_id=None):
     """The typed-decision decider that reconciles naming differences, or None.
 
     One decider per drive: each batch of naming questions is a single typed decision
@@ -1308,23 +1294,8 @@ def _name_reconciliation_decider(client, *, stage: str):
 
     model = str(getattr(settings, "draft_audit_model", draft_audit.DEFAULT_MODEL))
 
-    def bill(usage) -> None:
-        guard = getattr(client, "guard", None)
-        record = getattr(guard, "record", None)
-        if not callable(record):
-            return
-        try:
-            record(
-                model,
-                usage.get("input_tokens"),
-                usage.get("output_tokens"),
-                float(usage.get("cost") or 0.0),
-                meta={"stage": stage, "phase": "name_reconciliation"},
-            )
-        except Exception:  # accounting must never break a stage
-            pass
 
-    return jev_decider(model=model, recorder=bill)
+    return jev_decider(model=model, guard=getattr(client, "guard", None), run_id=run_id, stage=stage)
 
 
 def _semantic_repair_message(stage: str, diagnostics: list[models.StageDiagnostic]) -> str:
@@ -1723,10 +1694,15 @@ def decode_stage_response(
         parsed = _extract_json(facts.raw)
         asked = parsed.get("questions")
         if isinstance(asked, list) and asked:
+            validated, _ = _normalize_stage_response(
+                prepared.stage, parsed, prepared.prompt_state
+            )
             return AttemptOutcome(
                 "questions",
                 {
-                    "candidate": {"questions": _normalize_questions(asked, prepared.stage)},
+                    "candidate": {
+                        "questions": _normalize_questions(validated["questions"], prepared.stage)
+                    },
                     "expanded_component_count": 0,
                 },
             )
@@ -2906,6 +2882,22 @@ def _drive_work_unit_stage(
                 )
                 return "recoverable", None, facts, parse_kind
             if isinstance(parsed.get("questions"), list) and parsed["questions"]:
+                try:
+                    parsed, _ = _normalize_stage_response(stage, parsed, prompt_state)
+                except StageSchemaError as exc:
+                    record(
+                        active_client,
+                        unit=unit,
+                        unit_attempt=unit_attempt,
+                        call_mode=call_mode,
+                        outcome="invalid_schema",
+                        facts=facts,
+                        schema_error=_redacted_schema_error(exc),
+                        aggregate_round=aggregate_round,
+                        aggregate_signature=aggregate_signature,
+                        candidate_retained=False,
+                    )
+                    return "recoverable", parsed, facts, exc
                 record(
                     active_client,
                     unit=unit,
@@ -3703,7 +3695,7 @@ def drive_stage(
     # One typed-decision decider per drive: it reconciles naming differences the deterministic
     # path cannot settle (a class spelling, an unbound count subject, a part class no group
     # claims, a declared contact no symbol publishes). None when the setting is off.
-    decider = _name_reconciliation_decider(client, stage=stage)
+    decider = _name_reconciliation_decider(client, stage=stage, run_id=run_id)
     if progress:
         progress({"kind": "stage_start", "stage": stage, "model": _client_model(client)})
 
@@ -3941,7 +3933,7 @@ def drive_stage(
     # dedupes any re-issued lookup, so the dropped transcript is free to rebuild.
     base_messages = list(messages)
     ladder_modes = _contract_ladder_modes(active_client)
-    pre_audit = _pre_audit_hook(active_client)
+    pre_audit = _pre_audit_hook(active_client, run_id=run_id)
     prepared = PreparedStage(
         stage=stage,
         prompt_state=prompt_state,
@@ -4889,7 +4881,7 @@ def drive_stage(
             # the same correction round as the deterministic ones instead of costing the stage a
             # contract refusal. Fail-soft by construction — an unavailable auditor contributes
             # nothing and never blocks the draft.
-            audit_findings = _audit_architecture_draft(active_client, obj)
+            audit_findings = _audit_architecture_draft(active_client, obj, run_id=run_id)
             if audit_findings:
                 diagnostics = [*diagnostics, *audit_findings]
                 provider_diagnostic_codes = [
@@ -5101,7 +5093,7 @@ def drive_stage(
                         # one: a correction is exactly where a rule can be broken again.
                         repaired_diagnostics = [
                             *repaired_diagnostics,
-                            *_audit_architecture_draft(active_client, repaired),
+                            *_audit_architecture_draft(active_client, repaired, run_id=run_id),
                         ]
                     repaired_severe = [
                         d

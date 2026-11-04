@@ -77,6 +77,9 @@ def main(argv=None) -> int:
     workspace = Path(args.workspace).expanduser().resolve()
     if not workspace.is_dir():
         raise SystemExit(f"workspace not found: {workspace}")
+    transcript = Path(args.transcript).expanduser().resolve() if args.transcript else None
+    if transcript is not None and not transcript.is_file():
+        raise SystemExit(f"transcript not found: {transcript}")
 
     stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     run_id = args.run_id or f"{args.scenario or 'RUN'}-{stamp}"
@@ -96,10 +99,7 @@ def main(argv=None) -> int:
     ):
         copied.append("agent_permissions.json")
 
-    transcript = Path(args.transcript).expanduser().resolve() if args.transcript else None
     if transcript is not None:
-        if not transcript.is_file():
-            raise SystemExit(f"transcript not found: {transcript}")
         shutil.copy2(transcript, run_dir / "transcript.jsonl")
         copied.append(f"transcript.jsonl (from {transcript.name})")
     skill_dir = Path(args.skill_dir).expanduser() if args.skill_dir else None

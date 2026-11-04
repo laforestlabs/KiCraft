@@ -10,6 +10,8 @@ import json
 
 import pytest
 
+from account_fixtures import seed_project
+
 from kicraft.server.accounts import AccountStore, build_fts_document
 
 
@@ -31,7 +33,7 @@ def _state(goal, *, named_parts=None, bom_mpns=None, blocks=None):
 
 def _indexed(store, user_id, brief, state, *, status="ok", is_public=True, stem="BOARD"):
     """Create + finish a project, persist its state.json, and index it."""
-    pid = store.create_project(user_id, brief, is_public=is_public)
+    pid = seed_project(store, user_id, brief, is_public=is_public)
     pdir = store.projects_dir / str(user_id) / str(pid)
     (pdir / ".kicraft").mkdir(parents=True, exist_ok=True)
     (pdir / ".kicraft" / "state.json").write_text(json.dumps(state), encoding="utf-8")
@@ -111,7 +113,7 @@ def test_reindex_removes_on_private(store):
 
 def test_backfill_indexes_existing(store):
     u = store.create_user("a@e.st", "pw")
-    pid = store.create_project(u.id, "esp board")          # ok+public but not indexed
+    pid = seed_project(store, u.id, "esp board")          # ok+public but not indexed
     pdir = store.projects_dir / str(u.id) / str(pid)
     (pdir / ".kicraft").mkdir(parents=True, exist_ok=True)
     (pdir / ".kicraft" / "state.json").write_text(

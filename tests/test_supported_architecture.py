@@ -272,3 +272,57 @@ def test_board_wide_maximum_preserves_original_fact_and_rejects_conflicts():
     assert board_copper_layers(scope.obligations) == 4
     intent["obligations"][-1]["value"] = 120
     assert supported_functional_spec(intent) is None
+
+
+@pytest.mark.parametrize("verb", ["Create", "Make", "Construct", "Develop"])
+def test_equivalent_goal_verbs_and_dc_supply_fact_construct_the_relay_product(verb):
+    intent = _intent("c3", 2, 24)
+    intent["goal"] = (
+        f"{verb} an ESP32-C3 module relay board with two relay outputs, "
+        "a 24 V DC input, a power LED, and a reset button."
+    )
+    intent["obligations"][-1]["quantity"] = "DC supply voltage"
+    intent["obligations"] += [_physical("indicator", "led"), _physical("reset", "pushbutton")]
+    spec = supported_functional_spec(intent)
+    architecture, _ = _normalize_stage_response(
+        "architecture", supported_architecture_intent(intent, spec),
+        {"intent": intent, "functional_spec": spec},
+    )
+    scope = Architecture.model_validate(architecture)
+    bom = BOM.model_validate(probe_architecture_construction({
+        "intent": intent, "functional_spec": spec, "architecture": architecture,
+    }))
+    assert all(check.ok for check in check_composed_wiring(scope, bom))
+    assert len([part for part in bom.parts if part.mpn == "SRD-24VDC-SL-C"]) == 2
+    assert check_mcu_programming_access(bom).ok
+    intent["constraints"].append("USB data")
+    assert supported_functional_spec(intent) is None
+
+
+def test_colon_board_size_and_pcb_layer_count_preserve_sensor_stackup():
+    from kicraft.design.models import board_copper_layers
+
+    intent = _intent("s3", 3, 18)
+    intent["constraints"] += ["Board size: under 100 x 100 mm", "Four-layer stack-up"]
+    intent["obligations"] += [
+        {"kind": "quantitative", "original_obligation_id": f"board_{axis}",
+         "quantity": f"board {axis}", "relation": "maximum", "value": 100, "unit": "mm"}
+        for axis in ("width", "height")
+    ]
+    intent["obligations"].append({
+        "kind": "quantitative", "original_obligation_id": "stackup",
+        "quantity": "PCB layer count", "relation": "equal", "value": 4, "unit": "layers",
+    })
+    spec = supported_functional_spec(intent)
+    architecture, _ = _normalize_stage_response(
+        "architecture", supported_architecture_intent(intent, spec),
+        {"intent": intent, "functional_spec": spec},
+    )
+    scope = Architecture.model_validate(architecture)
+    bom = BOM.model_validate(probe_architecture_construction({
+        "intent": intent, "functional_spec": spec, "architecture": architecture,
+    }))
+    assert all(check.ok for check in check_composed_wiring(scope, bom))
+    assert board_copper_layers(scope.obligations) == 4
+    intent["obligations"][-1]["value"] = 2
+    assert supported_functional_spec(intent) is None

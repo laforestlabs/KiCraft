@@ -8,6 +8,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 
 from kicraft.server.session import (
     downstream_stages,
@@ -110,6 +112,153 @@ def test_null_downstream_of_bom_clears_only_wiring(tmp_path):
     assert sj["bom"]["no_connect_pins"] == []
 
 
+def test_bom_invalidation_preserves_compiler_wires_but_requires_wiring(tmp_path):
+    state = {
+        "intent": {}, "functional_spec": {}, "architecture": {},
+        "bom": {
+            "parts": [{"ref": "U1"}, {"ref": "R1"}],
+            "connections": [
+                {"net_name": "VCC", "endpoints": [
+                    {"ref": "U1", "pin": "1"}, {"ref": "R1", "pin": "1"}
+                ]},
+            ],
+            "lowerer_ownership": [{"ref": "U1", "pin": "1", "net": "VCC"}],
+        },
+        "stage_status": {"wiring": {"ok": True}},
+    }
+    _write_state(tmp_path, state)
+    assert null_downstream(tmp_path, "bom") == ["wiring"]
+    saved = read_state(tmp_path)
+    assert saved["bom"]["connections"] == [
+        {"net_name": "VCC", "endpoints": [{"ref": "U1", "pin": "1"}]}
+    ]
+    assert saved["wiring_complete"] is False
+    assert remaining_stages(saved) == ["wiring"]
+    assert derive_stage_statuses(saved)["wiring"] == "pending"
+    assert derive_stage_statuses(saved, sheets_exist=True, pcb_ready=True, zip_ok=True)["fab"] == "pending"
+
+
+def test_legacy_and_explicit_wiring_completion():
+    state = {
+        "intent": {}, "functional_spec": {}, "architecture": {},
+        "bom": {"connections": [{"net_name": "VCC", "endpoints": [{"ref": "U1", "pin": "1"}]}]},
+    }
+    # Legacy projects without a marker or status retain their historical meaning.
+    assert remaining_stages(state) == []
+    assert derive_stage_statuses(state)["wiring"] == "done"
+    state["wiring_complete"] = False
+    state["stage_status"] = {"wiring": {"ok": True}}
+    assert remaining_stages(state) == ["wiring"]
+    assert derive_stage_statuses(state)["wiring"] == "pending"
+    state["wiring_complete"] = True
+    assert remaining_stages(state) == []
+    assert derive_stage_statuses(state)["wiring"] == "done"
+    state["stage_status"]["wiring"] = {"ok": False}
+    assert remaining_stages(state) == ["wiring"]
+    assert derive_stage_statuses(state)["wiring"] == "failed"
+
+
+def test_legacy_compiler_only_graph_needs_committed_wiring_status():
+    state = {
+        "intent": {}, "functional_spec": {}, "architecture": {},
+        "bom": {
+            "parts": [{"ref": "U1"}, {"ref": "R1"}],
+            "connections": [{"net_name": "VCC", "endpoints": [{"ref": "U1", "pin": "1"}]}],
+            "lowerer_ownership": [{"ref": "U1", "pin": "1", "net": "VCC"}],
+        },
+    }
+    assert remaining_stages(state) == ["wiring"]
+    assert derive_stage_statuses(state)["wiring"] == "pending"
+    # The same compiler-only graph may be complete; only its durable historical
+    # commit status distinguishes it from a partial graph in a legacy file.
+    state["stage_status"] = {"wiring": {"ok": True}}
+    assert remaining_stages(state) == []
+    assert derive_stage_statuses(state)["wiring"] == "done"
+
+
+@pytest.mark.parametrize("recipe", [
+    "rp2040-minimal@1", "rp2040-minimal@2", "drv8833-dual-motor@1",
+    "tps54331-adjustable@1", "tps54331-12v-1a@1",
+])
+@pytest.mark.parametrize("ownership", ["manifest", "part"])
+def test_legacy_recipe_bom_requires_regeneration(recipe, ownership):
+    bom = {"parts": [{"ref": "U1"}], "connections": [{"net_name": "V"}]}
+    if ownership == "manifest":
+        bom["recipe_ownership"] = [{"recipe": recipe}]
+    else:
+        bom["parts"][0]["recipe_id"] = recipe
+    state = {
+        "intent": {}, "functional_spec": {}, "architecture": {}, "bom": bom,
+        "wiring_complete": True, "stage_status": {"bom": {"ok": True}, "wiring": {"ok": True}},
+    }
+    assert remaining_stages(state) == ["bom", "wiring"]
+    statuses = derive_stage_statuses(state, sheets_exist=True, pcb_ready=True, zip_ok=True)
+    assert statuses["architecture"] == "done"
+    assert statuses["bom"] == statuses["wiring"] == statuses["fab"] == "pending"
+
+
+@pytest.mark.parametrize("ambiguous", [False, True])
+def test_resume_discards_legacy_derived_state_before_driver(tmp_path, monkeypatch, ambiguous):
+    from kicraft.server import session
+
+    selection = {
+        "recipe": "rp2040-minimal@2", "instance": "core", "sheets": {},
+        "parameters": {} if ambiguous else {"native_usb": True},
+    }
+    original = {
+        "intent": {"goal": "keep"}, "functional_spec": {"blocks": []},
+        "architecture": {"recipe_selections": [selection]},
+        "bom": {"parts": [{"ref": "U1", "recipe_id": "rp2040-minimal@2"}]},
+        "wiring_complete": True,
+        "stage_status": {"architecture": {"ok": True}, "bom": {"ok": True}, "wiring": {"ok": True}},
+    }
+    _write_state(tmp_path, original)
+    expected = ["architecture", "bom", "wiring"] if ambiguous else ["bom", "wiring"]
+    assert remaining_stages(original) == expected
+    seen = []
+
+    def stop_at_driver(stages, brief, workspace, **kwargs):
+        seen.extend(stages)
+        return [], None, workspace / ".kicraft" / "state.json"
+
+    monkeypatch.setattr(session, "drive_chain", stop_at_driver)
+    run_session(tmp_path, "", ["wiring"])
+    saved = read_state(tmp_path)
+    assert seen == expected
+    assert saved["intent"] == original["intent"]
+    assert saved["functional_spec"] == original["functional_spec"]
+    assert saved["bom"] is None
+    assert saved["wiring_complete"] is False
+    assert saved["architecture"] == (None if ambiguous else original["architecture"])
+
+
+
+@pytest.mark.parametrize("contents", ["{broken", "[]"])
+@pytest.mark.parametrize("update", ["status", "questions"])
+def test_state_updates_refuse_to_overwrite_unreadable_existing_state(tmp_path, contents, update):
+    from kicraft.server.stage_state_io import attach_questions, stamp_stage_status
+
+    path = tmp_path / "state.json"
+    path.write_text(contents, encoding="utf-8")
+    with pytest.raises(RuntimeError):
+        if update == "status":
+            stamp_stage_status(path, "bom", False)
+        else:
+            attach_questions(path, "bom", [{"stage": "bom", "text": "Question?"}])
+    assert path.read_text(encoding="utf-8") == contents
+
+
+@pytest.mark.parametrize("contents", ["{broken", "[]"])
+def test_build_recovery_refuses_to_overwrite_unreadable_state(tmp_path, contents):
+    from kicraft.server.session import write_build_recovery
+
+    path = tmp_path / ".kicraft" / "state.json"
+    path.parent.mkdir()
+    path.write_text(contents, encoding="utf-8")
+    with pytest.raises(RuntimeError):
+        write_build_recovery(tmp_path, ok=False)
+    assert path.read_text(encoding="utf-8") == contents
+
 # ---- record_answers + read_state ------------------------------------------
 
 
@@ -177,6 +326,7 @@ def test_run_session_defaults_direct_question_without_parking(tmp_path):
             "questions": [
                 {
                     "text": "Which battery chemistry?",
+                    "stage": "intent",
                     "options": ["LiPo", "Alkaline"],
                     "blocking": True,
                 }
@@ -210,6 +360,7 @@ def test_run_session_preserves_explicit_interactive_question_policy(tmp_path):
             "questions": [
                 {
                     "text": "Which battery chemistry?",
+                    "stage": "intent",
                     "options": ["LiPo", "Alkaline"],
                     "blocking": True,
                 }

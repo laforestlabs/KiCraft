@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import shutil
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -91,6 +93,19 @@ def _files_content_equal(src: Path, dst: Path) -> bool:
         return src.read_bytes() == dst.read_bytes()
     except OSError:
         return False
+
+
+def _copy_snapshot_file(src: Path, dst: Path) -> None:
+    """Replace a canonical artifact without modifying any linked snapshot."""
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix=f".{dst.name}.", dir=dst.parent)
+    os.close(fd)
+    tmp = Path(name)
+    try:
+        shutil.copy(src, tmp)
+        tmp.replace(dst)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def _normalize_snapshot_id(snapshot_id: str | int) -> str:
@@ -388,41 +403,11 @@ def pin_leaf(
     # (typically the final round of the leaves-only run, not the pinned
     # one) while the manual layout correctly showed the pinned content.
     #
-    # Phase B made round_NNNN_* render PNGs hardlinks to their canonical
-    # paths, so when the requested round is the one whose bytes are
-    # already in canonical, ``shutil.copy`` raises SameFileError (src and
-    # dst share an inode). In that case the canonical already IS the
-    # pinned content; we still want canonical to bump its mtime to NOW
-    # so downstream caches invalidate, so we unlink + re-link instead of
-    # copying. For paths that ARE distinct (different inodes), use
-    # ``os.replace`` after creating a fresh inode via a temp copy so the
-    # write is atomic.
+    # Canonical files can share an inode with any round snapshot. Copying
+    # over them in place would mutate that snapshot; relinking the same inode
+    # would not refresh its mtime. Replace with a fresh inode in both cases.
     for src, dst in _round_all_snapshot_files(leaf_dir, snapshot_id).items():
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            src_stat = src.stat()
-            dst_stat = dst.stat() if dst.exists() else None
-        except OSError:
-            src_stat, dst_stat = None, None
-        same_inode = (
-            src_stat is not None
-            and dst_stat is not None
-            and src_stat.st_dev == dst_stat.st_dev
-            and src_stat.st_ino == dst_stat.st_ino
-        )
-        if same_inode:
-            # Canonical already points at the pinned content via the
-            # Phase B hardlink. Drop and re-link to bump mtime so caches
-            # invalidate.
-            try:
-                dst.unlink()
-                import os as _os
-                _os.link(src, dst)
-            except OSError:
-                # Fall back to copy on filesystems that reject hardlinks.
-                shutil.copy(src, dst)
-        else:
-            shutil.copy(src, dst)
+        _copy_snapshot_file(src, dst)
     _invalidate_leaf_canvas_cache(leaf_dir)
     _reconcile_pinned_debug(leaf_dir, snapshot_id)
 
@@ -583,8 +568,7 @@ def ensure_applied(experiments_dir: Path) -> dict[str, str]:
             statuses[leaf_key] = "already-current"
         else:
             for src, dst in all_files.items():
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy(src, dst)
+                _copy_snapshot_file(src, dst)
             _invalidate_leaf_canvas_cache(leaf_dir)
             statuses[leaf_key] = "applied"
         _reconcile_pinned_debug(leaf_dir, snapshot_id)

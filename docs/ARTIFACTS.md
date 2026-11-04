@@ -96,8 +96,29 @@ Promotion uses `shutil.copy` (not `copy2`), so `<stem>.kicad_pcb`'s mtime reflec
 **when it was promoted** — `find -newer` / "did it change?" work again.
 
 `<stem>.provenance.json` records the last promote: `run_id`, `source_board`,
-`source_kind`, `md5`, `fresh`. It is the authoritative, agent-facing record of
-what the on-disk `<stem>.kicad_pcb` actually is.
+`source_kind`, `source_md5`, `md5`, `fresh`. The writer runs after final board
+mutations, including the silk legend: `md5` binds the delivered board, while
+`source_md5` retains the selected router output's identity. Those bytes can
+legitimately differ after post-processing.
+
+`read_provenance` checks the current board without rewriting the historical
+sidecar. It reports `current_md5` and `hash_matches`; a changed or missing board
+cannot read as `fresh`. In `kicraft artifacts --json`, `matches_promoted_run`
+compares run identities only, never byte equality.
+
+## Fabrication package and STEP body coverage
+
+Fresh export receipts bind the exact PCB, ZIP and every ZIP member by SHA-256.
+The package's `step_model_coverage.json` records top-level assembly references
+observed in the actual STEP, with explicit missing references or an unknown
+result when the structure cannot be interpreted safely. The persisted
+`step_model_missing_refs` is `null` for unmeasured/unknown, `[]` when all expected
+assembly references occur, or the list of missing references.
+
+Reference presence is not proof of model accuracy, placement, render fidelity
+or assembled mechanical clearance. Missing bodies are shown in the GUI and CLI;
+they are not silently replaced by generic shapes. Bundled model attribution
+is staged alongside the model and retained in downloaded KiCad projects.
 
 ## Invariants (do not break)
 

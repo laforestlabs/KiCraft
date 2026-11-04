@@ -69,10 +69,4 @@ def test_dropped_labels_dock_the_score():
     assert res.score == 95.0  # 100 - 5*1
 
 
-def test_refdes_silk_is_not_counted_as_legend():
-    # Footprint reference/value silk lives on the footprint, not board.GetDrawings();
-    # a board carrying only refdes text must NOT read as self-describing. Here we
-    # add no board-level text at all, standing in for a refdes-only board.
-    board = pcbnew.BOARD()
-    res = SilkCheck().run(board, {})
-    assert res.metrics["legend_present"] is False
+

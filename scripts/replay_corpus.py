@@ -111,7 +111,7 @@ def _run_leaf(workspace: Path, scratch: Path) -> dict:
         [sys.executable, "-m", "kicraft.design.cli_app", "replay",
          "--project", str(dest), "--quality", "fast", "--no-route",
          "--no-fab", "--seed", "0"],
-        cwd=str(REPO_ROOT),
+        cwd=str(REPO_ROOT), env={**os.environ, **PINNED_ENV},
     ).returncode
     if rc != 0:
         raise RuntimeError(f"replay exited {rc}")
@@ -254,7 +254,9 @@ def main(argv: list[str] | None = None) -> int:
     with tempfile.TemporaryDirectory(prefix="replay_corpus_") as tmp:
         for ws in workspaces:
             print(f"\n=== {ws.name} ===")
-            stem = next(p.stem for p in ws.glob("*.kicad_pro"))
+            stem = next(p.stem for p in ws.glob("*.kicad_pro")
+                        if (ws / f"{p.stem}.kicad_pcb").exists()
+                        and (ws / f"{p.stem}.kicad_sch").exists())
             for mode in modes:
                 # Fresh scratch subdir per (workspace, mode) so copies don't clash.
                 scratch = Path(tmp) / f"{ws.name}_{mode}"
@@ -262,12 +264,12 @@ def main(argv: list[str] | None = None) -> int:
                 if _check_mode(mode, ws, stem, scratch, root, args.update):
                     drift = True
 
-    if args.update:
-        print("\ngoldens updated.")
-        return 0
     if drift:
         print("\nFAIL: placement drifted from golden (or a workspace errored).")
         return 1
+    if args.update:
+        print("\ngoldens updated.")
+        return 0
     print("\nPASS: all workspaces match their golden placement.")
     return 0
 

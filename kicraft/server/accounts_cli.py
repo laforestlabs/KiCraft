@@ -158,26 +158,25 @@ def _cmd_delete(args: argparse.Namespace) -> int:
         print(f"refusing to delete {u.email} (id {u.id}) without --yes "
               "(this is irreversible)", file=sys.stderr)
         return 1
-    if u.stripe_subscription_id:
-        # Never charge a deleted account again. Best-effort: the CLI runs
-        # without full Settings, so use the env key when present and otherwise
-        # tell the operator to cancel in the Stripe dashboard.
-        key = os.environ.get("KICRAFT_STRIPE_SECRET_KEY", "").strip()
-        canceled = False
-        if key:
-            try:
-                from .billing import StripeGateway
-                StripeGateway(key).cancel_subscription(u.stripe_subscription_id)
-                canceled = True
-                print(f"canceled Stripe subscription {u.stripe_subscription_id}")
-            except Exception as e:
-                print(f"WARNING: cancel of {u.stripe_subscription_id} failed: {e}",
-                      file=sys.stderr)
-        if not canceled:
-            print(f"WARNING: user has Stripe subscription "
-                  f"{u.stripe_subscription_id}; cancel it in the Stripe "
-                  "dashboard or they keep getting charged.", file=sys.stderr)
-    purged = store.delete_user(u.id)
+    from .billing import StripeGateway, prepare_account_deletion
+    key = os.environ.get("KICRAFT_STRIPE_SECRET_KEY", "").strip()
+    try:
+        needs_gateway = bool(u.stripe_customer_id or u.stripe_subscription_id
+                             or store.get_pending_checkout(u.id))
+        gw = StripeGateway(key) if key and needs_gateway else None
+    except (ImportError, ValueError) as exc:
+        print(f"subscription cancellation unavailable: {exc}", file=sys.stderr)
+        return 1
+    if not prepare_account_deletion(store, u, gw=gw):
+        print("subscription or checkout cancellation could not be confirmed; "
+              "account was not deleted", file=sys.stderr)
+        return 1
+    try:
+        purged = store.delete_user(u.id, require_billing_safe=True)
+    except (ValueError, OSError) as exc:
+        store.end_billing_deletion(u.id)
+        print(f"account deletion failed: {exc}", file=sys.stderr)
+        return 1
     tail = f"; removed {purged}" if purged else ""
     print(f"deleted {u.email} (id {u.id}) and their projects{tail}")
     return 0

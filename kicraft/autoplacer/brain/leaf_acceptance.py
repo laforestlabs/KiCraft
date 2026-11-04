@@ -184,6 +184,22 @@ def _gate_no_python_exception(
     return passed, {"passed": passed, "python_exception": had_exception}
 
 
+def _gate_validation_evidence(
+    validation: dict[str, Any],
+    _anchor: dict[str, Any],
+    _cfg: LeafAcceptanceConfig,
+) -> tuple[bool, dict[str, Any]]:
+    """Reject missing DRC evidence and boards known to contain no parts."""
+    drc = validation.get("drc") or {}
+    reasons = set(validation.get("rejection_reasons") or ())
+    failures = sorted(reasons & {"drc_timeout", "drc_unavailable", "drc_failed", "empty_board"})
+    if drc.get("timed_out") and "drc_timeout" not in failures:
+        failures.append("drc_timeout")
+    if drc.get("missing_cli") and "drc_unavailable" not in failures:
+        failures.append("drc_unavailable")
+    return not failures, {"passed": not failures, "failures": failures}
+
+
 def _gate_no_shorts(
     validation: dict[str, Any],
     _anchor: dict[str, Any],
@@ -261,18 +277,16 @@ def _gate_no_unconnected(
 
     signal, poured, iface = split_unconnected_nets(validation, cfg)
 
-    # With net names available, gate on unrouted *local signal* nets only. If the
-    # report had unconnected items but no parsable net names (format drift),
-    # fall back to the raw count so the miss is surfaced rather than hidden.
-    if nets:
-        count = len(signal)
-    else:
-        count = raw
+    # An unnamed DRC block cannot be safely attributed to a poured/interface
+    # net, even when other blocks supplied names. Each such block counts.
+    unnamed = int(drc.get("unconnected_unnamed", 0) or 0)
+    count = len(signal) + unnamed if nets else raw
     passed = count <= cfg.max_unconnected
 
     detail = {
         "passed": passed,
         "unconnected_total": raw,
+        "unconnected_unnamed": unnamed,
         "unconnected_nets": nets,
         "signal_unconnected_nets": signal,
         "ignored_poured_nets": poured,
@@ -379,9 +393,9 @@ def _gate_no_gross_courtyard_overlap(
     )
 
     board_path = validation.get("board_path", "") or ""
-    measured = measure_courtyard_overlaps(board_path) if board_path else []
+    measured = measure_courtyard_overlaps(board_path) if board_path else None
     minor, gross = classify_courtyard_overlaps(
-        measured,
+        measured or [],
         max_penetration_mm=cfg.courtyard_warn_penetration_mm,
         max_area_mm2=cfg.courtyard_warn_area_mm2,
     )
@@ -521,6 +535,7 @@ def _gate_routed_board(
 _GATES: list[tuple[str, Any]] = [
     ("board_exists", _gate_board_exists),
     ("no_python_exception", _gate_no_python_exception),
+    ("validation_evidence", _gate_validation_evidence),
     ("no_shorts", _gate_no_shorts),
     ("no_unconnected", _gate_no_unconnected),
     ("no_illegal_geometry", _gate_no_illegal_geometry),

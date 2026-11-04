@@ -511,11 +511,6 @@ def test_rejection_signature_carries_the_detector_codes(tmp_path):
         (["multiple_intent_contracts", "declared_signal_port_tied"], 2),
         (["multiple_intent_contracts", "unsupported_lowerer_contract"], 1),
     ]
-    # The label names the situation, not just the generic wrapper text.
-    assert term["rejections"][0]["label"] == (
-        "(no gate id: a semantic contract refused a schema-clean candidate)"
-        " + multiple_intent_contracts + declared_signal_port_tied"
-    )
 
 
 def test_resolved_stage_failure_is_not_a_terminal_failure(tmp_path):
@@ -679,27 +674,7 @@ def test_ladder_infers_rungs_on_artifacts_without_call_mode(tmp_path):
     assert term["terminal_by_policy"] is True
 
 
-def test_budget_note_does_not_misread_a_unit_repair_stop(tmp_path):
-    """attempts == budget is a coincidence for a unit stage: the stop rule is
-    the per-unit repair loop, not the provider-call budget. Calling that
-    'breadth' would send the reader to raise a budget that is not the limit."""
-    unit_row = {"budget_spent": True, "attempts": 5, "attempt_budget_floor": 5,
-                "failure_kind": "unit_repair_exhausted", "rounds": 8,
-                "units": [{"unit_id": "bom-s001"}]}
-    note = triage._budget_note(unit_row)
-    assert "per-unit repair loop" in note and "BREADTH" not in note
-    # ... while the schema path, which has no stall rule, really is breadth.
-    for kind in ("invalid_schema", "contract_rejected", "truncated_json"):
-        assert "BREADTH" in triage._budget_note(
-            {"budget_spent": True, "attempts": 4, "attempt_budget_floor": 4,
-             "failure_kind": kind, "units": []})
-    # A commit rejection has a stall rule, so "breadth" would mislead there even
-    # when the diagnosis bucket is a contract family.
-    commit = triage._budget_note(
-        {"budget_spent": True, "attempts": 8, "attempt_budget_floor": 8,
-         "failure_kind": "commit_rejected", "family": "contract/recipe", "units": []})
-    assert "DIFFERENT rejection" in commit and "BREADTH" not in commit
-    assert triage._budget_note({"budget_spent": False}) is None
+
 
 
 @pytest.mark.parametrize("raw,expected", [

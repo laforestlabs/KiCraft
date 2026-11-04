@@ -13,6 +13,7 @@ footprint's own attributes.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import tempfile
@@ -80,10 +81,10 @@ def test_every_screw_table_footprint_exists_in_stock_lib():
 
 # --- Real stamping through the subprocess -----------------------------------
 
-pcbnew = pytest.importorskip("pcbnew")
-
-from kicraft.autoplacer.routing_board import run_pcbnew_script_file  # noqa: E402
-from kicraft.cli.compose_subcircuits import _PARENT_STAMP_SCRIPT_PATH  # noqa: E402
+pcbnew = (
+    importlib.import_module("pcbnew")
+    if importlib.util.find_spec("pcbnew") is not None else None
+)
 
 
 def _make_source_board(path: str, with_h_ref: bool = False) -> None:
@@ -105,6 +106,9 @@ def _make_source_board(path: str, with_h_ref: bool = False) -> None:
 
 
 def _stamp(payload: dict) -> None:
+    from kicraft.autoplacer.routing_board import run_pcbnew_script_file
+    from kicraft.cli.compose_subcircuits import _PARENT_STAMP_SCRIPT_PATH
+
     fd, tmp = tempfile.mkstemp(suffix=".json", prefix="stamp_mh_")
     try:
         with os.fdopen(fd, "w") as f:
@@ -127,7 +131,7 @@ def _base_payload(src: str, out: str) -> dict:
     }
 
 
-@pytest.mark.skipif(_STOCK_LIB is None, reason="stock MountingHole.pretty not found")
+@pytest.mark.skipif(_STOCK_LIB is None or pcbnew is None, reason="KiCad mounting-hole stamping prerequisites unavailable")
 def test_stamp_synthesizes_footprint_at_position_with_correct_drill():
     with tempfile.TemporaryDirectory() as d:
         src = os.path.join(d, "src.kicad_pcb")
@@ -163,7 +167,7 @@ def test_stamp_synthesizes_footprint_at_position_with_correct_drill():
         assert pcbnew.ToMM(drill_m2.x) == pytest.approx(2.2, abs=1e-3)
 
 
-@pytest.mark.skipif(_STOCK_LIB is None, reason="stock MountingHole.pretty not found")
+@pytest.mark.skipif(_STOCK_LIB is None or pcbnew is None, reason="KiCad mounting-hole stamping prerequisites unavailable")
 def test_stamp_refuses_ref_collision_with_source_board():
     with tempfile.TemporaryDirectory() as d:
         src = os.path.join(d, "src.kicad_pcb")

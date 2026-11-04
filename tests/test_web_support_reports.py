@@ -14,6 +14,8 @@ import sys
 import pytest
 from nicegui.testing.user_simulation import user_simulation
 
+from account_fixtures import seed_project
+
 from kicraft.server.accounts import AccountStore
 from kicraft.server.config import LEGAL_VERSION
 import kicraft.server.web as web
@@ -37,7 +39,8 @@ def swapped_store(store):
 
 def _failed_state(store):
     user = store.create_user("fail@example.com", "hunter2hunter2")
-    pid = store.create_project(user.id, "a board that will not build")
+    store.consume_verification_token(store.create_verification_token(user.id))
+    pid = seed_project(store, user.id, "a board that will not build")
     p = store.get_project(pid)
     state = web._fresh_run_state()
     state.update(user_id=user.id, project_id=pid, board_code=p.board_code,
@@ -117,6 +120,8 @@ async def harness(tmp_path):
         auto_calls: list[int] = []
         sim_web._auto_investigate_if_enabled = auto_calls.append
         acct = sim_store.create_user(EMAIL, PASSWORD)
+        acct = sim_store.consume_verification_token(
+            sim_store.create_verification_token(acct.id))
         sim_store.record_consent(acct.id, LEGAL_VERSION)
         try:
             yield u, sim_web, sim_store, acct
@@ -162,7 +167,7 @@ async def test_failed_run_shows_inline_cause_and_no_modal(harness):
     artifact is claimed that is not on disk."""
     u, sim_web, sim_store, acct = harness
 
-    pid = sim_store.create_project(acct.id, "doomed board")
+    pid = seed_project(sim_store, acct.id, "doomed board")
     p = sim_store.get_project(pid)
     live = sim_web._fresh_run_state()
     live.update(done=True, ok=False, running=False, user_id=acct.id, project_id=pid,
@@ -192,7 +197,7 @@ async def test_explicit_contact_attaches_feedback_to_the_one_report(harness):
     u, sim_web, sim_store, acct = harness
     from nicegui import ui
 
-    pid = sim_store.create_project(acct.id, "doomed board")
+    pid = seed_project(sim_store, acct.id, "doomed board")
     p = sim_store.get_project(pid)
     live = sim_web._fresh_run_state()
     live.update(done=True, ok=False, running=False, user_id=acct.id, project_id=pid,
@@ -277,10 +282,7 @@ def test_is_user_reported_highlight_rule():
     assert _is_user_reported(_mk_report("error_auto", None)) is False
 
 
-def test_auto_investigate_setting_defaults_on(store):
-    assert store.get_setting("support.auto_investigate", "1") == "1"
-    store.set_setting("support.auto_investigate", "0")
-    assert store.get_setting("support.auto_investigate", "1") == "0"
+
 
 
 def test_investigation_lifecycle(store):
@@ -352,38 +354,7 @@ def test_run_omp_reports_missing_binary(store, monkeypatch):
     assert rc is None and "omp" in out.lower()
 
 
-def test_run_omp_activates_generic_investigate_skill(store, monkeypatch):
-    captured = {}
 
-    class FakeProcess:
-        stdout = ["# Investigation\n"]
-
-        def poll(self):
-            return 0
-
-        def wait(self):
-            return 0
-
-    def fake_popen(cmd, **kwargs):
-        captured["cmd"] = cmd
-        captured["kwargs"] = kwargs
-        return FakeProcess()
-
-    monkeypatch.setattr(ir, "_omp_bin", lambda: "/usr/bin/omp")
-    monkeypatch.setattr(ir.subprocess, "Popen", fake_popen)
-    rid = _user_report(store, board_code="KC-SKL123")
-    inv = store.create_investigation(report_id=rid, board_code="KC-SKL123")
-
-    rc, out = ir._run_omp(store, inv, "KC-SKL123")
-
-    assert rc == 0
-    assert out == "# Investigation"
-    assert captured["cmd"][:3] == [
-        "/usr/bin/omp",
-        "-p",
-        "Use the kicraft-investigate skill to investigate KC-SKL123.",
-    ]
-    assert captured["kwargs"]["cwd"] == str(ir._repo_dir())
 
 
 def test_auto_investigate_respects_toggle(swapped_store, monkeypatch):

@@ -511,7 +511,8 @@ class StagePanel:
                 if warning:
                     ui.label("committed with findings").classes("text-xs").style(f"color:{_WARN}")
                 if self._show_cost and isinstance(cost, (int, float)):
-                    ui.label(f"${cost:.4f}").classes("text-xs font-mono").style(f"color:{_DIM}")
+                    ui.label(f"Cost/exposure estimate ${cost:.4f}") \
+                        .classes("text-xs font-mono").style(f"color:{_DIM}")
                 if isinstance(work_units, int) and work_units > 0:
                     unit_text = f"{work_units} unit{'s' if work_units != 1 else ''}"
                     if isinstance(reused_work_units, int) and reused_work_units > 0:
@@ -576,7 +577,7 @@ class StagePanel:
         head = ("✓ committed" if ok else "✗ failed") if done else "streaming"
         parts = [head, f"{elapsed:.1f}s"]
         if done and self._show_cost and isinstance(cost, (int, float)):
-            parts.append(f"${cost:.4f}")
+            parts.append(f"cost/exposure estimate ${cost:.4f}")
         parts.append(f"{self._chars:,} chars")
         if self._tools:
             parts.append(f"{self._tools} tool calls")
@@ -700,7 +701,7 @@ class StagePanel:
         name = str(event.get("name") or "")
         call_id = str(event.get("call_id") or "")
         card = self._tool_cards.pop(call_id, None) if call_id else None
-        if card is None:
+        if card is None and not call_id:
             card = next((c for c in self._last_unpaired
                          if c.get("name") == name and c.get("state") == "Running"), None) \
                 if name else None
@@ -954,7 +955,7 @@ class StagePanel:
                 f"{int(event.get('output_tokens') or 0):,} out"
             )
         if self._show_cost and event.get("cost_usd") is not None:
-            metrics.append(f"${float(event['cost_usd']):.4f}")
+            metrics.append(f"cost/exposure estimate ${float(event['cost_usd']):.4f}")
         if event.get("error_code"):
             metrics.append(f"error {event['error_code']}")
         if event.get("request_id"):
@@ -1541,6 +1542,7 @@ class StageTabs:
         # Which state a build driven OUTSIDE this page last painted (so the per
         # second observer does not churn the DOM).
         self._foreign_state: str | None = None
+        self._build_queued = False
         # True while the open design is genuinely running (so the follow control
         # is only offered when there is something to follow).
         self._something_live = False
@@ -1563,6 +1565,7 @@ class StageTabs:
         ):
             for key, label, icon, accent in PHASES:
                 t = ui.tab(key, label=label, icon=icon)
+                t.on("click", lambda _e, key=key: self.select(key))
                 t.style(f"color:{_STATUS_COLOR['pending']}")
                 self._tab_el[key] = t
                 # ONE tooltip per tab, updated in place: Element.tooltip() appends a
@@ -1626,9 +1629,9 @@ class StageTabs:
     def end_replay(self, select: str | None = None) -> None:
         """Leave replay, selecting the authoritative stage exactly once.
 
-        The selection is RE-ASSERTED for a few render ticks (`settle`): the
-        browser echoes the tab panels' initial value back, and that echo must not
-        win over the stage the user needs to see."""
+        The selection is re-asserted for a few render ticks (`settle`) to
+        withstand the browser's initial panel-value echo. Explicit user
+        selections cancel that pending correction."""
         self._replaying = False
         if select:
             self._pending_select = select
@@ -1663,12 +1666,14 @@ class StageTabs:
     def select(self, key: str | None) -> None:
         """Show `key`'s tab; auto-follow resumes only if it IS the live stage."""
         if key and key in self.panels:
+            self._pending_select = None
             self._show(key)
             self._auto_follow = key == self._current
         self._set_follow_ui()
 
     def follow_live(self) -> None:
         """Resume auto-follow and jump back to the live stage."""
+        self._pending_select = None
         self._auto_follow = True
         if self._current:
             self._show(self._current)
@@ -1760,10 +1765,12 @@ class StageTabs:
             if panel is not None:
                 panel.push(e)
         elif k == "build_start":
+            self._build_queued = False
             self._set_current("synthesize")
         elif k == "queue":
             # The whole deterministic build is parked in the host build queue;
             # surface position/ETA on the tab build_start just activated.
+            self._build_queued = True
             self._set_current("synthesize")
             self._set_tab_status("synthesize", "queued")
             self.panels["synthesize"].set_queued(
@@ -1776,14 +1783,21 @@ class StageTabs:
                 if self._current in _BUILD_STAGES:
                     self._finish(self._current, True, None)
                 self._set_current(sub)
+                self._build_queued = False
+            elif self._build_queued and self._current == "synthesize":
+                self._build_queued = False
+                self._set_current("synthesize")
             if self._current:
                 self.panels[self._current].push(e)
         elif k == "build_done":
+            self._build_queued = False
             cur = self._current if self._current in _BUILD_STAGES else "fab"
             self._finish(cur, bool(e.get("ok")), None)
         elif k == "run_finished":
+            self._build_queued = False
             self._on_run_finished(e)
         elif k == "run_error":
+            self._build_queued = False
             # The terminal technical record of an unexpected exception: show it on
             # its stage AND settle that stage's status, so a failure is never left
             # looking like a run that is still streaming.
@@ -1985,6 +1999,8 @@ class StageTabs:
             self._current = None
 
     def reset(self) -> None:
+        self._pending_select = None
+        self._build_queued = False
         self._current = None
         self._auto_follow = True
         self._replaying = False

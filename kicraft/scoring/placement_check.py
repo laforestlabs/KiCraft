@@ -16,6 +16,11 @@ class PlacementCheck(LayoutCheck):
         board_w = pcbnew.ToMM(board_rect.GetWidth())
         board_h = pcbnew.ToMM(board_rect.GetHeight())
         board_area = board_w * board_h
+        outline = pcbnew.SHAPE_POLY_SET()
+        try:
+            outline_available = bool(board.GetBoardPolygonOutlines(outline)) and outline.OutlineCount() > 0
+        except Exception:
+            outline_available = False
 
         fps = list(board.Footprints())
         issues = []
@@ -73,13 +78,31 @@ class PlacementCheck(LayoutCheck):
                 overshoot = max(
                     bx1 - px1, by1 - py1, px2 - bx2, py2 - by2, 0.0
                 )
-                if overshoot > 0.01:
+                outside_outline = False
+                if overshoot <= 0.01 and outline_available:
+                    for layer in (pcbnew.F_Cu, pcbnew.B_Cu):
+                        if not pad.IsOnLayer(layer):
+                            continue
+                        copper = pcbnew.SHAPE_POLY_SET()
+                        pad.TransformShapeToPolygon(
+                            copper, layer, 0, pcbnew.FromMM(0.001), pcbnew.ERROR_INSIDE,
+                        )
+                        copper.BooleanSubtract(outline)
+                        if copper.OutlineCount():
+                            excess = copper.BBox()
+                            if min(excess.GetWidth(), excess.GetHeight()) > pcbnew.FromMM(0.01):
+                                outside_outline = True
+                                break
+                if overshoot > 0.01 or outside_outline:
                     pads_off_board += 1
                     pad_name = pad.GetNumber() or "?"
-                    issues.append(Issue("error",
-                        f"{ref} pad {pad_name} extends {overshoot:.2f}mm past board edge "
-                        f"(pads must stay inside Edge.Cuts -- fab-fatal)",
-                        {"ref": ref, "pad": pad_name, "overshoot_mm": round(overshoot, 3)}))
+                    location = {"ref": ref, "pad": pad_name}
+                    if overshoot > 0.01:
+                        location["overshoot_mm"] = round(overshoot, 3)
+                    issues.append(Issue(
+                        "error", f"{ref} pad {pad_name} extends past Edge.Cuts (fab-fatal)",
+                        location,
+                    ))
                     break  # one issue per footprint is enough; user fixes the whole component
 
         # Overlap detection (O(n^2) is fine for <100 components)

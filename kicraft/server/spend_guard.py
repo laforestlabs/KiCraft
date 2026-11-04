@@ -1,20 +1,24 @@
-"""The spend gate: the single enforcement point for model cost (plan B0).
+"""Persistent model spend and in-flight/uncertain provider exposure.
 
-Every model call runs `preflight()` with its configured call-cost ceiling
-(refuse if the remaining global/project budget cannot cover it or when
-kill-switched), then spends, then `record()` stores actual cost. Ceilings use a
-persistent SQLite ledger shared across worker processes, so bounded calls do not
-cross a configured budget merely because accounting happens after dispatch.
+Provider dispatch reserves a ceiling atomically before each POST. A received
+cost receipt replaces that reservation with spend; an interrupted or unreceipted
+request retains its ceiling as uncertain exposure.
+The existing kill flag is also checked from the process environment and the
+repository's .env at admission, including from child workspaces; it does not cancel admitted calls.
 """
 
 from __future__ import annotations
 
 import datetime as dt
 import json
+import os
 import sqlite3
+import uuid
 from pathlib import Path
 
 from .config import Settings
+
+_KILL_SWITCH_ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
 
 
 class BudgetExceeded(RuntimeError):
@@ -40,6 +44,30 @@ class BudgetExceeded(RuntimeError):
 
 class KillSwitchEngaged(RuntimeError):
     """Raised by `preflight()` when KICRAFT_KILL_SWITCH is set."""
+
+
+def _kill_switch_engaged(settings: Settings) -> bool:
+    """Honor a live emergency stop without reloading any other configuration."""
+    truthy = {"1", "true", "yes", "on"}
+    if settings.kill_switch or os.environ.get("KICRAFT_KILL_SWITCH", "").strip().lower() in truthy:
+        return True
+    try:
+        with _KILL_SWITCH_ENV_PATH.open(encoding="utf-8") as env_file:
+            for raw in env_file:
+                line = raw.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                if (
+                    key.strip() == "KICRAFT_KILL_SWITCH"
+                    and value.strip().strip('"').strip("'").lower() in truthy
+                ):
+                    return True
+    except FileNotFoundError:
+        return False
+    except (OSError, UnicodeError) as exc:
+        raise KillSwitchEngaged("Cannot read the live kill switch; refusing model calls.") from exc
+    return False
 
 
 def _utcnow_iso() -> str:
@@ -177,6 +205,11 @@ class SpendGuard:
                 "CREATE INDEX IF NOT EXISTS stage_attempts_run_stage "
                 "ON stage_attempts(run_id, stage, attempt)"
             )
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS provider_exposure ("
+                "id TEXT PRIMARY KEY, ts TEXT NOT NULL, run_id TEXT, "
+                "ceiling_usd REAL NOT NULL, state TEXT NOT NULL)"
+            )
 
     def _sum(self, where: str = "", params: tuple = ()) -> float:
         with self._conn() as conn:
@@ -282,14 +315,23 @@ class SpendGuard:
 
     def status(self) -> dict:
         day, total = self.spent_today(), self.spent_total()
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT state, COALESCE(SUM(ceiling_usd),0) "
+                "FROM provider_exposure WHERE state IN ('reserved','uncertain') GROUP BY state"
+            ).fetchall()
+        exposure = {state: float(amount) for state, amount in rows}
+        active = sum(exposure.values())
         return {
             "spent_today_usd": round(day, 6),
             "spent_total_usd": round(total, 6),
             "daily_ceiling_usd": self.s.daily_usd_ceiling,
             "total_ceiling_usd": self.s.total_usd_ceiling,
-            "daily_remaining_usd": round(self.s.daily_usd_ceiling - day, 6),
-            "total_remaining_usd": round(self.s.total_usd_ceiling - total, 6),
-            "kill_switch": self.s.kill_switch,
+            "daily_remaining_usd": round(self.s.daily_usd_ceiling - day - active, 6),
+            "total_remaining_usd": round(self.s.total_usd_ceiling - total - active, 6),
+            "reserved_exposure_usd": exposure.get("reserved", 0.0),
+            "uncertain_exposure_usd": exposure.get("uncertain", 0.0),
+            "kill_switch": _kill_switch_engaged(self.s),
             "project_llm_budget_usd": float(getattr(self.s, "project_llm_budget_usd", 0.0) or 0.0),
         }
 
@@ -298,8 +340,8 @@ class SpendGuard:
         call_ceiling_usd: float = 0.0,
         run_id: str | None = None,
     ) -> None:
-        """Reserve enough remaining budget for one configured bounded call."""
-        if self.s.kill_switch:
+        """Check recorded spend; provider dispatch must use atomic ``reserve``."""
+        if _kill_switch_engaged(self.s):
             raise KillSwitchEngaged("KICRAFT_KILL_SWITCH is engaged; refusing all model calls.")
         reserve = max(0.0, float(call_ceiling_usd or 0.0))
         total = self.spent_total()
@@ -338,6 +380,98 @@ class SpendGuard:
                     call_ceiling_usd=reserve,
                     run_id=run_id,
                 )
+
+    def active_exposure(self) -> float:
+        with self._conn() as conn:
+            return float(conn.execute(
+                "SELECT COALESCE(SUM(ceiling_usd),0) FROM provider_exposure "
+                "WHERE state IN ('reserved','uncertain')"
+            ).fetchone()[0])
+
+    def reserve(
+        self, call_ceiling_usd: float, run_id: str | None = None, *,
+        additional_total_limit: float | None = None,
+    ) -> str:
+        """Atomically admit a POST and retain its ceiling until settled."""
+        if _kill_switch_engaged(self.s):
+            raise KillSwitchEngaged("KICRAFT_KILL_SWITCH is engaged; refusing all model calls.")
+        amount = max(0.0, float(call_ceiling_usd or 0.0))
+        reservation = uuid.uuid4().hex
+        with self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            # BEGIN may have waited behind another writer while the operator
+            # engaged the switch; do not admit on the stale pre-lock check.
+            if _kill_switch_engaged(self.s):
+                raise KillSwitchEngaged("KICRAFT_KILL_SWITCH is engaged; refusing all model calls.")
+            total = float(conn.execute("SELECT COALESCE(SUM(cost_usd),0) FROM spend").fetchone()[0])
+            active = float(conn.execute(
+                "SELECT COALESCE(SUM(ceiling_usd),0) FROM provider_exposure "
+                "WHERE state IN ('reserved','uncertain')"
+            ).fetchone()[0])
+            day = float(conn.execute(
+                "SELECT COALESCE(SUM(cost_usd),0) FROM spend WHERE ts >= ?",
+                (_today_start_iso(),),
+            ).fetchone()[0])
+            # A call admitted before midnight may still be billed today.
+            limits = [
+                ("total", total + active, self.s.total_usd_ceiling),
+                ("daily", day + active, self.s.daily_usd_ceiling),
+            ]
+            if additional_total_limit is not None:
+                limits.append(("run", total + active, additional_total_limit))
+            project_limit = float(getattr(self.s, "project_llm_budget_usd", 0.0) or 0.0)
+            if run_id and project_limit > 0:
+                run_spend = float(conn.execute(
+                    "SELECT COALESCE(SUM(cost_usd),0) FROM spend WHERE json_valid(meta) "
+                    "AND json_extract(meta, '$.run_id') = ?", (str(run_id),),
+                ).fetchone()[0])
+                run_active = float(conn.execute(
+                    "SELECT COALESCE(SUM(ceiling_usd),0) FROM provider_exposure "
+                    "WHERE state IN ('reserved','uncertain') AND run_id = ?", (str(run_id),),
+                ).fetchone()[0])
+                limits.append(("project", run_spend + run_active, project_limit))
+            for scope, used, limit in limits:
+                if used >= limit or used + amount > limit:
+                    raise BudgetExceeded(
+                        f"{scope} remaining budget cannot cover call ceiling ${amount:.4f} "
+                        f"(spent or exposed ${used:.4f} of ${limit:.4f}); refusing.",
+                        scope=scope, spent_usd=used, limit_usd=limit,
+                        call_ceiling_usd=amount, run_id=run_id,
+                    )
+            conn.execute(
+                "INSERT INTO provider_exposure (id,ts,run_id,ceiling_usd,state) "
+                "VALUES (?,?,?,?, 'reserved')",
+                (reservation, _utcnow_iso(), run_id, amount),
+            )
+        return reservation
+
+    def mark_uncertain(self, reservation: str, minimum_usd: float = 0.0) -> None:
+        """Keep at least the ceiling when an accepted request has no cost receipt."""
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE provider_exposure SET state='uncertain', "
+                "ceiling_usd=MAX(ceiling_usd, ?) WHERE id=? AND state='reserved'",
+                (max(0.0, float(minimum_usd)), reservation),
+            )
+
+    def settle_reservation(
+        self, reservation: str, model: str, input_tokens, output_tokens, cost_usd: float, meta="",
+    ) -> None:
+        """Atomically exchange an in-flight ceiling for an actual usage receipt."""
+        meta_str = meta if isinstance(meta, str) else json.dumps(meta, sort_keys=True, default=str)
+        with self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            deleted = conn.execute(
+                "DELETE FROM provider_exposure WHERE id=? AND state='reserved'", (reservation,),
+            )
+            if deleted.rowcount != 1:
+                raise RuntimeError("provider reservation missing or already settled")
+            conn.execute(
+                "INSERT INTO spend (ts,model,input_tokens,output_tokens,cost_usd,meta) "
+                "VALUES (?,?,?,?,?,?)",
+                (_utcnow_iso(), model, int(input_tokens or 0), int(output_tokens or 0),
+                 float(cost_usd), meta_str),
+            )
 
     def record(self, model: str, input_tokens, output_tokens, cost_usd: float, meta="") -> None:
         """Append one billed call. `meta` may be a bare phase string (legacy) or a

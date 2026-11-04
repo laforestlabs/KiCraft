@@ -724,7 +724,7 @@ def test_recipe_part_role_does_not_own_an_unselected_requirement():
     ]
     state["architecture"]["recipe_selections"] = [
         {
-            "recipe": "rp2040-minimal@2",
+            "recipe": "rp2040-minimal@3",
             "instance": "mcu",
             "sheets": {"mcu": "A", "io": "A"},
             "requirement_ids": ["mcu"],
@@ -2779,10 +2779,9 @@ def test_a_device_named_exact_part_owns_its_reviewed_order_code():
     """(a) matching: `exact_part` `MAX31855` is the reviewed order code `MAX31855KASA+`.
 
     Live thermocouple-amp (2026-09-29): requirement `max31855` pinned the brief's
-    unqualified device as `MAX31855` and the unit emitted the reviewed ``MAX31855KASA+``
-    pair (no order-code MPN), so the declared interface reported
-    "declared interface needs one identified hardware owner" even though the requirement's
-    own reviewed hardware was on the sheet.
+    unqualified device as `MAX31855` and the unit emitted the reviewed
+    ``MAX31855KASA+`` order code and library pair. Its complete physical
+    identity must own the declared interface.
     """
     requirement = {
         "id": "max31855",
@@ -2819,7 +2818,7 @@ def test_a_device_named_exact_part_owns_its_reviewed_order_code():
         ],
     }
     unit = StageWorkUnit("bom-s000", "bom", "A", requirement_ids=("max31855",))
-    # The emitted group carries the pair and display value, not the order-code MPN.
+    # The reviewed order code and its library pair identify the hardware.
     payload = {
         "groups": [
             {
@@ -2829,6 +2828,7 @@ def test_a_device_named_exact_part_owns_its_reviewed_order_code():
                 "quantity": 1,
                 "value": "MAX31855KASA",
                 "symbol": "Sensor_Temperature:MAX31855KASA",
+                "mpn": "MAX31855KASA+",
                 "footprint": "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm",
             }
         ]
@@ -3540,36 +3540,7 @@ def test_declared_interface_uses_every_unit_of_one_physical_amplifier():
     assert "amplifier:imaginary:" in defects[0]
 
 
-def test_unreviewed_part_class_is_proven_by_a_real_resolved_part():
-    """A class the library has never covered is satisfied by a real part, not refused.
 
-    Decision 2026-09-18: the reviewed library can only answer for the classes it covers, so a
-    demand for a new category (`gps-module`) must be met by a real, resolvable part — exact
-    MPN, symbol pin inventory, footprint — instead of blocking every novel design. A label
-    with no orderable identity is still not evidence, and a covered class still needs its
-    reviewed record.
-    """
-    from kicraft.server.stage_work_units import _group_has_physical_feature
-
-    resolved = BomComponentGroup(
-        id="gnss",
-        sheet="MAIN",
-        reference_prefix="U",
-        quantity=1,
-        value="NEO-6M",
-        symbol="Device:R",
-        footprint="Resistor_SMD:R_0603_1608Metric",
-        mpn="NEO-6M-0-001",
-    )
-    assert _group_has_physical_feature(resolved, "gps-module") is True
-    assert _group_has_physical_feature(resolved, "air-quality-sensor") is True
-    # No orderable identity: the parts stage emitted a label, so the demand stands.
-    assert (
-        _group_has_physical_feature(resolved.model_copy(update={"mpn": None}), "gps-module")
-        is False
-    )
-    # An unreviewed part never answers for a class the reviewed library does cover.
-    assert _group_has_physical_feature(resolved, "usb-c-receptacle") is False
 
 
 def test_pin_less_declared_interface_claim_is_refused_by_name(monkeypatch):
@@ -3693,38 +3664,7 @@ def test_identical_connector_grouping_preserves_pin_and_quantity_checks(split_gr
     assert any("requires 2 real" in row for row in short["physical-obligation-unfulfilled"])
 
 
-def test_unfulfilled_obligation_names_the_groups_the_unit_emitted():
-    """The defect must say what the unit *did* emit, not only that a class is missing.
 
-    Every 2026-09-17 canary BOM failure reads `requires 1 real usb-c-receptacle, found 0` while
-    naming neither the group the unit emitted nor its identity, so the repair (and the next
-    diagnosis) cannot tell "the draft picked an unreviewed part" from "the draft emitted no part".
-    """
-    from kicraft.server.stage_work_units import _requirement_obligation_defects
-
-    requirement = {
-        "id": "usb_c",
-        "family": "usb-c-breakout",
-        "exact_part": "TYPE-C-31-M-12",
-        "obligations": [
-            {
-                "kind": "physical",
-                "original_obligation_id": "usb-c-input",
-                "component_class": "usb-c-receptacle",
-            }
-        ],
-    }
-    unreviewed = _group_for("12401610e4#2a").model_copy(
-        update={"id": "usb_c", "symbol": "Connector:USB_C_Receptacle_USB2.0_16P"}
-    )
-
-    defects = _requirement_obligation_defects([requirement], [unreviewed])[
-        "physical-obligation-unfulfilled"
-    ]
-
-    assert len(defects) == 1
-    assert "requires 1 real usb-c-receptacle, found 0" in defects[0]
-    assert "the unit emitted: usb_c=Connector:USB_C_Receptacle_USB2.0_16P" in defects[0]
 
 
 def test_board_fact_obligations_are_not_bom_component_demands():

@@ -14,6 +14,10 @@ from kicraft.design.models import FunctionalSpec, IntentSlot, is_board_level_qua
 
 
 _NUMBERS = {"one": 1, "two": 2, "three": 3, "four": 4}
+_LAYER_QUANTITIES = frozenset({
+    "pcb stack-up layers", "stack-up layers", "layers", "copper layers",
+    "pcb copper layers", "pcb layer count",
+})
 
 
 def _numbers(text: str, noun: str) -> set[int]:
@@ -28,7 +32,7 @@ def _plan(intent: dict) -> dict | None:
         source = IntentSlot.model_validate(intent)
     except (ValidationError, TypeError, ValueError):
         return None
-    goal = re.sub(r"^\s*design\b", "build", source.goal.lower())
+    goal = re.sub(r"^\s*(?:design|create|make|construct|develop)\b", "build", source.goal.lower())
     text = " ".join([goal, *source.constraints]).lower()
     family_text = " ".join([text, *source.named_parts]).lower()
     c3 = bool(re.search(r"\besp32-c3\b", family_text))
@@ -68,7 +72,7 @@ def _plan(intent: dict) -> dict | None:
         r"\bkept\s+under(?=\s+\d+(?:\.\d+)?\s*[×x]\s*\d+(?:\.\d+)?\s*mm\b)",
         "dimensions under", text,
     )
-    text = re.sub(r"\bboard\s+size\s+(?=under\b)", "board dimensions ", text)
+    text = re.sub(r"\bboard\s+size\s*:?\s+(?=under\b)", "board dimensions ", text)
     text = re.sub(r"\bpowered\s+from\b", "power input", text)
     text = re.sub(r"\boperated\s+with\b", "with", text)
     text = re.sub(r"\b(?:include|add)\s+(?=(?:a\s+)?(?:power\s+led|reset\s+button)\b)", "use ", text)
@@ -134,7 +138,7 @@ def _plan(intent: dict) -> dict | None:
         elif kind == "quantitative":
             quantity = item["quantity"].lower()
             unit = item["unit"].lower()
-            if quantity in {"supply voltage", "input voltage", "dc input voltage"} and item["relation"] == "equal" and unit in {"v", "v dc", "vdc"}:
+            if quantity in {"supply voltage", "input voltage", "dc input voltage", "dc supply voltage"} and item["relation"] == "equal" and unit in {"v", "v dc", "vdc"}:
                 if voltage is not None and voltage != item["value"]:
                     return None
                 voltage = item["value"]
@@ -143,7 +147,7 @@ def _plan(intent: dict) -> dict | None:
                   and is_board_level_quantitative_obligation(item)
                   and item["relation"] == "maximum" and unit == "mm" and item["value"] >= 100):
                 owner = "board"
-            elif quantity in {"pcb stack-up layers", "stack-up layers", "layers", "copper layers", "pcb copper layers"} and item["relation"] == "equal" and unit in {"layer", "layers"} and item["value"] in {2, 4}:
+            elif quantity in _LAYER_QUANTITIES and item["relation"] == "equal" and unit in {"layer", "layers"} and item["value"] in {2, 4}:
                 owner = "board"
         if owner is None:
             return None
@@ -175,13 +179,13 @@ def _plan(intent: dict) -> dict | None:
     board_rows = [row.model_dump() for row in source.obligations if row.kind == "quantitative"]
     layer_rows = {
         row["value"] for row in board_rows
-        if row["quantity"].lower() in {"pcb stack-up layers", "stack-up layers", "layers", "copper layers", "pcb copper layers"}
+        if row["quantity"].lower() in _LAYER_QUANTITIES
     }
     if len(layer_rows) > 1:
         return None
     for token in re.findall(r"\b(one|two|three|four|\d+)[ -]+layers?\b", text):
         layers = _NUMBERS[token] if token in _NUMBERS else int(token)
-        if not any(row["quantity"].lower() in {"pcb stack-up layers", "stack-up layers", "layers", "copper layers", "pcb copper layers"} and row["relation"] == "equal" and row["value"] == layers for row in board_rows):
+        if not any(row["quantity"].lower() in _LAYER_QUANTITIES and row["relation"] == "equal" and row["value"] == layers for row in board_rows):
             return None
     if re.search(r"\b(?:dimensions|mm)\b", text):
         dimensions: dict[str, float] = {}

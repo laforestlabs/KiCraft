@@ -14,6 +14,8 @@ from kicraft.server.decision_layer import (
     decide,
     parse_answers,
 )
+from kicraft.server.config import Settings
+from kicraft.server.spend_guard import SpendGuard
 
 _CHOICE_PAYLOAD = {
     "model": "typesafe/jev-1.13-20260917",
@@ -157,7 +159,22 @@ def test_a_malformed_or_off_set_answer_is_dropped_never_guessed():
     assert clamped[0].value is True
 
 
-def test_decide_posts_the_documented_body_once(monkeypatch):
+@pytest.mark.parametrize(
+    ("key", "row"),
+    [
+        ("urgent", {"type": "noul", "noul": "nan"}),
+        ("urgent", {"type": "noul", "noul": float("inf")}),
+        ("department", {"type": "choice", "choice": "billing", "confidence": "nan"}),
+        ("department", {"type": "choice", "choice": "billing", "probabilities": []}),
+        ("department", {"type": "choice", "choice": "billing", "probabilities": {"billing": float("nan")}}),
+        ("severity", {"type": "score", "score": "nan", "confidence": 1}),
+    ],
+)
+def test_malformed_numeric_decisions_are_never_applied(key, row):
+    assert parse_answers({"answers": {key: row}}, _questions()) == []
+
+
+def test_decide_posts_the_documented_body_once(monkeypatch, tmp_path):
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     monkeypatch.setenv("KICRAFT_JEV_BASE_URL", "https://openrouter.test")
     payload = {
@@ -166,12 +183,16 @@ def test_decide_posts_the_documented_body_once(monkeypatch):
         "usage": {"input_tokens": 10, "output_tokens": 2, "cost": 1e-06},
     }
     session = _FakeSession(_FakeResponse(payload))
+    guard = SpendGuard(Settings(api_key="test", ledger_path=tmp_path / "ledger.db"))
     billed: list[dict] = []
 
     answers = decide(
         {"draft": "state"},
         _questions()[:1],
         session=session,
+        guard=guard,
+        run_id="p7-run",
+        stage="architecture",
         recorder=billed.append,
     )
 
@@ -186,22 +207,73 @@ def test_decide_posts_the_documented_body_once(monkeypatch):
     }
     assert by_key(answers)["urgent"].probability == 0.95
     assert billed == [payload["usage"]]
+    assert guard.spent_for_run("p7-run") == pytest.approx(1e-6)
+    assert guard.status()["reserved_exposure_usd"] == 0
+    assert guard.status()["uncertain_exposure_usd"] == 0
 
 
-def test_decide_reports_every_way_it_cannot_take_a_decision(monkeypatch):
+def test_decide_reports_every_way_it_cannot_take_a_decision(monkeypatch, tmp_path):
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     monkeypatch.setattr("kicraft.server.decision_layer._api_key", lambda: "")
-    with pytest.raises(DecisionUnavailable):
+    monkeypatch.setenv("KICRAFT_JEV_BASE_URL", "https://openrouter.test")
+    with pytest.raises(DecisionUnavailable, match="no OpenRouter API key"):
         decide({"s": 1}, _questions()[:1])
 
     monkeypatch.setattr("kicraft.server.decision_layer._api_key", lambda: "k")
+    guard = SpendGuard(Settings(api_key="test", ledger_path=tmp_path / "ledger.db"))
     with pytest.raises(DecisionUnavailable):
         decide(
             {"s": 1},
             _questions()[:1],
+            guard=guard,
             session=_FakeSession(_FakeResponse({"error": {"message": "bad state"}}, status_code=400)),
         )
     assert decide({"s": 1}, [], session=_FakeSession(_FakeResponse({}))) == []
+
+
+@pytest.mark.parametrize("failure", ["no_receipt", "cancel"])
+def test_decision_missing_receipt_or_cancellation_retains_exposure(
+    monkeypatch, tmp_path, failure
+):
+    monkeypatch.setattr("kicraft.server.decision_layer._api_key", lambda: "k")
+    guard = SpendGuard(Settings(api_key="k", ledger_path=tmp_path / "ledger.db"))
+    if failure == "cancel":
+        class CancelSession:
+            def post(self, *args, **kwargs):
+                raise RuntimeError("cancelled")
+
+        session = CancelSession()
+        with pytest.raises(RuntimeError, match="cancelled"):
+            decide({}, _questions()[:1], guard=guard, run_id="p7-run", session=session)
+    else:
+        session = _FakeSession(_FakeResponse({"answers": {}}))
+        assert decide({}, _questions()[:1], guard=guard, run_id="p7-run", session=session) == []
+    assert guard.spent_for_run("p7-run") == 0
+    assert guard.status()["uncertain_exposure_usd"] > 0
+    assert guard.status()["reserved_exposure_usd"] == 0
+
+
+def test_decision_budget_refusal_precedes_provider_call(monkeypatch, tmp_path):
+    from kicraft.server.spend_guard import BudgetExceeded
+
+    monkeypatch.setattr("kicraft.server.decision_layer._api_key", lambda: "k")
+    guard = SpendGuard(Settings(
+        api_key="k", ledger_path=tmp_path / "ledger.db", project_llm_budget_usd=1e-12,
+    ))
+    session = _FakeSession(_FakeResponse({"answers": {}}))
+    with pytest.raises(BudgetExceeded):
+        decide({}, _questions()[:1], guard=guard, run_id="p7-run", session=session)
+    assert not session.calls
+
+
+def test_unpriced_decision_model_is_refused_before_dispatch(monkeypatch, tmp_path):
+    monkeypatch.setattr("kicraft.server.decision_layer._api_key", lambda: "k")
+    guard = SpendGuard(Settings(api_key="k", ledger_path=tmp_path / "ledger.db"))
+    session = _FakeSession(_FakeResponse({"answers": {}}))
+    with pytest.raises(DecisionUnavailable, match="no bounded decision pricing"):
+        decide({}, _questions()[:1], model="unknown/model", guard=guard, session=session)
+    assert not session.calls
+    assert guard.status()["reserved_exposure_usd"] == 0
 
 
 def test_answer_confident_threshold():

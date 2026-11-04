@@ -185,7 +185,7 @@ def search_library_parts(
     a bundle that never says "connector".
     """
     terms = [t for t in (w.lower() for w in (query or "").split())
-             if t and t not in _PART_SEARCH_STOPWORDS]
+             if t not in _PART_SEARCH_STOPWORDS and _collapse_alnum(t)]
     if not terms:
         return []
     active, _broken = _load_library_parts(project_root)

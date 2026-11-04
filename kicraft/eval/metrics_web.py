@@ -23,10 +23,10 @@ import json
 from pathlib import Path
 
 from .artifacts import (
-    _find_glob,
     _find_one,
     analyze_state,
     count_generated,
+    find_erc_report,
     parse_erc,
     parse_synthesis_check,
 )
@@ -157,7 +157,7 @@ def collect_web_metrics(project_dir, *, ledger_path=None, run_id_prefix=None,
     pd = Path(project_dir)
     state = analyze_state(_find_one(pd, "state.json"))
     synth = parse_synthesis_check(_find_one(pd, "synthesis_check.json"))
-    erc = parse_erc(_find_glob(pd, "*_erc.rpt"))
+    erc = parse_erc(find_erc_report(pd, synth))
     generated = count_generated(pd)
     transcript = analyze_events(pd / "events.jsonl")
 

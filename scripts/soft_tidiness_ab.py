@@ -1,17 +1,13 @@
 #!/usr/bin/env python3
-"""Corpus-wide A/B for the soft-tidiness placement term — classic SA vs
-soft-tidiness across a set of designs — measuring tidiness (orientation / row
-residual / fill) and routing (unconnected), and emitting a self-contained HTML
-results page with side-by-side classic|soft diagnostic renders per leaf. $0, no
-LLM.
+"""Corpus-wide A/B for current leaf grid versus continuous placement.
 
-    python scripts/soft_tidiness_ab.py [--out DIR] [--designs A,B] [--seeds 0,1,2]
+Measures placement, pin locality and routing, and emits a self-contained HTML
+gallery. No LLM calls. Classic explicitly disables leaf_grid_assignment; grid
+explicitly enables it. Routing is best-effort stable: use multiple seeds rather
+than treating a single routed result as a regression verdict.
 
-Each design is staged twice: ``classic`` (leaf_psw_tidiness=0, both hard-tidiness
-flags off) and ``soft`` (defaults — psw_tidiness=0.15). Both are solved+routed at
-each seed; placement (hence tidiness + renders) is deterministic per seed, while
-routing unconnected is reported as a per-seed list (KiCad Routing Tools is only
-best-effort-stable — the rigorous routing verdict is the N-of-3 median).
+    python scripts/soft_tidiness_ab.py --out DIR --designs A,B --seeds 0,1,2
+
 
 With no ``--out`` the gallery is written to ``logs/tidiness_ab/run-<UTC>/`` — the
 root the web app's **/admin/tidiness-ab** page discovers — so a bare run shows up
@@ -19,6 +15,8 @@ in the admin section on a headless box (view it there, or open ``<out>/index.htm
 directly).
 """
 from __future__ import annotations
+import argparse
+from html import escape
 
 import glob
 import json
@@ -105,16 +103,21 @@ def _solve(proj, stem, seed):
         "--pcb", os.path.join(proj, f"{stem}.kicad_pcb"),
         "--rounds", "1", "--seed", str(seed), "--route", "--json",
     ]
-    out = subprocess.run(cmd, capture_output=True, text=True, env=env).stdout
-    unc = -1
-    if START in out and END in out:
-        payload = json.loads(out[out.index(START) + len(START):out.index(END)])
-        unc = 0
-        for s in _iter_strings(payload):
-            if "Drc report for leaf_routed" in s:
-                m = re.search(r"Found (\d+) unconnected pads", s)
-                unc += int(m.group(1)) if m else 0
-    return unc
+    proc = subprocess.run(cmd, capture_output=True, text=True, env=env)
+    out = proc.stdout
+    if proc.returncode != 0 or START not in out or END not in out:
+        return -1
+    payload = json.loads(out[out.index(START) + len(START):out.index(END)])
+    unc = 0
+    routed = 0
+    for s in _iter_strings(payload):
+        if "Drc report for leaf_routed" in s:
+            m = re.search(r"Found (\d+) unconnected pads", s)
+            if not m:
+                return -1
+            unc += int(m.group(1))
+            routed += 1
+    return unc if routed else -1
 
 
 def _iter_strings(o):
@@ -135,9 +138,11 @@ def _leaf_layouts(proj):
         canon = os.path.join(sub, "solved_layout.json")
         path = canon if os.path.exists(canon) else None
         if path is None:
-            rounds = sorted(glob.glob(os.path.join(sub, "round_*_solved_layout.json")))
-            if rounds:
-                path = rounds[-1]
+            rounds = glob.glob(os.path.join(sub, "round_*_solved_layout.json"))
+            numbered = [(int(m.group(1)), p) for p in rounds
+                        if (m := re.search(r"round_(\d+)_solved_layout\.json$", p))]
+            if numbered:
+                path = max(numbered)[1]
         if path is None:
             continue
         try:
@@ -160,23 +165,25 @@ def _default_out_dir() -> str:
 
 
 def main() -> int:
-    out_dir = _default_out_dir()
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--out", default=None)
+    parser.add_argument("--designs", default=None)
+    parser.add_argument("--seeds", default="0")
+    parser.add_argument("--variants", default="classic,grid")
+    args = parser.parse_args()
+    out_dir = args.out or _default_out_dir()
     designs = DESIGNS
-    seeds = [0]
-    variants = ("classic", "grid")  # baseline, candidate
-    for a in sys.argv[1:]:
-        if a.startswith("--out="):
-            out_dir = a.split("=", 1)[1]
-        elif a.startswith("--designs="):
-            want = set(a.split("=", 1)[1].split(","))
-            designs = [d for d in DESIGNS if d[1] in want]
-        elif a.startswith("--seeds="):
-            seeds = [int(x) for x in a.split("=", 1)[1].split(",")]
-        elif a.startswith("--variants="):
-            names = a.split("=", 1)[1].split(",")
-            assert len(names) == 2 and all(n in VARIANTS for n in names), (
-                f"--variants needs exactly two of {sorted(VARIANTS)}")
-            variants = tuple(names)
+    if args.designs is not None:
+        want = set(args.designs.split(","))
+        designs = [design for design in DESIGNS if design[1] in want]
+    try:
+        seeds = [int(value) for value in args.seeds.split(",")]
+    except ValueError:
+        parser.error("--seeds must be comma-separated integers")
+    names = args.variants.split(",")
+    if len(names) != 2 or any(name not in VARIANTS for name in names):
+        parser.error(f"--variants needs exactly two of {sorted(VARIANTS)}")
+    variants = tuple(names)
     base, cand = variants
     # Scratch (heavy: staged project copies + .experiments) lives in a tempdir, NOT
     # under out_dir, so the discoverable gallery dir stays just index.html/summary.json.
@@ -292,7 +299,7 @@ def _write_html(results, path, variants, seeds):
         pc = _mean([lf[base]["pin_mm"] for lf in r["leaves"]])
         px = _mean([lf[cand]["pin_mm"] for lf in r["leaves"]])
         parts.append(
-            f"<tr><td>{r['design']}</td><td>{len(r['leaves'])}</td>"
+            f"<tr><td>{escape(r['design'])}</td><td>{len(r['leaves'])}</td>"
             + _delta_cell(oc, ox, higher_better=True, suffix="%")
             + _delta_cell(rc, rx, higher_better=False)
             + _delta_cell(pc, px, higher_better=False)
@@ -305,11 +312,11 @@ def _write_html(results, path, variants, seeds):
     for r in results:
         if not r["leaves"]:
             continue
-        parts.append(f"<h2>{r['design']}</h2>")
+        parts.append(f"<h2>{escape(r['design'])}</h2>")
         for lf in r["leaves"]:
             c, s = lf[base], lf[cand]
             parts.append(
-                f"<section><table><tr><th>{lf['sheet']}</th>"
+                f"<section><table><tr><th>{escape(lf['sheet'])}</th>"
                 "<th>orient</th><th>resid mm</th><th>fill %</th>"
                 "<th>pin mm</th><th>pin loc %</th></tr>"
                 f"<tr><td>{base}</td><td>{_fmt(c['orient'])}</td>"

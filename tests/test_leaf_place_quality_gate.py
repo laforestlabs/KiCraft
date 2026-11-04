@@ -143,10 +143,7 @@ def test_last_round_of_the_ladder_always_routes(monkeypatch, tmp_path):
 
 
 
-class _RoundSolver:
-    def __init__(self, state, cfg, seed):
-        self.state = state
-        self._edge_pinned_groups = []
+class _RoundSolver(ss.PlacementSolver):
 
     def solve(self):
         return self.state.components

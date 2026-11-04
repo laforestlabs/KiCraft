@@ -155,3 +155,31 @@ def test_geometry_wrapper_reverts_when_flags_persist(tmp_path, monkeypatch):
     assert out == before  # original validation stands
     assert pcb.read_text(encoding="utf-8") == original  # byte-restored
     assert not (tmp_path / "parent_routed.kicad_pcb.pre_geometry_repair").exists()
+
+
+def test_geometry_wrapper_restores_board_when_redrc_times_out(tmp_path, monkeypatch):
+    import json
+
+    from kicraft.autoplacer import routing_board
+    from kicraft.cli._compose_route import _attempt_illegal_geometry_repair
+
+    board = tmp_path / "board.kicad_pcb"
+    board.write_text("original")
+    sidecar = tmp_path / "board.kicad_pcb.geometry_repair.json"
+
+    def fake_script(script):
+        board.write_text("modified")
+        if "rip_illegal_copper" in script:
+            sidecar.write_text(json.dumps({"ripped": 1, "over_cap": 0, "nets": [], "skipped": []}))
+
+    monkeypatch.setattr(routing_board, "run_pcbnew_script", fake_script)
+    monkeypatch.setattr(
+        routing_board, "validate_routed_board",
+        lambda *a, **k: {"drc": {"unconnected": 0, "shorts": 0, "timed_out": True}},
+    )
+    result = _attempt_illegal_geometry_repair(
+        board, {}, {"drc": {"unconnected": 1, "shorts": 0}, "obviously_illegal_routed_geometry": True}
+    )
+    assert board.read_text() == "original"
+    assert result["illegal_geometry_repair"]["reverted"]
+    assert not result["illegal_geometry_repair"]["kept"]

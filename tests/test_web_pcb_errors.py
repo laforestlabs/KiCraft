@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+from account_fixtures import seed_project
+
 from kicraft.autoplacer import routing_board
 from kicraft.cli import render_drc_overlay
 from kicraft.design.cli_app import build_pcb_errors
@@ -233,16 +235,20 @@ def test_pcb_renderer_magick_bin_recognizes_im6(monkeypatch):
 
 
 
-def test_inspector_rejects_outside_or_non_png_overlay(tmp_path):
-    outside = tmp_path.parent / "outside.png"
-    outside.write_bytes(b"png")
+@pytest.mark.parametrize("external", [True, False])
+def test_inspector_rejects_outside_or_non_png_overlay(tmp_path, tmp_path_factory, external):
+    overlay = (
+        tmp_path_factory.mktemp("outside-overlay") / "outside.png"
+        if external else tmp_path / "inside.svg"
+    )
+    overlay.write_bytes(b"image")
     section = _pcb_error_section({
         "artifacts": {
             "status": "failed",
             "pcb_errors": [{
                 "stage": "verify", "code": "unconnected",
                 "explanation": "Routing left one open connection.",
-                "next_action": "Route again.", "overlay_path": str(outside),
+                "next_action": "Route again.", "overlay_path": str(overlay),
             }],
         },
     }, tmp_path, [], "TOK")
@@ -284,14 +290,16 @@ def anyio_backend():
 
 
 @pytest.fixture
-async def web_harness(tmp_path):
+async def web_harness(tmp_path, monkeypatch):
     async with user_simulation() as user:
         mod = sys.modules.get(WEB)
         web = importlib.reload(mod) if mod else importlib.import_module(WEB)
         store = AccountStore(tmp_path / "accounts.db", tmp_path / "projects")
         web._STORE = store
-        web._safe_fetch = lambda _key: web._FETCH_ERROR
+        monkeypatch.setattr(web, "_safe_fetch", lambda _key: web._FETCH_ERROR)
         account = store.create_user(EMAIL, PASSWORD)
+        account = store.consume_verification_token(
+            store.create_verification_token(account.id))
         store.record_consent(account.id, LEGAL_VERSION)
         try:
             yield user, web, store, account
@@ -303,7 +311,7 @@ async def web_harness(tmp_path):
 async def test_reopened_persisted_pcb_error_is_prominent(web_harness):
     user, _web, store, account = web_harness
     store.set_tier(EMAIL, "pro")
-    pid = store.create_project(account.id, "PCB diagnostics")
+    pid = seed_project(store, account.id, "PCB diagnostics")
     base = store.projects_dir / str(account.id) / str(pid)
     (base / ".kicraft").mkdir(parents=True)
     state = json.loads(STATE_FIXTURE.read_text(encoding="utf-8"))
@@ -351,7 +359,7 @@ async def test_reopened_persisted_pcb_error_is_prominent(web_harness):
 async def test_live_terminal_run_repaints_same_pcb_error(web_harness):
     user, web, store, account = web_harness
     store.set_tier(EMAIL, "pro")
-    pid = store.create_project(account.id, "Live PCB diagnostics")
+    pid = seed_project(store, account.id, "Live PCB diagnostics")
     base = store.projects_dir / str(account.id) / str(pid)
     generated = base / "generated" / "LIVE"
     generated.mkdir(parents=True)

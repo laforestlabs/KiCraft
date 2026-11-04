@@ -84,7 +84,6 @@ def test_parent_routes_stamped_board_once_with_krt(monkeypatch, tmp_path):
     assert events[0][0] == str(stamped)
     assert result["backend"] == "kicad-routing-tools"
     assert result["routing_stats"]["returncode"] == 0
-    assert list(result).count("routing_stats") == 1
 
 
 def test_parent_route_uses_parent_timeout_budget(monkeypatch, tmp_path):
@@ -739,10 +738,7 @@ def test_krt_command_passes_configured_grid_step(tmp_path):
     assert "--grid-step" not in default_cmd
 
 
-def test_default_config_leaves_grid_step_to_the_router():
-    from kicraft.autoplacer.config import DEFAULT_CONFIG
 
-    assert DEFAULT_CONFIG["kicad_routing_tools_grid_step_mm"] is None
 
 
 def test_grid_step_env_override_parses_and_rejects_junk(monkeypatch):

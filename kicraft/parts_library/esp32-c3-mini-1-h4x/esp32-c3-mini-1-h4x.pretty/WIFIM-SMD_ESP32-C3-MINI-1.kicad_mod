@@ -69,7 +69,7 @@
 			(width 0.25)
 			(type solid)
 		)
-		(layer "F.SilkS")
+		(layer "F.Fab")
 		(uuid "ff131645-a7f6-4836-9f29-09cc87c96098")
 	)
 	(fp_line
@@ -79,7 +79,7 @@
 			(width 0.25)
 			(type solid)
 		)
-		(layer "F.SilkS")
+		(layer "F.Fab")
 		(uuid "d94b8952-2cc5-4a4c-98e1-b03c1b0ec8a7")
 	)
 	(fp_line
@@ -99,7 +99,7 @@
 			(width 0.25)
 			(type solid)
 		)
-		(layer "F.SilkS")
+		(layer "F.Fab")
 		(uuid "fe1f1043-b80a-4025-acdd-7f7c9c3c9126")
 	)
 	(fp_line
@@ -109,7 +109,7 @@
 			(width 0.25)
 			(type solid)
 		)
-		(layer "F.SilkS")
+		(layer "F.Fab")
 		(uuid "86e54c41-8875-4116-a39e-fee0751eaae2")
 	)
 	(fp_circle
@@ -131,8 +131,20 @@
 			(type solid)
 		)
 		(fill no)
-		(layer "F.SilkS")
+		(layer "F.Fab")
 		(uuid "66682a06-a449-4915-bc03-ffac5f07c73d")
+	)
+	(fp_line
+		(start -6.6 -5.0)
+		(end -6.6 5.6)
+		(stroke (width 0.25) (type solid))
+		(layer "F.SilkS")
+	)
+	(fp_line
+		(start 6.6 -5.0)
+		(end 6.6 5.6)
+		(stroke (width 0.25) (type solid))
+		(layer "F.SilkS")
 	)
 	(fp_circle
 		(center -7.2 -4)
@@ -613,6 +625,11 @@
 				(xy -6.6 -11) (xy 6.6 -11) (xy 6.6 -5.6) (xy -6.6 -5.6)
 			)
 		)
+	)
+	(model "${KIPRJMOD}/3dmodels/esp32-c3-mini-1-h4x/ESP32-C3-MINI-1.step"
+		(offset (xyz -6.6 -5.67 0))
+		(scale (xyz 1 1 1))
+		(rotate (xyz 0 0 0))
 	)
 	(embedded_fonts no)
 )

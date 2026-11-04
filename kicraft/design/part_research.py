@@ -201,13 +201,16 @@ def _range_quantities(text: object) -> tuple[tuple[float, str], tuple[float, str
     parts = [part.strip() for part in re.split(r"[~～]", head)]
     if len(parts) != 2:
         return None
+    # Apply the complete unit, including any SI prefix, to a unitless endpoint.
+    matches = [_QUANTITY_RE.fullmatch(part) for part in parts]
+    if all(matches):
+        if not matches[0].group(2) and matches[1].group(2):
+            parts[0] += matches[1].group(2)
+        elif not matches[1].group(2) and matches[0].group(2):
+            parts[1] += matches[0].group(2)
     low, high = _quantity(parts[0]), _quantity(parts[1])
     if low is None or high is None:
         return None
-    if low[1] == "count" and high[1] != "count":
-        low = (low[0], high[1])
-    elif high[1] == "count" and low[1] != "count":
-        high = (high[0], low[1])
     if low[1] != high[1]:
         return None
     return (low, high) if low[0] <= high[0] else (high, low)
@@ -327,6 +330,9 @@ def _class_tokens(component_class: str) -> set[str]:
         if len(token) >= 3 and token not in _WEAK_TOKENS
     }
 
+# Only this module's strict catalog search can attest to an untruncated match.
+_STRICT_SEARCH_PROOF = object()
+
 
 def search_candidates(
     component_class: str,
@@ -339,7 +345,7 @@ def search_candidates(
 
     Deduplicated by LCSC id across phrases, so a row found by two phrases is one candidate.
     """
-    search = searcher or (lambda query, cap: jlcparts.search(query, limit=cap))
+    search = searcher or (lambda query, cap: jlcparts.search(query, limit=cap, strict=True))
     found: dict[str, dict] = {}
     for phrase in class_keywords(component_class, keywords):
         for row in search(phrase, limit) or ():
@@ -348,10 +354,14 @@ def search_candidates(
             lcsc = str(row.get("lcsc") or "").strip().upper()
             if not lcsc or lcsc in found:
                 continue
-            # Which phrase found it is evidence in its own right: the catalog matched that phrase
-            # against the row's own text (mfr/description/manufacturer/package), and the text it
-            # hands back is truncated, so a class word past the cut is invisible to a reader here.
-            found[lcsc] = {**dict(row), "_matched_phrase": phrase}
+            candidate = dict(row)
+            candidate.pop("_matched_phrase", None)
+            candidate.pop("_matched_phrase_proof", None)
+            if searcher is None:
+                # Strict search matched the original query against full catalog fields.
+                candidate["_matched_phrase"] = phrase
+                candidate["_matched_phrase_proof"] = _STRICT_SEARCH_PROOF
+            found[lcsc] = candidate
     return list(found.values())
 
 
@@ -398,11 +408,13 @@ def choose_candidate(
     for row in rows:
         candidate = dict(row)
         text = _row_text(candidate)
-        phrase = str(candidate.get("_matched_phrase") or "").casefold()
-        # The class's own phrase finding the row is evidence: the catalog matched those words
-        # against the row's text, and only a truncated view of that text reaches this function.
+        phrase = (
+            str(candidate.get("_matched_phrase") or "").casefold()
+            if candidate.get("_matched_phrase_proof") is _STRICT_SEARCH_PROOF
+            else ""
+        )
         hits = sum(1 for token in tokens if token in text or token in phrase)
-        if not hits:
+        if hits != len(tokens):
             rejected["no_class_word"] += 1
             continue
         if _row_stock(candidate) < min_stock:
@@ -427,10 +439,15 @@ def choose_candidate(
         return None, f"no catalog row for {component_class!r} qualified ({why or 'no rows'})"
 
     hits, stock, _neg_price, _lcsc, best = max(scored, key=lambda item: item[:4])
-    matched = sorted(token for token in tokens if token in _row_text(best))
+    matched = sorted(tokens)
+    evidence = (
+        "its visible catalog text"
+        if all(token in _row_text(best) for token in tokens)
+        else "its full catalog search match"
+    )
     return best, (
-        f"{best.get('model') or best.get('lcsc')} matches {', '.join(matched)} in its own "
-        f"description, is in stock ({stock}) and is a single-device {component_class}"
+        f"{best.get('model') or best.get('lcsc')} matches {', '.join(matched)} in {evidence}, "
+        f"is in stock ({stock}) and is a single-device {component_class}"
     )
 
 
@@ -578,8 +595,9 @@ def build_record(
             "lcsc": lcsc or None,
             "catalog_description": str(candidate.get("description") or ""),
             "why": (
-                f"the demanded class {component_class!r} had no placeable reviewed part; this part's "
-                "catalog description names the class and it is in stock"
+                f"the demanded class {component_class!r} had no placeable reviewed part; its "
+                "catalog text or strict full-catalog match names the class terms, and it met "
+                "the catalog stock floor"
             ),
         },
     }

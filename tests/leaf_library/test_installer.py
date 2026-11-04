@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -16,9 +17,28 @@ from kicraft.autoplacer.brain import pins as pins_module
 from kicraft.leaf_library.installer import (
     LIBRARY_IMPORT_SNAPSHOT_ID,
     install_leaf,
+    verify_dependencies,
 )
 from kicraft.leaf_library.loader import LeafLibrary
+from kicraft.leaf_library.manifest import Dependencies
 from tests.leaf_library.test_loader import _populate_valid_leaf
+
+
+def test_dependency_check_uses_custom_directory_names(tmp_path, monkeypatch):
+    symbols = tmp_path / "custom-symbol-libraries"
+    footprints = tmp_path / "custom-footprint-libraries"
+    symbols.mkdir()
+    footprints.mkdir()
+    (symbols / "CustomProbe.kicad_sym").touch()
+    (footprints / "CustomProbe.pretty").mkdir()
+    monkeypatch.setenv("KICAD9_SYMBOL_DIR", str(symbols))
+    monkeypatch.setenv("KICAD9_FOOTPRINT_DIR", str(footprints))
+    manifest = SimpleNamespace(dependencies=Dependencies(
+        kicad_symbol_libs=["CustomProbe"],
+        kicad_footprint_libs=["CustomProbe"],
+        kicad_version_min="9",
+    ))
+    assert verify_dependencies(manifest) == []
 
 
 SYNTH_SCH = """
@@ -183,9 +203,10 @@ def test_install_multi_instance_no_collision(tmp_path):
     assert set(r1.ref_map.values()).isdisjoint(set(r2.ref_map.values()))
 
     # Autoplacer merge combined both instances without collision.
-    assert set(autoplacer["ic_groups"]) == set(r1.ref_map.values()) & set(
-        autoplacer["ic_groups"]
-    ) | (set(r2.ref_map.values()) & set(autoplacer["ic_groups"]))
+    assert autoplacer["ic_groups"] == {
+        r1.ref_map["U1"]: [r1.ref_map["C1"]],
+        r2.ref_map["U1"]: [r2.ref_map["C1"]],
+    }
 
 
 def test_install_content_hash_mismatch_at_install_time(tmp_path):
@@ -247,3 +268,63 @@ def test_ensure_applied_honors_library_pin(tmp_path):
     # Either "applied" or "already-current" is acceptable; we just want
     # the pin to be valid (not "snapshot-missing").
     assert next(iter(statuses.values())) in ("applied", "already-current")
+
+
+def test_failed_promotion_preserves_previous_leaf(tmp_path, monkeypatch):
+    import os
+    from kicraft.leaf_library import extractor
+
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "sheet.kicad_sch").write_text("(kicad_sch)")
+    snapshot = {}
+    for name in ("leaf_routed.kicad_pcb", "metadata.json", "solved_layout.json"):
+        path = project / name
+        path.write_text("(kicad_pcb)" if name.endswith(".kicad_pcb") else "{}")
+        snapshot[name] = path
+    library = tmp_path / "library"
+    old = library / "test-leaf"
+    old.mkdir(parents=True)
+    (old / "old-data").write_text("must survive")
+    req = extractor.PromoteRequest(
+        project, "project", "sheet", "sheet", "key", 1,
+        "test-leaf", "2.0.0", "fixture",
+    )
+    monkeypatch.setattr(extractor, "_round_snapshot_files", lambda *_: snapshot)
+    replace = os.replace
+
+    def fail_final(src, dst):
+        if Path(src).parent.name.startswith(".test-leaf.tmp.") and Path(dst) == old:
+            raise OSError("injected final rename failure")
+        return replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", fail_final)
+    with pytest.raises(OSError, match="injected final rename failure"):
+        extractor.extract_leaf(req, library, render=False)
+    assert (old / "old-data").read_text() == "must survive"
+
+
+def test_partial_install_records_written_schematic(tmp_path):
+    from kicraft.leaf_library.manifest import compute_content_hash, dump_manifest, load_manifest
+
+    leaf_dir = tmp_path / "lib" / "test-leaf"
+    _populate_installable_leaf(leaf_dir)
+    (leaf_dir / "metadata.json").write_text("{invalid")
+    manifest = load_manifest(leaf_dir)
+    dump_manifest(manifest.model_copy(update={"content_hash": compute_content_hash(leaf_dir)}), leaf_dir)
+    leaf = LeafLibrary(tmp_path / "lib").find("test-leaf@0.1.0")
+    project = tmp_path / "project"
+    project.mkdir()
+    recorded = {}
+
+    def record(path):
+        recorded[path] = path.read_bytes()
+
+    with pytest.raises(json.JSONDecodeError):
+        install_leaf(
+            leaf, project_dir=project, sheet_name="TEST", sheet_stem="TEST",
+            sheet_uuid="abc", instance=1, project_refs=[], autoplacer_dict={},
+            check_dependencies=False, on_schematic_written=record,
+        )
+    sheet = project / "TEST.kicad_sch"
+    assert recorded == {sheet: sheet.read_bytes()}

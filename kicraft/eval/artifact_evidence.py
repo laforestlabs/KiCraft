@@ -6,7 +6,9 @@ Unknown electrical/physical relations deliberately remain unverified.
 """
 from __future__ import annotations
 
-from kicraft.design.part_identity import physical_inventory_record
+from kicraft.design.part_identity import (
+    physical_inventory_record, reviewed_inventory, reviewed_part,
+)
 from kicraft.design.synthesis.symbol_pinout import SymbolNotFoundError, lookup_pins
 from . import electrical_artifact_evidence
 from .geometry_artifact_evidence import extract_geometry_facts
@@ -190,28 +192,35 @@ def _ordered_package_is_qualified(
     ordered_mpn = str(receipt_row.get("catalog_mpn") or "").strip()
     if not ordered_mpn:
         return False
-    selected = physical_inventory_record(
-        mpn=ordered_mpn, symbol=part.get("symbol"), footprint=part.get("footprint"),
+    symbol, footprint = part.get("symbol"), part.get("footprint")
+    selected = physical_inventory_record(mpn=ordered_mpn, symbol=symbol, footprint=footprint)
+    ordered_code = str(receipt_row.get("exact_lcsc") or "").strip().upper()
+    known = reviewed_part(ordered_mpn)
+    known_code = any(
+        candidate.lcsc and candidate.lcsc.upper() == ordered_code
+        for candidate in reviewed_inventory()
     )
-    # A printed MPN can name different manufacturers (for example USBLC6).
-    # A manufacturer-qualified record cannot borrow another supplier's order.
-    if selected is not None and selected.lcsc is not None:
-        if receipt_row.get("exact_lcsc") != selected.lcsc:
+    # A known MPN on the wrong pair, or a known C# attached to a different
+    # MPN, cannot be rescued by the generic case exception.
+    if (selected is None and (known is not None or known_code)) or (
+        known_code and selected is not None and not selected.lcsc
+    ):
+        return False
+    if selected is not None and selected.lcsc:
+        if ordered_code != selected.lcsc.upper():
             return False
     if str(part.get("mpn") or "").strip():
         return selected is not None and selected.identity == record.identity
-    if selected is not None:
-        return True
-    if record.bundle != "kicad-standard":
-        return False
-    # Only finite, reviewed IPC chip cases have this generic exception.
-    # Arbitrary inductors/connectors and explicit unknown MPNs never do.
+    # Only finite, reviewed IPC chip cases have a generic exception. When the
+    # selected order is reviewed, its exact catalog package must agree too.
     case = re.match(r"^(\d{4}) \((\d{4}) metric\)", record.package, re.I)
-    if case is None:
-        return False
-    package = re.sub(r"\s+", "", str(receipt_row.get("package") or "")).casefold()
-    imperial, metric = case.groups()
-    return package in {imperial, f"{imperial}({metric}metric)"}
+    if case is not None and record.bundle == "kicad-standard":
+        package = re.sub(r"\s+", "", str(receipt_row.get("package") or "")).casefold()
+        imperial, metric = case.groups()
+        if package not in {imperial, f"{imperial}({metric}metric)"}:
+            return False
+        return selected is not None or bool(ordered_code)
+    return selected is not None
 
 
 def _reconcile_inventory(facts: dict[str, Any]) -> None:
@@ -277,10 +286,28 @@ def _reconcile_inventory(facts: dict[str, Any]) -> None:
             source_unverified.append(ref)
         elif row.get("verdict") == "pass":
             if _ordered_package_is_qualified(part, record, row):
+                selected = physical_inventory_record(
+                    mpn=str(row.get("catalog_mpn") or ""),
+                    symbol=part.get("symbol"), footprint=part.get("footprint"),
+                )
+                if selected is not None and selected.lcsc and row.get("exact_lcsc") == selected.lcsc:
+                    identities[-1] = {
+                        "identity": selected.identity,
+                        "package": selected.package,
+                        "footprint": selected.footprint,
+                    }
+                rated = (
+                    dict(selected.operating_limits)
+                    if selected is not None and selected.lcsc
+                    and row.get("exact_lcsc") == selected.lcsc
+                    and selected.manufacturer_sources
+                    else {}
+                )
                 inventory.append({
                     "ref": ref, "mpn": row.get("catalog_mpn"), "manufacturer": row.get("manufacturer"),
                     "source_url": f"https://www.lcsc.com/product-detail/{row.get('exact_lcsc')}",
-                    "package": row.get("package"), "rated_limits": {"assembly_stock": row.get("assembly_stock"), "retail_stock": row.get("retail_stock")},
+                    "manufacturer_sources": list(selected.manufacturer_sources) if rated else [],
+                    "package": row.get("package"), "rated_limits": rated,
                 })
             else:
                 source_unverified.append(ref)
@@ -326,9 +353,9 @@ def _verified_snapshot_board(rundir: Path, board: Path, declared: Path, state: M
     """Recognize an unchanged run copy without loading its external declared board."""
     try:
         relative = board.resolve().relative_to(rundir.resolve())
-        if len(relative.parts) != 3 or not declared.is_absolute():
+        if len(relative.parts) < 3 or relative.parts[0] != "generated" or not declared.is_absolute():
             return False
-        origin = declared.parents[2]
+        origin = declared.parents[len(relative.parts) - 1]
         if (origin / relative).resolve() != declared.resolve():
             return False
         if _delivered_board_path(origin, state, origin / "generated") != declared:
@@ -350,9 +377,51 @@ def _verified_snapshot_board(rundir: Path, board: Path, declared: Path, state: M
 
 
 def _delivered_board_path(rundir: Path, state: Mapping[str, Any], generated: Path) -> Path | None:
-    """Select exactly one promoted ``generated/<stem>/<stem>.kicad_pcb`` board."""
+    """Select the promoted board in the authoritative generation, when recorded."""
     if not generated.is_dir():
         return None
+    artifacts = state.get("artifacts") if isinstance(state.get("artifacts"), Mapping) else {}
+    declared = artifacts.get("routed_pcb")
+    project_dir = artifacts.get("project_dir")
+    if project_dir is not None:
+        if not isinstance(project_dir, str) or not project_dir:
+            return None
+        directory = Path(project_dir)
+        if not directory.is_absolute():
+            directory = rundir / directory
+        try:
+            directory.resolve().relative_to(generated.resolve())
+        except (OSError, ValueError):
+            if not isinstance(declared, str) or not Path(declared).is_absolute():
+                return None
+            parts = directory.parts
+            if "generated" not in parts:
+                return None
+            relative_dir = Path(*parts[len(parts) - 1 - parts[::-1].index("generated"):])
+            board = rundir / relative_dir / f"{directory.name}.kicad_pcb"
+            return board if _verified_snapshot_board(rundir, board, Path(declared), state) else None
+        board = directory / f"{directory.name}.kicad_pcb"
+        if not board.is_file():
+            return None
+        if declared is not None:
+            if not isinstance(declared, str) or not declared:
+                return None
+            candidate = Path(declared)
+            if not candidate.is_absolute():
+                candidate = rundir / candidate
+            if candidate.resolve() != board.resolve():
+                return None
+        return board
+    if isinstance(declared, str) and declared:
+        candidate = Path(declared)
+        if not candidate.is_absolute():
+            candidate = rundir / candidate
+        try:
+            candidate.resolve().relative_to(generated.resolve())
+            if candidate.name == f"{candidate.parent.name}.kicad_pcb" and candidate.is_file():
+                return candidate
+        except (OSError, ValueError):
+            pass
     canonical = sorted(
         directory / f"{directory.name}.kicad_pcb"
         for directory in generated.iterdir()
@@ -360,8 +429,6 @@ def _delivered_board_path(rundir: Path, state: Mapping[str, Any], generated: Pat
     )
     if len(canonical) != 1:
         return None
-    artifacts = state.get("artifacts") if isinstance(state.get("artifacts"), Mapping) else {}
-    declared = artifacts.get("routed_pcb") if isinstance(artifacts, Mapping) else None
     if declared is None:
         return canonical[0]
     if not isinstance(declared, str):
@@ -551,7 +618,12 @@ def _result_status(check: dict[str, Any], facts: dict[str, Any]) -> str:
         if not facts.get("pin_mapping") or facts.get("unclassified_bom_refs") or facts.get("unmapped_bom_refs"):
             return "unverified"
     elif kind == "part_inventory":
-        if not facts.get("part_inventory") or facts.get("unclassified_bom_refs") or facts.get("unqualified_source_refs"):
+        if (
+            not facts.get("part_inventory")
+            or facts.get("unclassified_bom_refs")
+            or facts.get("unqualified_source_refs")
+            or _check_facts(check, facts) is not None
+        ):
             return "unverified"
     elif kind == "artifacts":
         if not facts.get("verified_export_paths"):

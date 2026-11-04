@@ -1101,7 +1101,7 @@ def test_voltage_divider_rejects_unachievable_error_bound():
         lower_requirement(requirement)
 
 
-@pytest.mark.parametrize("capacitance", [10, 400])
+@pytest.mark.parametrize("capacitance", [10])
 def test_i2c_pullup_lowerer_accepts_bus_capacitance_boundaries(capacitance):
     requirement = _requirement(
         "i2c-pullups",
@@ -1109,6 +1109,29 @@ def test_i2c_pullup_lowerer_accepts_bus_capacitance_boundaries(capacitance):
         ports={"vdd": "3V3", "sda": "SDA", "scl": "SCL"},
     )
     assert lower_requirement(requirement) is not None
+
+@pytest.mark.parametrize("speed,capacitance,value", [
+    (400000, 100, "2.2k"),
+    (100000, 100, "10k"),
+    (100000, 200, "4.7k"),
+])
+def test_i2c_pullup_emits_exact_selected_resistance(speed, capacitance, value):
+    artifact = lower_requirement(_requirement(
+        "i2c-pullups",
+        parameters={"speed_hz": speed, "bus_capacitance_pf": capacitance, "voltage": 3.3},
+        ports={"vdd": "3V3", "sda": "SDA", "scl": "SCL"},
+    ))
+    assert artifact.groups[0].value == value
+
+
+@pytest.mark.parametrize("speed,capacitance", [(400000, 400), (1000000, 400)])
+def test_i2c_pullup_refuses_when_all_offered_values_exceed_rise_time(speed, capacitance):
+    with pytest.raises(ValueError):
+        lower_requirement(_requirement(
+            "i2c-pullups",
+            parameters={"speed_hz": speed, "bus_capacitance_pf": capacitance, "voltage": 3.3},
+            ports={"vdd": "3V3", "sda": "SDA", "scl": "SCL"},
+        ))
 
 
 @pytest.mark.parametrize("capacitance", [9, 401])
@@ -2499,7 +2522,7 @@ def test_fused_distribution_has_distinct_post_fuse_outputs_and_safe_enable(chann
     artifact = lower_requirement(_distribution_requirement(channels=channels, current=0.5))
     assert artifact.lowerer_id == "fused-power-distribution@1"
     pins = {(pin.role, pin.index, pin.pin): pin.net for pin in artifact.pins}
-    source_bus = "__KICRAFT_DISTRIBUTION__SWITCHED"
+    source_bus = "__KICRAFT_DISTRIBUTION__distribution__SWITCHED"
     for index in range(channels):
         output = f"LOAD_{index + 1}_POSITIVE"
         # A distinct fuse is the only route from the switched source to each
@@ -2507,12 +2530,12 @@ def test_fused_distribution_has_distinct_post_fuse_outputs_and_safe_enable(chann
         assert pins[("branch_fuse", index, "1")] == source_bus
         assert pins[("branch_fuse", index, "2")] == output
     assert pins[("source_fuse", 0, "1")] == "SOURCE_POSITIVE"
-    assert pins[("source_fuse", 0, "2")] == "__KICRAFT_DISTRIBUTION__SOURCE_FUSED"
-    assert pins[("global_switch", 0, "1")] == "__KICRAFT_DISTRIBUTION__SOURCE_FUSED"
+    assert pins[("source_fuse", 0, "2")] == "__KICRAFT_DISTRIBUTION__distribution__SOURCE_FUSED"
+    assert pins[("global_switch", 0, "1")] == "__KICRAFT_DISTRIBUTION__distribution__SOURCE_FUSED"
     assert pins[("global_switch", 0, "5")] == source_bus
-    assert pins[("global_switch", 0, "4")] == "__KICRAFT_DISTRIBUTION__GATE"
-    assert pins[("gate_clamp", 0, "1")] == "__KICRAFT_DISTRIBUTION__SOURCE_FUSED"
-    assert pins[("gate_clamp", 0, "2")] == "__KICRAFT_DISTRIBUTION__GATE"
+    assert pins[("global_switch", 0, "4")] == "__KICRAFT_DISTRIBUTION__distribution__GATE"
+    assert pins[("gate_clamp", 0, "1")] == "__KICRAFT_DISTRIBUTION__distribution__SOURCE_FUSED"
+    assert pins[("gate_clamp", 0, "2")] == "__KICRAFT_DISTRIBUTION__distribution__GATE"
     assert pins[("enable_jumper", 0, "2")] == "SOURCE_RETURN"
 
 
@@ -2546,7 +2569,7 @@ def test_five_volt_power_cycle_is_real_reverse_blocked_and_discharged():
     pins = {(pin.role, pin.index, pin.pin): pin.net for pin in artifact.pins}
     for index in range(2):
         output = f"LOAD_{index + 1}_POSITIVE"
-        assert pins[("branch_switch", index, "1")] == f"__KICRAFT_DISTRIBUTION__FUSED_{index + 1}"
+        assert pins[("branch_switch", index, "1")] == f"__KICRAFT_DISTRIBUTION__distribution__FUSED_{index + 1}"
         assert pins[("branch_switch", index, "6")] == output
         assert pins[("output_discharge", index, "1")] == output
         assert pins[("output_discharge", index, "2")] == "SOURCE_RETURN"
@@ -2562,13 +2585,13 @@ def test_high_voltage_power_cycle_has_isolated_rtn_and_real_global_efuse(voltage
     assert switch.mpn == "KMR232NGULCLFS"
     pins = {(pin.role, pin.index, pin.pin): pin.net for pin in artifact.pins}
     assert pins[("global_efuse", 0, "9")] == "SOURCE_RETURN"
-    assert pins[("global_efuse", 0, "8")] == "__KICRAFT_DISTRIBUTION__EFUSE_RTN"
-    assert pins[("global_efuse", 0, "17")] == "__KICRAFT_DISTRIBUTION__EFUSE_RTN"
-    assert pins[("global_efuse", 0, "15")] == "__KICRAFT_DISTRIBUTION__EFUSE_OUT"
-    assert pins[("efuse_power_cycle_button", 0, "2")] == "__KICRAFT_DISTRIBUTION__EFUSE_RTN"
+    assert pins[("global_efuse", 0, "8")] == "__KICRAFT_DISTRIBUTION__distribution__EFUSE_RTN"
+    assert pins[("global_efuse", 0, "17")] == "__KICRAFT_DISTRIBUTION__distribution__EFUSE_RTN"
+    assert pins[("global_efuse", 0, "15")] == "__KICRAFT_DISTRIBUTION__distribution__EFUSE_OUT"
+    assert pins[("efuse_power_cycle_button", 0, "2")] == "__KICRAFT_DISTRIBUTION__distribution__EFUSE_RTN"
     assert pins[("efuse_power_cycle_button", 0, "1")] == pins[("global_efuse", 0, "7")]
     for index in range(2):
-        assert pins[("branch_fuse", index, "1")] == "__KICRAFT_DISTRIBUTION__EFUSE_OUT"
+        assert pins[("branch_fuse", index, "1")] == "__KICRAFT_DISTRIBUTION__distribution__EFUSE_OUT"
         assert pins[("efuse_output_discharge", index, "1")] == f"LOAD_{index + 1}_POSITIVE"
     assert {row.pin for row in artifact.no_connects if row.role == "global_efuse"} == {
         "4", "6", "10", "13", "14"
@@ -2585,22 +2608,22 @@ def test_discrete_rgb_status_uses_actual_source_and_output_presence():
         _distribution_requirement(channels=2, voltage=24.0, current=0.5, enable=False, rgb=True)
     )
     pins = {(pin.role, pin.index, pin.pin): pin.net for pin in artifact.pins}
-    assert pins[("rgb_status_led", 0, "2")] == "__KICRAFT_DISTRIBUTION__SOURCE_FUSED"
-    assert pins[("rgb_base_resistor", 0, "1")] == "__KICRAFT_DISTRIBUTION__SOURCE_FUSED"
+    assert pins[("rgb_status_led", 0, "2")] == "__KICRAFT_DISTRIBUTION__distribution__SOURCE_FUSED"
+    assert pins[("rgb_base_resistor", 0, "1")] == "__KICRAFT_DISTRIBUTION__distribution__SOURCE_FUSED"
     assert pins[("rgb_base_resistor", 5, "1")] == "LOAD_1_POSITIVE"
-    assert pins[("rgb_base_resistor", 10, "1")] == "__KICRAFT_DISTRIBUTION__SOURCE_FUSED"
+    assert pins[("rgb_base_resistor", 10, "1")] == "__KICRAFT_DISTRIBUTION__distribution__SOURCE_FUSED"
     assert pins[("rgb_sense_base_resistor", 0, "1")] == "LOAD_1_POSITIVE"
-    assert pins[("rgb_output_sense", 0, "3")] == "__KICRAFT_DISTRIBUTION__RGB_BASE_0"
+    assert pins[("rgb_output_sense", 0, "3")] == "__KICRAFT_DISTRIBUTION__distribution__RGB_BASE_0"
     assert pins[("rgb_driver", 0, "2")] == "SOURCE_RETURN"
 
 
 @pytest.mark.parametrize("reset,role,anode,cathodes", [
-    (False, "rgb_status_led", "__KICRAFT_DISTRIBUTION__SOURCE_FUSED", (
-        "__KICRAFT_DISTRIBUTION__RGB_RED_K", "__KICRAFT_DISTRIBUTION__RGB_GREEN_K",
-        "__KICRAFT_DISTRIBUTION__RGB_BLUE_K",
+    (False, "rgb_status_led", "__KICRAFT_DISTRIBUTION__distribution__SOURCE_FUSED", (
+        "__KICRAFT_DISTRIBUTION__distribution__RGB_RED_K", "__KICRAFT_DISTRIBUTION__distribution__RGB_GREEN_K",
+        "__KICRAFT_DISTRIBUTION__distribution__RGB_BLUE_K",
     )),
     (True, "efuse_rgb_status_led", "SOURCE_POSITIVE", (
-        "__KICRAFT_EFUSE_RGB_R", "__KICRAFT_EFUSE_RGB_G", "__KICRAFT_EFUSE_RGB_B",
+        "__KICRAFT_EFUSE_distribution__RGB_R", "__KICRAFT_EFUSE_distribution__RGB_G", "__KICRAFT_EFUSE_distribution__RGB_B",
     )),
 ])
 def test_distribution_rgb_uses_reviewed_led_and_three_real_channel_paths(reset, role, anode, cathodes):
@@ -2760,3 +2783,48 @@ def test_efuse_divider_allows_its_input_with_resistor_and_source_tolerance(volta
     )
     assert uvlo_min > 1.225
     assert ovp_max < 1.170
+
+
+@pytest.mark.parametrize("voltage,reset", [(5.0, False), (24.0, True)])
+def test_distribution_internal_nodes_are_unique_per_requirement(voltage, reset):
+    base = _distribution_requirement(channels=2, voltage=voltage, reset=reset, rgb=True)
+    first = lower_requirement(base.model_copy(update={"id": "first"}))
+    second = lower_requirement(base.model_copy(update={"id": "second"}))
+    def internal(artifact):
+        return {pin.net for pin in artifact.pins if pin.net.startswith(
+            ("__KICRAFT_DISTRIBUTION__", "__KICRAFT_EFUSE_")
+        )}
+    assert internal(first)
+    assert internal(second)
+    assert not internal(first) & internal(second)
+
+
+def test_analog_power_cycle_internal_nodes_are_unique_per_requirement():
+    base = CircuitRequirement(
+        id="first", sheet="ANALOG", role="power_input",
+        family="analog-power-cycle-reset",
+        parameters={"rail_voltage_v": 5.0, "source_current_a": 0.5},
+        ports={"input": "IN", "output": "OUT", "gnd": "GND"},
+    )
+    first = lower_requirement(base)
+    second = lower_requirement(base.model_copy(update={"id": "second"}))
+    def internal(artifact):
+        return {pin.net for pin in artifact.pins if pin.net.startswith("__KICRAFT_ANALOG_POWER_CYCLE__")}
+    assert internal(first)
+    assert internal(second)
+    assert not internal(first) & internal(second)
+
+
+def test_rgb_indicator_internal_nodes_are_unique_per_requirement():
+    base = CircuitRequirement(
+        id="first", sheet="IO", role="user_io", family="rgb-led",
+        parameters={"target_current_ma": 2.0},
+        ports={"vdd_5v": "5V", "gnd": "GND", "red": "R", "green": "G", "blue": "B"},
+    )
+    first = lower_requirement(base)
+    second = lower_requirement(base.model_copy(update={"id": "second"}))
+    def internal(artifact):
+        return {pin.net for pin in artifact.pins if pin.net.startswith("__KICRAFT_RGB_INDICATOR_")}
+    assert internal(first)
+    assert internal(second)
+    assert not internal(first) & internal(second)

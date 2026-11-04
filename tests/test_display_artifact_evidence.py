@@ -269,12 +269,12 @@ def test_rgb_lowerer_has_current_limiters_and_deterministic_off_controls():
     assert artifact.lowerer_id == "common-anode-rgb-indicator@2"
     assert pins["rgb_led", 0, "1"] == "+5V"
     assert [pins["rgb_led", 0, pin] for pin in ("2", "3", "4")] == [
-        "__KICRAFT_RGB_INDICATOR_RED_K",
-        "__KICRAFT_RGB_INDICATOR_GREEN_K",
-        "__KICRAFT_RGB_INDICATOR_BLUE_K",
+        "__KICRAFT_RGB_INDICATOR_status__RED_K",
+        "__KICRAFT_RGB_INDICATOR_status__GREEN_K",
+        "__KICRAFT_RGB_INDICATOR_status__BLUE_K",
     ]
     for index, gpio in enumerate(("GPIO0", "GPIO1", "GPIO2")):
-        base = f"__KICRAFT_RGB_INDICATOR_BASE_{index}"
+        base = f"__KICRAFT_RGB_INDICATOR_status__BASE_{index}"
         assert pins["channel_driver", index, "2"] == "GND"
         assert pins["base_resistor", index, "1"] == gpio
         assert pins["base_resistor", index, "2"] == base
@@ -297,7 +297,7 @@ def test_rgb_lowering_preserves_exact_identity_and_reviewed_channel_wiring(reque
     pins = {pin.pin: pin.net for pin in artifact.pins if pin.role == "rgb_led"}
     assert pins[led.port_pins["common_anode"]] == "+5V"
     for color in ("red", "green", "blue"):
-        assert pins[led.port_pins[f"{color}_cathode"]] == f"__KICRAFT_RGB_INDICATOR_{color.upper()}_K"
+        assert pins[led.port_pins[f"{color}_cathode"]] == f"__KICRAFT_RGB_INDICATOR_rgb__{color.upper()}_K"
 
 
 @pytest.mark.parametrize("defect", ["wrong_pair", "open_channel"])

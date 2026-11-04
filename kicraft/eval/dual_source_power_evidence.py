@@ -11,7 +11,9 @@ from dataclasses import dataclass
 from typing import Any, Callable, Literal
 
 from kicraft.design.part_identity import physical_inventory_record
-from kicraft.design.synthesis.validation import _capacitance_farads, _resistance_ohms
+from kicraft.design.synthesis.validation import (
+    _R_INFIX_RE, _R_VALUE_RE, _capacitance_farads, _resistance_ohms,
+)
 
 SourceClass = Literal["host_5v", "single_cell_liion"]
 SourceVoltageVerifier = Callable[[dict[str, Any], str, str, SourceClass, float, float], bool]
@@ -183,6 +185,36 @@ def observe_dual_source_battery_power(
         or boost_pads.get("11") or boost_pads.get("12")
     ):
         return None
+
+    # Net names alone do not prove isolation: delivered low-resistance links
+    # can bypass the mux, its boost inductor, or short a supply to ground.
+    from .electrical_artifact_evidence import _two_terminal as delivered_terminals
+
+    links: dict[str, set[str]] = {}
+    for resistor, left, right in delivered_terminals(parts, pad_nets, "R"):
+        value = str(resistor.get("value") or "").strip()
+        resistance = _resistance_ohms(value)
+        # Zero is intentionally rejected by the shared current-limiter parser.
+        zero = _R_INFIX_RE.match(value)
+        if zero is not None:
+            is_zero = int(zero.group(1)) == 0 and int(zero.group(3)) == 0
+        else:
+            zero = _R_VALUE_RE.match(value)
+            is_zero = zero is not None and float(zero.group(1)) == 0
+        if is_zero or (resistance is not None and resistance <= 0.1):
+            links.setdefault(left[1], set()).add(right[1])
+            links.setdefault(right[1], set()).add(left[1])
+    power_nets = {host, battery_raw, battery_5v, output, ground, switch}
+    for net in power_nets:
+        visited = {net}
+        pending = [net]
+        while pending:
+            for peer in links.get(pending.pop(), ()):
+                if peer in power_nets and peer != net:
+                    return None
+                if peer not in visited:
+                    visited.add(peer)
+                    pending.append(peer)
 
     battery_part, battery_record = batteries[0]
     battery_pads = _pads(str(battery_part["ref"]), pad_nets)

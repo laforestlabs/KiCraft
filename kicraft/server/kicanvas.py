@@ -1,9 +1,10 @@
 """Reusable KiCanvas embed for the NiceGUI web app.
 
 KiCanvas (https://kicanvas.org, theacodes/kicanvas, MIT) is a read-only,
-browser-side WebGL viewer for KiCad files. We self-host the alpha bundle
-(`static/kicanvas.js`, fetched from https://kicanvas.org/kicanvas/kicanvas.js)
-so the product has no third-party runtime dependency or CDN drift.
+browser-side WebGL viewer for KiCad files. We self-host the alpha JavaScript
+bundle (`static/kicanvas.js`, fetched from https://kicanvas.org/kicanvas/kicanvas.js)
+to avoid JavaScript CDN drift. The upstream bundle still requests Google Fonts
+for its viewer typography and Material Symbols icons.
 
 The viewer renders one `<kicanvas-embed>` wrapping one or more
 `<kicanvas-source>` children. For a hierarchical project, KiCanvas links the

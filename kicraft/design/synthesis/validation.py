@@ -12,8 +12,10 @@ equivalent that the synthesis stage runs unconditionally before returning.
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
+from uuid import uuid4
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -62,6 +64,7 @@ class CheckResult:
     ok: bool
     message: str = ""
     offenders: list[str] = field(default_factory=list)
+    report_path: str | None = None
 
 
 class SynthesisValidationError(RuntimeError):
@@ -118,19 +121,11 @@ def _strip_lib_symbols_block(text: str) -> str:
         idx = out.find("(lib_symbols")
         if idx == -1:
             return out
-        # Walk parens to find the matching close.
-        depth = 0
-        end = -1
-        for i in range(idx, len(out)):
-            c = out[i]
-            if c == "(":
-                depth += 1
-            elif c == ")":
-                depth -= 1
-                if depth == 0:
-                    end = i + 1
-                    break
-        if end == -1:
+        from .symbol_library import _match_block
+
+        try:
+            end = idx + len(_match_block(out, idx))
+        except ValueError:
             return out  # malformed; let other checks catch it
         out = out[:idx] + (" " * (end - idx)) + out[end:]
 
@@ -149,19 +144,11 @@ def _iter_symbol_instance_blocks(text: str):
         if next_ch not in " \t\n\r(":
             pos = idx + 1
             continue
-        # Find matching close.
-        depth = 0
-        end = -1
-        for i in range(idx, len(stripped)):
-            c = stripped[i]
-            if c == "(":
-                depth += 1
-            elif c == ")":
-                depth -= 1
-                if depth == 0:
-                    end = i + 1
-                    break
-        if end == -1:
+        from .symbol_library import _match_block
+
+        try:
+            end = idx + len(_match_block(stripped, idx))
+        except ValueError:
             return
         yield idx, stripped[idx:end]
         pos = end
@@ -2190,7 +2177,8 @@ def _capacitance_farads(value: str) -> float | None:
     magnitude, prefix, unit = match.groups()
     if prefix is None and unit is None:
         return None
-    return float(magnitude) * _CAP_SCALE[(prefix or "").lower()]
+    capacitance = float(magnitude) * _CAP_SCALE[(prefix or "").lower()]
+    return capacitance if capacitance > 0 else None
 
 
 def _inductance_henries(value: str) -> float | None:
@@ -3044,45 +3032,37 @@ def _requirement_input_key(requirement, bom) -> str | None:
 def _recipe_transfer_pairs(requirement, bom) -> list[tuple[str, str]]:
     """Input/output net pairs that a curated recipe transfers between, from the recipe itself.
 
-    A curated recipe *is* the reviewed carrier for a converter ("a curated recipe owns its
-    connections"): its definition names which port is the power input and which is the output
-    (``Port("input", "power")`` / ``Port("output", "power")``), and the compiler binds those ports
-    to the design's own nets. §9.39 read only the reviewed *records*' ``power_transfer`` mapping, so
-    a regulator built the sanctioned way had no path at all and the board was refused -- live
-    seed-43 run (2026-09-26): ``no reviewed source-to-load transfer from 'VIN_PROTECTED' to
-    '+3V3'`` for an AMS1117 recipe whose pins plainly sit on those two nets.
+    A reviewed recipe contributes a path only when its exact components and
+    committed pin graph still realize the recipe, and its manifest binds the
+    same input/output nets as this requirement.
     """
     from kicraft.design.recipes import get_recipe
 
-    recipe_id = next(
-        (
-            str(getattr(row, "recipe", "") or "")
-            for row in getattr(bom, "recipe_ownership", ()) or ()
-            if requirement.id in (getattr(row, "requirement_ids", ()) or ())
-        ),
-        "",
-    )
-    if not recipe_id:
-        return []
-    try:
-        definition = get_recipe(recipe_id)
-    except Exception:  # noqa: BLE001 - an unknown recipe is another gate's business
-        return []
-    names = {str(getattr(port, "name", "")).strip().casefold() for port in definition.ports}
-    source_key = next((name for name in ("input", "vin", "vbus") if name in names), None)
-    if source_key is None:
-        return []
     ports = requirement.ports or {}
-    source_net = str(ports.get(source_key) or "")
-    if not source_net:
-        return []
     pairs: list[tuple[str, str]] = []
-    for key in ("output", "vout", "positive", "positive_output", "negative", "negative_output"):
-        if key not in names:
+    for manifest in getattr(bom, "recipe_ownership", ()) or ():
+        if requirement.id not in (getattr(manifest, "requirement_ids", ()) or ()):
             continue
-        target_net = str(ports.get(key) or "")
-        if target_net and target_net != source_net:
-            pairs.append((source_net, target_net))
+        recipe_id = str(getattr(manifest, "recipe", "") or "")
+        try:
+            definition = get_recipe(recipe_id)
+        except (KeyError, ValueError):
+            continue
+        names = {port.name for port in definition.ports}
+        source_key = next((name for name in ("input", "vin", "vbus") if name in names), None)
+        if source_key is None:
+            continue
+        bindings = getattr(manifest, "port_bindings", {}) or {}
+        source_net = ports.get(source_key)
+        if not source_net or bindings.get(source_key) != source_net:
+            continue
+        if not _has_trusted_recipe_topology_witness(requirement, bom, None, manifest=manifest):
+            continue
+        for key in ("output", "vout", "positive", "positive_output", "negative", "negative_output"):
+            target_net = ports.get(key)
+            if (key in names and target_net and target_net != source_net
+                    and bindings.get(key) == target_net):
+                pairs.append((source_net, target_net))
     return pairs
 
 
@@ -3797,7 +3777,9 @@ def _physical_requirement_parts(requirement, bom, reviewed, support_refs: set[st
     ]
 
 
-def _has_trusted_recipe_topology_witness(requirement, bom, component_class: str) -> bool:
+def _has_trusted_recipe_topology_witness(
+    requirement, bom, component_class: str | None, *, manifest=None
+) -> bool:
     """Prove a recipe topology from the committed parts *and* connected pins.
 
     Recipe ownership is provenance, not a waiver.  A witness is earned only when the
@@ -3811,16 +3793,23 @@ def _has_trusted_recipe_topology_witness(requirement, bom, component_class: str)
     from kicraft.design.recipes.registry import get_recipe
 
     manifests = [
-        manifest
-        for manifest in getattr(bom, "recipe_ownership", ()) or ()
-        if requirement.id in (getattr(manifest, "requirement_ids", ()) or ())
+        row
+        for row in ([manifest] if manifest is not None
+                    else getattr(bom, "recipe_ownership", ()) or ())
+        if requirement.id in (getattr(row, "requirement_ids", ()) or ())
     ]
     if not manifests:
         return False
-    nets = _nets_by_ref(bom)
+    nets: dict[tuple[str, str], set[str]] = defaultdict(set)
+    for connection in bom.connections:
+        for endpoint in connection.endpoints:
+            nets[(endpoint.ref, endpoint.pin)].add(connection.net_name)
+    no_connects = {(ep.ref, ep.pin) for ep in (getattr(bom, "no_connect_pins", ()) or ())}
     for manifest in manifests:
         recipe_id = str(getattr(manifest, "recipe", "") or "")
-        if not lowerer_witnesses_physical_class(recipe_id, component_class):
+        if component_class is not None and not lowerer_witnesses_physical_class(
+            recipe_id, component_class
+        ):
             continue
         try:
             definition = get_recipe(recipe_id)
@@ -3897,7 +3886,8 @@ def _has_trusted_recipe_topology_witness(requirement, bom, component_class: str)
                     and row.owner_id == recipe_id
                     and row.requirement_id == requirement.id
                     and row.net == net
-                    and nets.get(key[0], {}).get(key[1]) == net
+                    and nets.get(key) == {net}
+                    and key not in no_connects
                     for key, net in expected.items()
                 ):
                     return True
@@ -5514,7 +5504,8 @@ def check_erc(project_dir: Path, project_stem: str) -> CheckResult:
     root_sch = project_dir / f"{project_stem}.kicad_sch"
     if not root_sch.is_file():
         return CheckResult(name="9.12 ERC", ok=False, message=f"{root_sch.name} missing")
-    out_path = project_dir / f"{project_stem}_erc.rpt"
+    canonical_report = project_dir / f"{project_stem}_erc.rpt"
+    out_path = project_dir / f"{project_stem}.{uuid4().hex}_erc.rpt"
     try:
         proc = subprocess.run(
             [
@@ -5543,6 +5534,14 @@ def check_erc(project_dir: Path, project_stem: str) -> CheckResult:
             ok=False,
             message="kicad-cli timed out after 60s",
         )
+    if proc.returncode != 0:
+        return CheckResult(
+            name="9.12 ERC",
+            ok=False,
+            message=f"kicad-cli sch erc failed (exit {proc.returncode}): "
+                    f"{proc.stderr.strip()}",
+        )
+
 
     if not out_path.exists():
         return CheckResult(
@@ -5554,16 +5553,28 @@ def check_erc(project_dir: Path, project_stem: str) -> CheckResult:
     error_lines: list[str] = []
     try:
         report = json.loads(report_text)
-        for sheet in report.get("sheets", []) or []:
-            for v in sheet.get("violations", []) or []:
+        sheets = report["sheets"]
+        if not isinstance(sheets, list):
+            raise ValueError("sheets must be a list")
+        for sheet in sheets:
+            violations = sheet["violations"]
+            if not isinstance(violations, list):
+                raise ValueError("violations must be a list")
+            for v in violations:
                 if str(v.get("severity", "")).lower() == "error":
                     desc = v.get("description", "")
                     error_lines.append(f"{sheet.get('path', '?')}: {desc}")
-    except (json.JSONDecodeError, AttributeError):
-        # Text report fallback: count lines that look like errors.
-        for line in report_text.splitlines():
-            if re.search(r"\b(severity\s*[:=]\s*)?error\b", line, re.IGNORECASE):
-                error_lines.append(line.strip())
+    except (json.JSONDecodeError, AttributeError, KeyError, TypeError, ValueError) as exc:
+        return CheckResult(
+            name="9.12 ERC",
+            ok=False,
+            message=f"invalid kicad-cli ERC JSON report: {exc}",
+        )
+    try:
+        os.link(out_path, canonical_report)
+    except FileExistsError:
+        pass  # Preserve an existing report; this invocation has its own.
+
 
     if error_lines:
         return CheckResult(
@@ -5571,8 +5582,11 @@ def check_erc(project_dir: Path, project_stem: str) -> CheckResult:
             ok=False,
             message=f"{len(error_lines)} ERC error(s)",
             offenders=error_lines[:20],
+            report_path=out_path.name,
         )
-    return CheckResult(name="9.12 ERC", ok=True, message="ERC clean (0 errors)")
+    return CheckResult(
+        name="9.12 ERC", ok=True, message="ERC clean (0 errors)", report_path=out_path.name
+    )
 
 
 # ---------- §9.13 netlist faithfulness (Stage B) ----------
@@ -5734,9 +5748,9 @@ def check_netlist_faithfulness(project_dir: Path, project_stem: str, bom) -> Che
             ok=False,
             message=f"{root_sch.name} missing",
         )
-    out_path = project_dir / f"{project_stem}_netlist_check.net"
+    out_path = project_dir / f"{project_stem}.{uuid4().hex}_netlist_check.net"
     try:
-        subprocess.run(
+        result = subprocess.run(
             [
                 "kicad-cli",
                 "sch",
@@ -5764,16 +5778,20 @@ def check_netlist_faithfulness(project_dir: Path, project_stem: str, bom) -> Che
             ok=False,
             message="kicad-cli timed out after 60s",
         )
+    if result.returncode != 0:
+        return CheckResult(
+            name="9.13 netlist faithfulness",
+            ok=False,
+            message=f"kicad-cli netlist export failed (exit {result.returncode}): "
+                    f"{result.stderr.strip()}",
+        )
     if not out_path.exists():
         return CheckResult(
             name="9.13 netlist faithfulness",
             ok=False,
             message="kicad-cli produced no netlist",
         )
-    try:
-        extracted = _extract_netlist_groups(out_path.read_text())
-    finally:
-        out_path.unlink(missing_ok=True)
+    extracted = _extract_netlist_groups(out_path.read_text())
 
     merges, splits, lost = _compare_netlist_to_bom(extracted, bom)
     offenders = merges + splits + [f"pin missing from netlist: {e}" for e in lost]
@@ -5788,6 +5806,7 @@ def check_netlist_faithfulness(project_dir: Path, project_stem: str, bom) -> Che
             ),
             offenders=offenders[:20],
         )
+    out_path.unlink(missing_ok=True)
     n_wired = len({(ep.ref, str(ep.pin)) for c in bom.connections for ep in c.endpoints})
     return CheckResult(
         name="9.13 netlist faithfulness",

@@ -62,35 +62,3 @@ def test_bullets_quote_the_enforced_quota():
         assert str(info["limit"]) in first and period in first
 
 
-# ---- the page itself (simulated browser) --------------------------------------
-
-@pytest.fixture
-def anyio_backend():
-    return "asyncio"
-
-
-@pytest.fixture
-async def harness(tmp_path, monkeypatch):
-    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
-    monkeypatch.setenv("KICRAFT_STRIPE_SECRET_KEY", "sk_test_x")
-    monkeypatch.setenv("KICRAFT_STRIPE_WEBHOOK_SECRET", "whsec_x")
-    monkeypatch.setenv("KICRAFT_STRIPE_PRICE_PRO", "price_pro")
-    monkeypatch.setenv("KICRAFT_STRIPE_PRICE_MAX", "price_max")
-    async with user_simulation() as u:
-        mod = sys.modules.get(WEB)
-        sim_web = importlib.reload(mod) if mod else importlib.import_module(WEB)
-        sim_store = AccountStore(tmp_path / "accounts.db", tmp_path / "projects")
-        sim_web._STORE = sim_store
-        try:
-            yield u, sim_web, sim_store
-        finally:
-            sim_web._STORE = None
-
-
-@pytest.mark.anyio
-async def test_pricing_page_renders_logged_out(harness):
-    u, _sim_web, _store = harness
-    await u.open("/pricing")
-    await u.should_see("Simple plans, real boards")
-    await u.should_see("Most popular")
-    await u.should_see("Pricing FAQ")

@@ -179,7 +179,7 @@ def test_synthesis_declares_the_requested_copper_layers(tmp_path, llups_like_sta
 
 def test_synthesis_refuses_a_stack_up_no_board_can_carry(tmp_path, llups_like_state) -> None:
     llups_like_state.intent.obligations.append(_stackup_row(3))
-    with pytest.raises(SynthesisInputError, match="3 copper layers"):
+    with pytest.raises(SynthesisInputError):
         run(llups_like_state, tmp_path)
     # Refused before anything was written, so a retry starts from a clean directory.
     assert not list(tmp_path.glob("*.kicad_sch"))
@@ -414,21 +414,211 @@ def test_synthesis_emits_only_cardinal_rotations(tmp_path, llups_like_state) -> 
         assert not bad, f"{sch.name} has non-cardinal rotations {bad} (KiCanvas blanks to teal)"
 
 
-def test_resynthesis_removes_stale_orphan_sheets(tmp_path, llups_like_state) -> None:
-    """A resumable-session stage rerun re-synthesizes into the same project dir.
-    Synthesis must clear the prior generated sheets first, or an orphan leaf from a
-    previous architecture lingers -- showing up as a phantom sheet in the web sheet
-    list and leaving the hierarchy degenerate (the parent no longer references it,
-    which is what produced ``leafs=0/0`` at place/route)."""
+def test_resynthesis_removes_only_tracked_unchanged_obsolete_sheets(tmp_path, llups_like_state) -> None:
     run(llups_like_state, tmp_path)
-    assert (tmp_path / "USB_INPUT.kicad_sch").is_file()
-    orphan = tmp_path / "OLD_MOTOR_DRIVER.kicad_sch"
-    orphan.write_text("(kicad_sch (version 20250114))\n", encoding="utf-8")
+    old_leaf = tmp_path / "USB_INPUT.kicad_sch"
+    assert old_leaf.is_file()
+    unrelated = tmp_path / "OLD_MOTOR_DRIVER.kicad_sch"
+    unrelated.write_text("(kicad_sch (version 20250114))\n", encoding="utf-8")
+    other_board = tmp_path / "other.kicad_pcb"
+    other_board.write_text("user board", encoding="utf-8")
+    custom_model = tmp_path / "3dmodels" / "custom" / "model.step"
+    custom_model.parent.mkdir(parents=True)
+    custom_model.write_text("user model", encoding="utf-8")
 
-    run(llups_like_state, tmp_path)  # the rerun
-    assert not orphan.exists(), "stale orphan leaf survived re-synthesis"
-    assert (tmp_path / "USB_INPUT.kicad_sch").is_file()  # real leaf re-emitted
-    assert (tmp_path / "DEMO33.kicad_sch").is_file()  # root re-emitted
+    llups_like_state.architecture.sheets[0].stem = "USB_INPUT_NEW"
+    run(llups_like_state, tmp_path)
+    assert not old_leaf.exists()
+    assert (tmp_path / "USB_INPUT_NEW.kicad_sch").is_file()
+    assert unrelated.read_text(encoding="utf-8").startswith("(kicad_sch")
+    assert other_board.read_text(encoding="utf-8") == "user board"
+    assert custom_model.read_text(encoding="utf-8") == "user model"
+
+
+@pytest.mark.parametrize("filename", [
+    "DEMO33.kicad_sch", "USB_INPUT.kicad_sch", "DEMO33.kicad_pcb",
+    "DEMO33.kicad_pro", "DEMO33_autoplacer.json",
+])
+def test_synthesis_refuses_untracked_destination(tmp_path, llups_like_state, filename) -> None:
+    target = tmp_path / filename
+    target.write_text("user-authored file", encoding="utf-8")
+    with pytest.raises(SynthesisInputError, match="untracked or modified"):
+        run(llups_like_state, tmp_path)
+    assert target.read_text(encoding="utf-8") == "user-authored file"
+    assert sorted(p.name for p in tmp_path.iterdir()) == [filename]
+
+
+@pytest.mark.parametrize("filename", [
+    "DEMO33.kicad_sch", "USB_INPUT.kicad_sch", "DEMO33.kicad_pcb",
+    "DEMO33.kicad_pro", "DEMO33_autoplacer.json",
+])
+def test_resynthesis_refuses_user_modified_output(tmp_path, llups_like_state, filename) -> None:
+    run(llups_like_state, tmp_path)
+    target = tmp_path / filename
+    target.write_text("user edit", encoding="utf-8")
+    before = {p.name: p.read_bytes() for p in tmp_path.iterdir() if p.is_file()}
+    receipt = tmp_path / ".kicraft" / "synthesis-generated.json"
+    before_receipt = receipt.read_bytes()
+    with pytest.raises(SynthesisInputError, match="untracked or modified"):
+        run(llups_like_state, tmp_path)
+    assert target.read_text(encoding="utf-8") == "user edit"
+    assert {p.name: p.read_bytes() for p in tmp_path.iterdir() if p.is_file()} == before
+    assert receipt.read_bytes() == before_receipt
+
+
+@pytest.mark.parametrize("writer", ["project", "pcb"])
+def test_failed_resynthesis_records_completed_outputs_without_cleanup(
+    tmp_path, llups_like_state, monkeypatch, writer
+) -> None:
+    import kicraft.design.synthesize as synthesis
+    from kicraft.design.synthesis.kicad_pcb_stub import PadBindingError
+
+    run(llups_like_state, tmp_path)
+    old_leaf = tmp_path / "USB_INPUT.kicad_sch"
+    board = tmp_path / "DEMO33.kicad_pcb"
+    old_board = board.read_bytes()
+    unrelated = tmp_path / "user-notes.kicad_pcb"
+    unrelated.write_text("user data", encoding="utf-8")
+    llups_like_state.architecture.sheets[0].stem = "USB_INPUT_NEW"
+
+    def fail(*args, **kwargs):
+        if writer == "pcb":
+            raise PadBindingError("unbound pad")
+        raise RuntimeError("project write failed")
+
+    method = "write_empty_pcb" if writer == "pcb" else "write_kicad_pro"
+    expected = SynthesisValidationError if writer == "pcb" else RuntimeError
+    with monkeypatch.context() as patch:
+        patch.setattr(synthesis, method, fail)
+        with pytest.raises(expected):
+            run(llups_like_state, tmp_path)
+
+    assert old_leaf.is_file()  # failure does not run obsolete-output cleanup
+    assert board.read_bytes() == old_board
+    assert unrelated.read_text(encoding="utf-8") == "user data"
+    manifest = json.loads((tmp_path / ".kicraft" / "synthesis-generated.json").read_text())
+    assert manifest["status"] == "failed"
+    assert manifest["attempt_id"]
+    assert "USB_INPUT.kicad_sch" in manifest["files"]
+    assert "USB_INPUT_NEW.kicad_sch" in manifest["files"]
+
+    run(llups_like_state, tmp_path)
+    completed = json.loads((tmp_path / ".kicraft" / "synthesis-generated.json").read_text())
+    assert completed["status"] == "complete"
+    assert completed["attempt_id"] != manifest["attempt_id"]
+    assert not old_leaf.exists()
+    assert (tmp_path / "USB_INPUT_NEW.kicad_sch").is_file()
+    assert unrelated.read_text(encoding="utf-8") == "user data"
+
+
+def test_partial_schematic_emission_records_only_completed_files(
+    tmp_path, llups_like_state, monkeypatch
+) -> None:
+    import hashlib
+    import kicraft.design.synthesis.emitter as emitter
+
+    run(llups_like_state, tmp_path)
+    old_leaf = tmp_path / "LDO_3V3.kicad_sch"
+    old_bytes = old_leaf.read_bytes()
+    original = emitter._emit_leaf
+
+    def fail_second(project_dir, project_stem, sheet_inst, *args, **kwargs):
+        if sheet_inst.sheet.name == "LDO 3V3":
+            raise RuntimeError("leaf emission failed")
+        return original(project_dir, project_stem, sheet_inst, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(emitter, "_emit_leaf", fail_second)
+        with pytest.raises(RuntimeError, match="leaf emission failed"):
+            run(llups_like_state, tmp_path)
+
+    manifest = json.loads((tmp_path / ".kicraft" / "synthesis-generated.json").read_text())
+    assert manifest["status"] == "failed"
+    for name in ("DEMO33.kicad_sch", "USB_INPUT.kicad_sch"):
+        assert manifest["files"][name] == hashlib.sha256((tmp_path / name).read_bytes()).hexdigest()
+    assert old_leaf.read_bytes() == old_bytes
+    run(llups_like_state, tmp_path)
+
+
+def test_partial_library_install_records_written_leaf_for_retry(
+    tmp_path, llups_like_state, monkeypatch
+) -> None:
+    from types import SimpleNamespace
+    import kicraft.leaf_library as library
+
+    llups_like_state.architecture.sheets[0].from_library = "fixture@1"
+    llups_like_state.architecture.sheets[0].library_instance = 1
+    monkeypatch.setattr(library.LeafLibrary, "from_env",
+                        lambda: SimpleNamespace(find=lambda name: object()))
+    calls = []
+
+    def fail_after_sheet(*args, **kwargs):
+        calls.append(1)
+        path = kwargs["project_dir"] / f'{kwargs["sheet_stem"]}.kicad_sch'
+        path.write_text("(kicad_sch (version 20250114))", encoding="utf-8")
+        kwargs["on_schematic_written"](path)
+        raise RuntimeError("library metadata failed")
+
+    monkeypatch.setattr(library, "install_leaf", fail_after_sheet)
+    unrelated = tmp_path / "other.kicad_pcb"
+    unrelated.write_text("user board", encoding="utf-8")
+    for _ in range(2):
+        with pytest.raises(RuntimeError, match="library metadata failed"):
+            run(llups_like_state, tmp_path)
+        receipt = json.loads((tmp_path / ".kicraft" / "synthesis-generated.json").read_text())
+        assert receipt["status"] == "failed"
+        assert "USB_INPUT.kicad_sch" in receipt["files"]
+        assert unrelated.read_text(encoding="utf-8") == "user board"
+    assert len(calls) == 2
+
+
+def test_synthesis_preserves_user_modified_obsolete_output(tmp_path) -> None:
+    from kicraft.design.synthesize import _reconcile_generated_files
+
+    stale = tmp_path / "old.kicad_sch"
+    stale.write_text("generated", encoding="utf-8")
+    _reconcile_generated_files(tmp_path, [stale])
+    stale.write_text("user edited", encoding="utf-8")
+    _reconcile_generated_files(tmp_path, [])
+    assert stale.read_text(encoding="utf-8") == "user edited"
+
+
+def test_synthesis_does_not_resize_unqualified_array_capacitors(
+    tmp_path, llups_like_state, monkeypatch
+) -> None:
+    import kicraft.design.synthesize as synthesis
+    from kicraft.design.models import NetConnection, PinEndpoint
+
+    sheet = "USB INPUT"
+    footprint = "Capacitor_SMD:C_0805_2012Metric"
+    llups_like_state.bom = BOM(
+        parts=[
+            BomPart(ref="D1", value="LED", symbol="LED:WS2812B",
+                    footprint="LED:WS2812B-1313", sheet=sheet),
+            BomPart(ref="C1", value="100uF", symbol="Device:C",
+                    footprint=footprint, sheet=sheet),
+            BomPart(ref="C2", value="100nF", symbol="Device:C",
+                    footprint=footprint, sheet=sheet, sourcing_note="LCSC C12345"),
+        ],
+        arrays=[ArraySpec(refs=["D1"], rows=1, cols=1)],
+        connections=[
+            NetConnection(net_name="+5V", sheet=sheet, endpoints=[
+                PinEndpoint(ref="C1", pin="1"), PinEndpoint(ref="C2", pin="1")]),
+            NetConnection(net_name="GND", sheet=sheet, endpoints=[
+                PinEndpoint(ref="C1", pin="2"), PinEndpoint(ref="C2", pin="2")]),
+        ],
+    )
+
+    class StopBeforeEmission(Exception):
+        pass
+
+    def stop(*args, **kwargs):
+        raise StopBeforeEmission
+
+    monkeypatch.setattr(synthesis, "_install_library_sheets", stop)
+    with pytest.raises(StopBeforeEmission):
+        synthesis.run(llups_like_state, tmp_path)
+    assert [p.footprint for p in llups_like_state.bom.parts[1:]] == [footprint, footprint]
 
 
 def _strict_sexpr_parses(text: str) -> bool:

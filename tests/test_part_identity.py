@@ -352,6 +352,38 @@ def test_physical_inventory_is_exact_and_never_text_classified():
     )
 
 
+def test_catalogued_c3_passives_require_exact_identity_and_land_pair():
+    # These order codes can now be resolved as actual physical parts, but
+    # neither a different MPN nor a different land can borrow that evidence.
+    for mpn, symbol, footprint in (
+        ("CL10A105KB8NNNC", "Device:C", "Capacitor_SMD:C_0603_1608Metric"),
+        ("PTFR0603B680RP9", "Device:R", "Resistor_SMD:R_0603_1608Metric"),
+        ("0603WAF1003T5E", "Device:R", "Resistor_SMD:R_0603_1608Metric"),
+        ("KT-0603R", "Device:LED", "LED_SMD:LED_0603_1608Metric"),
+    ):
+        selected = physical_inventory_record(mpn=mpn, symbol=symbol, footprint=footprint)
+        assert selected is not None and selected.identity == mpn.casefold()
+        assert physical_inventory_record(mpn=mpn, symbol=symbol, footprint="Other:Land") is None
+        assert physical_inventory_record(mpn=mpn + "-other", symbol=symbol, footprint=footprint) is None
+
+
+def test_null_mpn_pair_does_not_select_an_arbitrary_manufacturer(monkeypatch):
+    from kicraft.design import part_identity
+
+    def candidate(identity, bundle):
+        return part_identity.ReviewedPart(
+            identity=identity, family="fixture", package="fixture",
+            bundle=bundle, symbol="Fixture:Part", footprint="Fixture:Land",
+        )
+
+    first = candidate("first", "first-bundle")
+    second = candidate("second", "second-bundle")
+    monkeypatch.setattr(part_identity, "reviewed_inventory", lambda: (first, second))
+    assert physical_inventory_record(
+        mpn=None, symbol="Fixture:Part", footprint="Fixture:Land"
+    ) is None
+
+
 def test_a_part_with_no_mpn_is_identified_by_its_own_reviewed_pair():
     """A bundle part carries no MPN, and its symbol/footprint pair is still exact evidence.
 

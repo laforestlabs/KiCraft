@@ -14,22 +14,20 @@ clearance is enforced at placement time, not in the .kicad_mod):
     tracks/copperpour/footprints ``not_allowed`` over the antenna, and
   * a non-empty courtyard covering the module body.
 
-Discovery is by footprint-name pattern; a guard test asserts the two known
-modules are found so the parametrization can never vacuously pass.
+Discovery uses reviewed self-contained Wi-Fi module identities, not RF-looking
+names: an external-antenna connector module does not contain a PCB antenna.
 """
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 import pytest
 
 pcbnew = pytest.importorskip("pcbnew")
 
+from kicraft.design.part_identity import reviewed_inventory
 _PARTS_LIBRARY = Path(__file__).resolve().parents[1] / "kicraft" / "parts_library"
 
-# Antenna-bearing RF module families. Matched against the .kicad_mod stem.
-_ANTENNA_NAME_RE = re.compile(r"WROOM|WIFI|BLE|NRF|ESP32|ESP8266", re.IGNORECASE)
 
 # Modules that MUST be discovered — guards against a glob/regex change silently
 # emptying the parametrization (a vacuous green).
@@ -40,11 +38,14 @@ _KNOWN_MODULES = {
 
 
 def _discover_antenna_footprints() -> list[tuple[str, str]]:
-    """Return [(pretty_dir, footprint_name)] for antenna-bearing modules."""
+    """Return the exact library pairs of reviewed self-contained Wi-Fi modules."""
     found: list[tuple[str, str]] = []
-    for mod in sorted(_PARTS_LIBRARY.glob("*/*.pretty/*.kicad_mod")):
-        if _ANTENNA_NAME_RE.search(mod.stem):
-            found.append((str(mod.parent), mod.stem))
+    for record in reviewed_inventory():
+        if "wifi-module" not in record.physical_features or not record.bundle:
+            continue
+        library, name = record.footprint.split(":", 1)
+        pretty = _PARTS_LIBRARY / record.bundle / f"{library}.pretty"
+        found.append((str(pretty), name))
     return found
 
 
@@ -66,11 +67,11 @@ def test_discovery_finds_known_modules():
     _ANTENNA_FOOTPRINTS,
     ids=[name for _, name in _ANTENNA_FOOTPRINTS],
 )
-def test_antenna_footprint_has_rf_keepout(pretty_dir: str, name: str):
+def test_antenna_footprint_has_rule_area_exclusion_flags(pretty_dir: str, name: str):
     fp = pcbnew.FootprintLoad(pretty_dir, name)
     assert fp is not None, f"failed to load {name} from {pretty_dir}"
 
-    # --- courtyard covers the body (non-empty on the mounted side) ---
+    # Presence only; manufacturer body coverage needs an independent geometry audit.
     crtyd_layer = (
         pcbnew.F_CrtYd if fp.GetLayer() == pcbnew.F_Cu else pcbnew.B_CrtYd
     )
@@ -80,7 +81,7 @@ def test_antenna_footprint_has_rf_keepout(pretty_dir: str, name: str):
         f"antenna keep-out area is unmodeled"
     )
 
-    # --- >=1 footprint-internal rule-area keep-out over the antenna ---
+    # At least one internal rule area has the required exclusion flags.
     # ZONES has no GetCount(); it is iterable -> materialize with list().
     rule_areas = [z for z in list(fp.Zones()) if z.GetIsRuleArea()]
     assert rule_areas, f"{name}: no footprint-internal rule-area zone (antenna keep-out missing)"

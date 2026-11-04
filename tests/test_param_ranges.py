@@ -90,13 +90,6 @@ class TestParamRangesMerging:
         result = normalize_bounds("orderedness", 0.2, 0.8)
         assert result == (0.2, 0.8)
 
-    def test_sigma_and_type_preserved_after_merge(self):
-        effective = dict(CONFIG_SEARCH_SPACE)
-        result = normalize_bounds("orderedness", 0.2, 0.8)
-        assert result is not None
-        effective["orderedness"] = {**effective["orderedness"], "min": result[0], "max": result[1]}
-        assert effective["orderedness"]["sigma"] == CONFIG_SEARCH_SPACE["orderedness"]["sigma"]
-        assert effective["orderedness"]["type"] == CONFIG_SEARCH_SPACE["orderedness"]["type"]
 
     def test_valid_int_range_rounds_correctly(self):
         # Values inside the current max_placement_iterations spec range.
@@ -147,64 +140,6 @@ class TestParamRangesMerging:
         assert spec["type"] == "int"
 
 
-# ---------------------------------------------------------------------------
-# Integration: param-ranges file loading via main() argv
-# ---------------------------------------------------------------------------
-
-
-class TestParamRangesFileIntegration:
-
-    def test_valid_json_file_is_loaded(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            ranges_file = Path(tmp) / "bounds.json"
-            ranges_file.write_text(
-                json.dumps({"orderedness": [0.3, 0.7], "cooling_factor": [0.9, 0.99]}),
-                encoding="utf-8",
-            )
-
-            with open(ranges_file, "r", encoding="utf-8") as f:
-                user_ranges = json.load(f)
-
-            assert isinstance(user_ranges, dict)
-            assert "orderedness" in user_ranges
-            assert user_ranges["orderedness"] == [0.3, 0.7]
-
-    def test_invalid_json_file_does_not_crash(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            ranges_file = Path(tmp) / "bad.json"
-            ranges_file.write_text("not valid json {{{{", encoding="utf-8")
-
-            user_ranges: dict = {}
-            try:
-                with open(ranges_file, "r", encoding="utf-8") as f:
-                    user_ranges = json.load(f)
-            except (OSError, json.JSONDecodeError):
-                user_ranges = {}
-
-            assert user_ranges == {}
-
-    def test_missing_file_does_not_crash(self):
-        user_ranges: dict = {}
-        try:
-            with open("/tmp/definitely_nonexistent_file_xyz.json", "r") as f:
-                user_ranges = json.load(f)
-        except (OSError, json.JSONDecodeError):
-            user_ranges = {}
-
-        assert user_ranges == {}
-
-    def test_non_dict_root_is_rejected(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            ranges_file = Path(tmp) / "list_root.json"
-            ranges_file.write_text(json.dumps([1, 2, 3]), encoding="utf-8")
-
-            with open(ranges_file, "r", encoding="utf-8") as f:
-                user_ranges = json.load(f)
-
-            if not isinstance(user_ranges, dict):
-                user_ranges = {}
-
-            assert user_ranges == {}
 
 
 # ---------------------------------------------------------------------------

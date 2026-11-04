@@ -207,7 +207,27 @@ def test_architecture_replication_group_collapses():
     assert len(step) == 1
     assert step[0]["edgeSymbol"] == ["none", "arrow"]
     assert step[0]["source"] == "MCU"
-    assert "AXIS" in step[0]["target"]
+    assert step[0]["target"] == axis["name"]
+
+
+def test_architecture_power_hub_links_replicas_and_ignores_unknown_sheets():
+    slot = {
+        "sheets": [
+            {"name": "A1", "replication_group": "A", "replication_instance": 1},
+            {"name": "A2", "replication_group": "A", "replication_instance": 2},
+            {"name": "B"},
+        ],
+        "inter_sheet_nets": [{
+            "name": "GND",
+            "endpoints": [{"sheet": "A1"}, {"sheet": "B"}, {"sheet": "missing"}],
+        }],
+    }
+    series = _series(sd.architecture_diagram(slot))
+    node_names = {node["name"] for node in series["data"]}
+    links = series["links"]
+    assert {edge["target"] for edge in links} == {"A1 ×2", "B"}
+    assert all(edge["source"] in node_names and edge["target"] in node_names
+               for edge in links)
 
 
 def test_architecture_power_hub_color_for_declared_power_net():

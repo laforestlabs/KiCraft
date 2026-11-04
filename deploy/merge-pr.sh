@@ -6,8 +6,15 @@
 # Usage: deploy/merge-pr.sh <PR-number>
 set -euo pipefail
 PR="${1:?usage: merge-pr.sh <PR-number>}"
+[[ "$PR" =~ ^[1-9][0-9]*$ ]] && [ "$#" -eq 1 ] || {
+  echo "PR number must be a positive integer" >&2; exit 2;
+}
 REPO="${KICRAFT_REPO:-LaForestLabs/KiCraft}"
-resp="/tmp/kc_merge_${PR}.json"
+[[ "$REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || {
+  echo "invalid repository name" >&2; exit 2;
+}
+resp="$(mktemp "${TMPDIR:-/tmp}/kc_merge_XXXXXXXX")"
+trap 'rm -f "$resp"' EXIT
 code=$(curl -sS --netrc -H "Content-Type: application/json" -X POST \
   "https://codeberg.org/api/v1/repos/${REPO}/pulls/${PR}/merge" \
   -d '{"Do":"merge","delete_branch_after_merge":true}' \

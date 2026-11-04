@@ -22,6 +22,20 @@ def test_exact_placement_is_conformant():
     assert r.matched_pins == r.total_pins == 32
     assert r.outline_ok is True
 
+def test_distinct_pads_required_for_each_standard_contact():
+    t = _template()
+    pins = expected_pins(t)
+    a, b = pins[:2]
+    midpoint = ((a[1] + b[1]) / 2, (a[2] + b[2]) / 2)
+    remaining = [(x, y) for _net, x, y in pins[2:]]
+    report = check_conformance(t, [midpoint, *remaining])
+    assert not report.conformant
+    assert report.matched_pins == len(pins) - 1
+    # The shared midpoint can serve pin 2 when pin 1 has a separate pad;
+    # matching must not depend on which pin is visited first.
+    assert check_conformance(t, [midpoint, (a[1], a[2]), *remaining]).conformant
+
+
 
 def test_free_placed_board_is_non_conformant():
     # KC-99A9M8-style: headers exist but nowhere near the standard positions,

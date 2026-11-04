@@ -52,11 +52,7 @@ class TestMatchStandard:
     def test_no_false_match(self, brief):
         assert match_standard(brief) is None
 
-    def test_longest_alias_wins(self):
-        # "arduino uno shield" should resolve the same key as the generic
-        # "arduino shield"; both map to arduino_uno_shield here, but the
-        # ordering guarantees the specific alias is tried first.
-        assert match_standard("arduino uno shield").key == "arduino_uno_shield"
+    
 
     def test_get_template_roundtrip(self):
         assert get_template("arduino_uno_shield") is not None

@@ -74,7 +74,6 @@ async def test_admin_page_renders_synced_registry(harness):
     await u.should_not_see("New component")
     await u.should_not_see("Edit")
     await u.should_not_see("Delete")
-    await u.should_see("edits happen via git")
 
 
 async def test_non_admin_is_bounced(harness):

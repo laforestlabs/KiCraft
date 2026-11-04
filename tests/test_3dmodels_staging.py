@@ -8,6 +8,7 @@ verbatim AND the staged file sits exactly where ``${KIPRJMOD}`` points.
 """
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -91,6 +92,90 @@ def test_none_bom_is_noop(tmp_path: Path):
     assert stage_3d_models(tmp_path, None, project_root=tmp_path) == []
 
 
+def test_untracked_3d_model_is_not_overwritten(project_root: Path, tmp_path: Path):
+    out = tmp_path / "generated"
+    target = out / "3dmodels" / "widget" / "WidgetBody.step"
+    target.parent.mkdir(parents=True)
+    target.write_text("my model")
+    with pytest.raises(ValueError, match="untracked or modified"):
+        stage_3d_models(out, _bom("widget:WidgetFP"), project_root=project_root)
+    assert target.read_text() == "my model"
+
+
+def test_tracked_model_can_update_but_user_edits_are_preserved(project_root: Path, tmp_path: Path):
+    out = tmp_path / "generated"
+    out.mkdir()
+    bom = _bom("widget:WidgetFP")
+    paths = stage_3d_models(out, bom, project_root=project_root)
+    owned = {
+        str(path.relative_to(out)): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in paths
+    }
+    source = project_root / ".kicraft" / "parts" / "widget" / "3d" / "WidgetBody.step"
+    source.write_text("new bundle model")
+    stage_3d_models(out, bom, project_root=project_root, owned_files=owned)
+    target = out / "3dmodels" / "widget" / "WidgetBody.step"
+    assert target.read_text() == "new bundle model"
+    target.write_text("user edited model")
+    with pytest.raises(ValueError, match="untracked or modified"):
+        stage_3d_models(out, bom, project_root=project_root, owned_files=owned)
+    assert target.read_text() == "user edited model"
+
+def test_attribution_stages_with_model_and_is_hash_protected(project_root: Path, tmp_path: Path):
+    from zipfile import ZipFile
+    from kicraft.server.web import _zip_generated
+
+    source = project_root / ".kicraft" / "parts" / "widget" / "3d"
+    (source / "LICENSE.txt").write_text("model attribution and license")
+    (source / "WidgetExtra.STEP").write_text("uppercase model")
+    out = tmp_path / "generated"
+    out.mkdir()
+    written = []
+    paths = stage_3d_models(out, _bom("widget:WidgetFP"), project_root=project_root,
+                            on_written=written.append)
+    license_path = out / "3dmodels" / "widget" / "LICENSE.txt"
+    assert license_path.read_text() == "model attribution and license"
+    assert (license_path.parent / "WidgetExtra.STEP").read_text() == "uppercase model"
+    assert not (license_path.parent / "notes.txt").exists()
+    owned = {str(p.relative_to(out)): hashlib.sha256(p.read_bytes()).hexdigest() for p in paths}
+    with ZipFile(_zip_generated(tmp_path, out)) as archive:
+        assert archive.read("generated/3dmodels/widget/LICENSE.txt") == b"model attribution and license"
+        assert archive.read("generated/3dmodels/widget/WidgetExtra.STEP") == b"uppercase model"
+    license_path.write_text("user edited attribution")
+    with pytest.raises(ValueError, match="untracked or modified"):
+        stage_3d_models(out, _bom("widget:WidgetFP"), project_root=project_root,
+                        owned_files=owned)
+    assert license_path.read_text() == "user edited attribution"
+
+
+def test_untracked_attribution_is_not_overwritten(project_root: Path, tmp_path: Path):
+    source = project_root / ".kicraft" / "parts" / "widget" / "3d"
+    (source / "LICENSE.txt").write_text("bundle license")
+    out = tmp_path / "generated"
+    target = out / "3dmodels" / "widget" / "LICENSE.txt"
+    target.parent.mkdir(parents=True)
+    target.write_text("user attribution")
+    with pytest.raises(ValueError, match="untracked or modified"):
+        stage_3d_models(out, _bom("widget:WidgetFP"), project_root=project_root)
+    assert target.read_text() == "user attribution"
+
+
+
+
+
+def test_partial_staging_reports_completed_models_only(project_root: Path, tmp_path: Path):
+    out = tmp_path / "generated"
+    target = out / "3dmodels" / "widget" / "WidgetBody.wrl"
+    target.parent.mkdir(parents=True)
+    target.write_text("user model")
+    completed = []
+    with pytest.raises(ValueError, match="untracked or modified"):
+        stage_3d_models(out, _bom("widget:WidgetFP"), project_root=project_root,
+                        on_written=completed.append)
+    assert [path.name for path in completed] == ["WidgetBody.step"]
+    assert target.read_text() == "user model"
+
+
 def test_board_embeds_stanza_and_staged_file_matches(
     project_root: Path, tmp_path: Path
 ):
@@ -118,10 +203,14 @@ def test_board_embeds_stanza_and_staged_file_matches(
     )
     out_dir = tmp_path / "generated"
     out_dir.mkdir()
+    from kicraft.design.synthesis.footprint_library import (
+        FootprintNotFoundError, lookup_footprint,
+    )
     try:
-        out = write_empty_pcb(out_dir, "TEST", bom, project_root=project_root)
-    except Exception as exc:  # missing stock footprint libs on this host
-        pytest.skip(f"stock footprints unavailable: {exc}")
+        lookup_footprint("Resistor_SMD:R_0805_2012Metric", project_root=project_root)
+    except FootprintNotFoundError as exc:
+        pytest.skip(f"stock resistor prerequisite unavailable: {exc}")
+    out = write_empty_pcb(out_dir, "TEST", bom, project_root=project_root)
     stage_3d_models(out_dir, bom, project_root=project_root)
 
     board = pcbnew.LoadBoard(str(out))
@@ -133,3 +222,32 @@ def test_board_embeds_stanza_and_staged_file_matches(
     assert model_path == "${KIPRJMOD}/3dmodels/widget/WidgetBody.wrl"
     # ${KIPRJMOD} resolves to the board's directory.
     assert (out.parent / "3dmodels" / "widget" / "WidgetBody.wrl").is_file()
+
+
+def test_step_coverage_distinguishes_nested_names_and_missing_bodies(tmp_path):
+    from kicraft.design.synthesis.models3d import collect_step_coverage
+    step = tmp_path / "board.step"
+    step.write_text(
+        "ISO-10303-21;\nDATA;\n"
+        "#10 = NEXT_ASSEMBLY_USAGE_OCCURRENCE('1','U1','',#1,#2,$);\n"
+        "#11 = NEXT_ASSEMBLY_USAGE_OCCURRENCE('2','U2','',#2,#3,$);\n"
+        "#12 = NEXT_ASSEMBLY_USAGE_OCCURRENCE('3','PCB','',#1,#4,$);\n"
+        "ENDSEC;\nEND-ISO-10303-21;\n"
+    )
+    assert collect_step_coverage(step, ["U1", "U2"]) == {
+        "status": "observed", "observed_refs": ["U1"], "missing_refs": ["U2"],
+    }
+
+
+def test_step_coverage_unknown_for_truncated_or_ambiguous_assembly(tmp_path):
+    from kicraft.design.synthesis.models3d import collect_step_coverage
+    step = tmp_path / "board.step"
+    step.write_text("ISO-10303-21;\nDATA;\n")
+    assert collect_step_coverage(step, ["U1"])["missing_refs"] is None
+    step.write_text(
+        "ISO-10303-21;\nDATA;\n"
+        "#10 = NEXT_ASSEMBLY_USAGE_OCCURRENCE('1','U1','',#1,#2,$);\n"
+        "#11 = NEXT_ASSEMBLY_USAGE_OCCURRENCE('2','U2','',#3,#4,$);\n"
+        "ENDSEC;\nEND-ISO-10303-21;\n"
+    )
+    assert collect_step_coverage(step, ["U1"])["status"] == "unknown"

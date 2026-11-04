@@ -2,9 +2,10 @@
 # Phase 0: live disk/load watch that ABORTS a prod push-to-failure before it does
 # real damage. The architecture self-recovers (systemd restart, flock auto-release,
 # orphan-reaper), so the only non-recoverable risks are disk-fill and a wedged box.
-# This watcher trips on either and (1) writes the harness abort file (graceful) and
-# (2) engages KICRAFT_KILL_SWITCH (stops any LLM spend) and (3) optionally stops the
-# build worker (hard drain).
+# This watcher trips on either and (1) writes the harness abort file (graceful),
+# (2) engages the live KICRAFT_KILL_SWITCH admission guard, and (3) optionally
+# asks systemd to stop the build worker. Already-admitted calls may still complete;
+# a systemd stop does not stop independently launched processes.
 #
 #   scripts/phase0_watch.sh --abort-file /path/abort
 #   scripts/phase0_watch.sh --min-disk-gib 3 --max-load-per-core 10 --interval 2 \
@@ -37,17 +38,23 @@ echo "[watch] min_disk=${MIN_DISK_GIB}GiB max_load=${MAX_LOAD} (=${MAX_LOAD_PER_
 trip() {
   echo "[watch] !!! TRIPPED: $1 -- aborting the load run"
   [ -n "$ABORT_FILE" ] && echo "abort" > "$ABORT_FILE" && echo "[watch] wrote abort file: $ABORT_FILE"
-  # Engage the LLM kill switch in .env (idempotent): stops any model spend.
-  if [ -f .env ] && ! grep -q '^KICRAFT_KILL_SWITCH=1' .env; then
-    sed -i.bak '/^KICRAFT_KILL_SWITCH=/d' .env 2>/dev/null || true
-    echo "KICRAFT_KILL_SWITCH=1" >> .env
+  # Append instead of replacing existing configuration: the guard treats any
+  # truthy entry as engaged, without an intermediate interval with no switch.
+  if [ -f .env ] && grep -q '^KICRAFT_KILL_SWITCH=1$' .env; then
+    echo "[watch] KICRAFT_KILL_SWITCH already set in .env"
+  elif (umask 077; printf '\nKICRAFT_KILL_SWITCH=1\n' >> .env); then
     echo "[watch] set KICRAFT_KILL_SWITCH=1 in .env"
+  else
+    echo "[watch] ERROR: could not set kill switch; operator intervention required" >&2
   fi
   if [ "$STOP_WORKER" = "1" ]; then
-    systemctl stop kicraft-build-worker 2>/dev/null \
-      && echo "[watch] stopped kicraft-build-worker" \
-      || echo "[watch] could not stop kicraft-build-worker (no systemctl perms?)"
+    if systemctl stop kicraft-build-worker 2>/dev/null; then
+      echo "[watch] requested systemd stop for kicraft-build-worker; detached processes are unaffected"
+    else
+      echo "[watch] ERROR: could not stop kicraft-build-worker; operator intervention required" >&2
+    fi
   fi
+  echo "[watch] provider calls already admitted may still complete"
   exit 1
 }
 

@@ -203,6 +203,19 @@ def test_review_rejects_bad_severity():
     assert not r["ok"]      # 'critical' is not in blocker|warning|note
 
 
+def test_review_rejects_empty_or_non_string_issue():
+    for issue in ("   ", {"message": "missing current limit"}):
+        bad = json.dumps({"findings": [{
+            "severity": "blocker", "area": "current-limit",
+            "issue": issue, "suggestion": "",
+        }]})
+        client = FakeClient(bad, bad)
+        result = review_design(client, "digest")
+        assert not result["ok"]
+        assert result["findings"] == []
+        assert client.calls == 2
+
+
 def test_review_meta_ctx_tags_phase():
     client = FakeClient(json.dumps({"findings": []}))
     review_design(client, "digest")

@@ -12,10 +12,19 @@ import types
 from kicraft.server.client import CappedOpenRouterClient
 
 
+def _unexpected_guard_use(*_args, **_kwargs):
+    raise AssertionError("scripted stream must not dispatch provider requests")
+
+
 def _client() -> CappedOpenRouterClient:
     return CappedOpenRouterClient(
         settings=types.SimpleNamespace(),
-        guard=types.SimpleNamespace(status=lambda: {}),
+        guard=types.SimpleNamespace(
+            status=lambda: {},
+            reserve=_unexpected_guard_use,
+            mark_uncertain=_unexpected_guard_use,
+            settle_reservation=_unexpected_guard_use,
+        ),
     )
 
 

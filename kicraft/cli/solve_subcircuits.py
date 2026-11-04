@@ -1540,8 +1540,8 @@ def _persist_solution(
         solved_layout.interface_anchors,
     )
     # Warn about incomplete anchors
-    if not anchor_validation.get("all_required_anchored", True):
-        missing = anchor_validation.get("missing_required", [])
+    if not anchor_validation.get("all_required_ports_anchored", True):
+        missing = anchor_validation.get("missing_required_ports", [])
         print(
             f"  WARNING: leaf {solved.node.definition.id.sheet_name} has "
             f"{len(missing)} unanchored required port(s): {missing}"
@@ -1887,14 +1887,27 @@ def _persist_solution(
     return metadata.to_dict()
 
 
+def _persisted_results(
+    results: list[SolvedLeafSubcircuit], persisted: list[dict[str, Any]]
+) -> list[tuple[SolvedLeafSubcircuit, dict[str, Any]]]:
+    """Pair persisted artifacts with the leaf that produced each one."""
+    by_path = {item["instance_path"]: item for item in persisted}
+    return [
+        (solved, by_path[solved.instance_path])
+        for solved in results
+        if solved.instance_path in by_path
+    ]
+
+
 def _print_human_summary(
     results: list[SolvedLeafSubcircuit], persisted: list[dict[str, Any]]
 ) -> None:
     print("=== Leaf Subcircuit Solve ===")
-    print(f"leaf_subcircuits : {len(results)}")
+    pairs = _persisted_results(results, persisted)
+    print(f"leaf_subcircuits : {len(pairs)}")
     print()
 
-    for solved, metadata in zip(results, persisted):
+    for solved, metadata in pairs:
         best = solved.best_round
         print(f"- {solved.sheet_name} [{solved.instance_path}]")
         print(f"  best_score    : {best.score:.2f}")
@@ -1920,14 +1933,15 @@ def _print_human_summary(
 def _json_summary(
     results: list[SolvedLeafSubcircuit], persisted: list[dict[str, Any]]
 ) -> dict[str, Any]:
+    pairs = _persisted_results(results, persisted)
     return {
-        "leaf_subcircuits": len(results),
+        "leaf_subcircuits": len(pairs),
         "results": [
             {
                 "solved": solved.to_dict(),
                 "artifact_metadata": metadata,
             }
-            for solved, metadata in zip(results, persisted)
+            for solved, metadata in pairs
         ],
     }
 

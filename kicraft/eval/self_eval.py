@@ -111,11 +111,16 @@ def _design_spend(guard, run_id: str) -> float:
 
 
 def _find_parent_board(rundir: Path) -> Path | None:
-    """The built final/parent board: ``generated/<stem>/<stem>.kicad_pcb``. Leaf
-    boards live deeper under ``.experiments/`` so the shallow glob skips them."""
-    gen = rundir / "generated"
-    cands = [p for p in gen.glob("*/*.kicad_pcb") if ".experiments" not in p.parts]
-    return cands[0] if cands else None
+    """Find the promoted parent using the recorded generation when available."""
+    from .artifact_evidence import _delivered_board_path
+
+    try:
+        state = json.loads((rundir / ".kicraft" / "state.json").read_text())
+    except (OSError, ValueError):
+        state = {}
+    if not isinstance(state, dict):
+        state = {}
+    return _delivered_board_path(rundir, state, rundir / "generated")
 
 
 # Build outcomes that leave a PROMOTED ROUTED parent at

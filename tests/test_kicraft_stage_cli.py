@@ -40,6 +40,186 @@ def _run(capsys: pytest.CaptureFixture, *argv: str) -> tuple[int, dict]:
         return rc, {"_raw_stdout": out}
 
 
+def test_position_warnings_count_numbered_physical_pads_not_unique_pin_names(monkeypatch):
+    from types import SimpleNamespace
+
+    from kicraft.design import cli_app
+
+    root = Path(__file__).resolve().parents[1]
+    c3 = "esp32-c3-mini-1-h4x:WIFIM-SMD_ESP32-C3-MINI-1"
+    switch = "kmr232ngulclfs:KMR232NGULCLFS"
+    assert len(cli_app._footprint_numbered_pads(c3, root)) == 61
+    assert len(cli_app._footprint_pad_numbers(c3, root)) == 53
+    assert len(cli_app._footprint_numbered_pads(switch, root)) == 4
+    assert cli_app._footprint_pad_numbers(switch, root) == {"1", "2"}
+
+    monkeypatch.setattr(cli_app.jlcparts, "available", lambda: True)
+    monkeypatch.setattr(cli_app, "_load_library_parts", lambda _root: ([], []))
+    monkeypatch.setattr(
+        cli_app.jlcparts, "lookup",
+        lambda cid: {"joints": {"C41349510": 61, "C221681": 4, "C12345": 5}[cid]},
+    )
+    parts = [
+        SimpleNamespace(ref="U1", footprint=c3, symbol="", sourcing_note="LCSC C41349510"),
+        SimpleNamespace(ref="SW1", footprint=switch, symbol="", sourcing_note="LCSC C221681"),
+        SimpleNamespace(ref="J1", footprint=switch, symbol="", sourcing_note="LCSC C12345"),
+    ]
+    warnings = cli_app.bom_position_mismatches(parts, root)
+    assert [row["ref"] for row in warnings] == ["J1"]
+    assert "has 4 pad(s)" in warnings[0]["message"]
+
+
+def test_catalog_inductor_requires_reviewed_identity_and_footprint_pair():
+    from types import SimpleNamespace
+
+    from kicraft.design.cli_app import _lcsc_identity_conflict
+
+    part = SimpleNamespace(symbol="Device:L", footprint="Inductor_SMD:L_6.3x6.3_H3")
+    wrong = {
+        "model": "CKCSA4020-4.7uH/M", "package": "SMD,4x4mm",
+        "description": "4.7uH power inductor",
+    }
+    assert "no reviewed identity/footprint pair" in _lcsc_identity_conflict(part, wrong)
+    part.footprint = "Inductor_SMD:L_12x12mm_H8mm"
+    reviewed = {"model": "SMDRI127-220MT", "package": "SMD", "description": "22uH inductor"}
+    assert _lcsc_identity_conflict(part, reviewed) is None
+    part.footprint = "Inductor_SMD:L_6.3x6.3_H3"
+    assert _lcsc_identity_conflict(part, reviewed) is not None
+
+
+@pytest.mark.parametrize("started", [False, True])
+def test_synthesis_failure_invalidates_freshness_only_after_emission(tmp_path, monkeypatch, started):
+    from kicraft.design import cli_app
+    from kicraft.design.models import ArtifactPaths, ConversationState
+
+    state_path = tmp_path / "state.json"
+    project = tmp_path / "project"
+    receipt = project / ".kicraft" / "synthesis-generated.json"
+    receipt.parent.mkdir(parents=True)
+    receipt.write_text(json.dumps({"attempt_id": "old", "status": "complete"}))
+    state = ConversationState(
+        project_stem="TEST",
+        artifacts=ArtifactPaths(
+            project_dir=project, project_stem="TEST", root_sch=project / "TEST.kicad_sch",
+            leaf_schs=[], kicad_pro=project / "TEST.kicad_pro",
+            autoplacer_json=project / "TEST_autoplacer.json", fab_zip=project / "fab.zip",
+        ),
+    )
+
+    def fail(*_args, **_kwargs):
+        if started:
+            receipt.write_text(json.dumps({"attempt_id": "new", "status": "failed"}))
+        raise RuntimeError("emitter failed")
+
+    monkeypatch.setattr(cli_app, "run_synth", fail)
+    with pytest.raises(RuntimeError, match="emitter failed"):
+        cli_app._run_synth_with_freshness(state, state_path, project)
+    if started:
+        assert state.artifacts.status == "failed"
+        assert state.artifacts.fab_zip is None
+        summary = json.loads((tmp_path / "synthesis_check.json").read_text())
+        assert summary["status"] == "failed"
+        assert summary["checks"][0]["report_path"] is None
+    else:
+        assert state.artifacts.status == "ok"
+        assert state.artifacts.fab_zip == project / "fab.zip"
+        assert not (tmp_path / "synthesis_check.json").exists()
+
+
+def test_ambiguous_legacy_architecture_can_be_repaired_without_mutating_saved_state(tmp_path):
+    from kicraft.design.cli_app import LegacyRecipeStateError, _load_state
+
+    state_path = tmp_path / "state.json"
+    original = json.dumps({
+        "architecture": {"recipe_selections": [{"recipe": "rp2040-minimal@2"}]},
+        "bom": {"parts": []},
+    })
+    state_path.write_text(original)
+    with pytest.raises(LegacyRecipeStateError, match="rerun from architecture"):
+        _load_state(state_path, repair_stage="bom")
+    repaired_view = _load_state(state_path, repair_stage="architecture")
+    assert repaired_view.architecture is None
+    assert repaired_view.bom is None
+    assert state_path.read_text() == original
+
+
+@pytest.mark.parametrize("recipe", [
+    "rp2040-minimal@1", "rp2040-minimal@2", "drv8833-dual-motor@1",
+    "tps54331-adjustable@1", "tps54331-12v-1a@1",
+])
+@pytest.mark.parametrize("location", ["manifest", "part"])
+def test_wiring_rejects_old_recipe_graph_without_rewriting_state(tmp_path, capsys, recipe, location):
+    state = tmp_path / "state.json"
+    bom = {"parts": [], "recipe_ownership": []}
+    if location == "manifest":
+        bom["recipe_ownership"].append({"recipe": recipe})
+    else:
+        bom["parts"].append({"recipe_id": recipe})
+    original = json.dumps({"bom": bom})
+    state.write_text(original)
+    slot = tmp_path / "slot.json"
+    slot.write_text("{}")
+    rc, result = _run(
+        capsys, "stage-commit", "wiring", "--slot-file", str(slot),
+        "--no-archive", str(state),
+    )
+    assert rc == 3
+    assert result["reconcile_target"] == "bom"
+    assert "regenerate" in result["errors"][0]
+    assert state.read_text() == original
+
+
+def test_synthesis_summary_persists_current_report_basename(tmp_path):
+    from types import SimpleNamespace
+
+    from kicraft.design.cli_app import _write_synthesis_check
+
+    result = SimpleNamespace(
+        name="9.12 ERC", ok=True, message="ok", offenders=[],
+        report_path="project_unique_erc.rpt",
+    )
+    _write_synthesis_check(tmp_path / "state.json", "PROJECT", [result], ok=True)
+    summary = json.loads((tmp_path / "synthesis_check.json").read_text())
+    assert summary["checks"][0]["report_path"] == "project_unique_erc.rpt"
+    result.report_path = None
+    _write_synthesis_check(tmp_path / "state.json", "PROJECT", [result], ok=False)
+    summary = json.loads((tmp_path / "synthesis_check.json").read_text())
+    assert summary["checks"][0]["report_path"] is None
+
+
+@pytest.mark.parametrize("slot", [42, None, [], "text"])
+def test_stage_commit_rejects_non_object_slot_without_changing_state(tmp_path, capsys, slot):
+    state = tmp_path / "state.json"
+    state.write_text("{}\n")
+    slot_file = tmp_path / "slot.json"
+    slot_file.write_text(json.dumps(slot))
+    rc, result = _run(
+        capsys, "stage-commit", "bom", "--slot-file", str(slot_file),
+        "--no-archive", str(state),
+    )
+    assert rc == 3
+    assert result["ok"] is False
+    assert "expected a JSON object" in result["errors"][0]
+    assert state.read_text() == "{}\n"
+
+
+def test_stage_commit_rejects_non_array_questions_without_changing_state(tmp_path, capsys):
+    state = tmp_path / "state.json"
+    state.write_text("{}\n")
+    slot_file = tmp_path / "slot.json"
+    slot_file.write_text(json.dumps(_valid_intent()))
+    questions = tmp_path / "questions.json"
+    questions.write_text("42")
+    rc, result = _run(
+        capsys, "stage-commit", "intent", "--slot-file", str(slot_file),
+        "--questions-file", str(questions), "--no-archive", str(state),
+    )
+    assert rc == 2
+    assert result["ok"] is False
+    assert "expected a JSON array" in result["errors"][0]
+    assert state.read_text() == "{}\n"
+
+
 @pytest.mark.skipif(
     not DEFAULT_KICAD_SYMBOL_DIR.is_dir(), reason="KiCad symbol libraries not installed"
 )
@@ -659,6 +839,11 @@ def test_stage_commit_wiring_preserves_bom_other_fields(tmp_path, capsys, monkey
         rc, payload = _run(capsys, *argv)
         assert rc == 0, (stage, payload)
 
+    after_bom = json.loads(state_path.read_text())
+    assert after_bom["wiring_complete"] is False
+    after_bom["stage_status"]["wiring"] = {"ok": False}
+    state_path.write_text(json.dumps(after_bom))
+
     # Now run wiring with every pin accounted for (the validator enforces
     # full net coverage; 2-pin parts need both pins assigned).
     wiring_slot = _write_slot(
@@ -728,6 +913,8 @@ def test_stage_commit_wiring_preserves_bom_other_fields(tmp_path, capsys, monkey
     assert rc == 0, payload
 
     written = json.loads(state_path.read_text())
+    assert written["wiring_complete"] is True
+    assert "wiring" not in written["stage_status"]
     # Wiring fields populated...
     assert len(written["bom"]["connections"]) == 7
     # ...and the rest of the BOM is intact
@@ -746,10 +933,20 @@ def test_stage_commit_wiring_preserves_bom_other_fields(tmp_path, capsys, monkey
     for part in written["bom"]["parts"]:
         if part["ref"] == "C1":
             part["sourcing_note"] = "LCSC C19702"  # spans +3V3, rated far below it
+            part["mpn"] = None
     # The stress is only provable across two typed rails; the fixture architecture declares +3V3
     # and VBUS but no return, so C1's terminal pair would be skipped as "not proved by a DC rail".
     written["architecture"]["rail_voltages"]["GND"] = 0.0
     state_path.write_text(json.dumps(written))
+    import hashlib
+
+    parts_digest = hashlib.sha256(
+        json.dumps(written["bom"]["parts"], sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    (state_path.parent / "sourcing_validation.json").write_text(json.dumps({
+        "parts_digest": parts_digest,
+        "parts": [{"ref": "C1", "exact_lcsc": "C19702", "picky_selection": True}],
+    }))
     monkeypatch.setattr(
         jlcparts, "parameters",
         lambda cid: {"attributes": {"Voltage Rating": {"C19702": "1V", "C96446": "50V"}.get(cid, "")}},
@@ -777,6 +974,30 @@ def test_stage_commit_wiring_preserves_bom_other_fields(tmp_path, capsys, monkey
     )
     assert rc == 0, payload
     assert any("re-pinned C19702 -> C96446" in note for note in payload["bom_normalizations"])
+
+    # A BOM reapproval invalidates completion even without --invalidate-downstream.
+    bom_data = _valid_bom()
+    bom_data["connections"] = []
+    bom_data["no_connect_pins"] = []
+    bom_slot = _write_slot(tmp_path, "bom-again", bom_data)
+    rc, payload = _run(
+        capsys, "stage-commit", "bom", "--slot-file", str(bom_slot),
+        "--no-archive", str(state_path),
+    )
+    assert rc == 0, payload
+    assert json.loads(state_path.read_text())["wiring_complete"] is False
+
+
+def test_wiring_completion_marker_roundtrips_and_legacy_is_nullable():
+    from kicraft.design.models import ConversationState
+
+    legacy = ConversationState.model_validate({})
+    assert legacy.wiring_complete is None
+    for marker in (None, False, True):
+        restored = ConversationState.model_validate_json(
+            ConversationState(wiring_complete=marker).model_dump_json()
+        )
+        assert restored.wiring_complete is marker
 
 
 def test_stage_commit_bom_rejects_per_sheet_overflow(tmp_path, capsys, monkeypatch):

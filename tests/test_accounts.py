@@ -11,6 +11,8 @@ import sqlite3
 
 import pytest
 
+from account_fixtures import seed_project
+
 from kicraft.server.accounts import (
     TIERS,
     AccountStore,
@@ -175,7 +177,7 @@ def test_legacy_db_upgrades_without_losing_rows(tmp_path):
 def test_export_user_dumps_metadata_without_password(store):
     u = store.create_user("exp@e.st", "pw",
                           accepted_terms_version="2026-06-04", allow_training=False)
-    store.finish_project(store.create_project(u.id, "board one"), "ok", stem="ONE")
+    store.finish_project(seed_project(store, u.id, "board one"), "ok", stem="ONE")
     data = store.export_user(u.id)
     assert data["user"]["email"] == "exp@e.st"
     assert data["user"]["allow_training"] is False
@@ -187,7 +189,7 @@ def test_export_user_dumps_metadata_without_password(store):
 
 def test_delete_user_purges_rows_and_files(store):
     u = store.create_user("del@e.st", "pw")
-    pid = store.create_project(u.id, "x")
+    pid = seed_project(store, u.id, "x")
     store.finish_project(pid, "ok", stem="X")
     tree = store.projects_dir / str(u.id) / str(pid)  # simulate persisted files
     tree.mkdir(parents=True, exist_ok=True)
@@ -201,9 +203,9 @@ def test_delete_user_purges_rows_and_files(store):
 
 def test_delete_project_purges_one_row_and_tree_keeps_others(store):
     u = store.create_user("p@e.st", "pw")
-    keep = store.create_project(u.id, "keep")
+    keep = seed_project(store, u.id, "keep")
     store.finish_project(keep, "ok", stem="KEEP")
-    drop = store.create_project(u.id, "drop")
+    drop = seed_project(store, u.id, "drop")
     store.finish_project(drop, "ok", stem="DROP")
     drop_tree = store.projects_dir / str(u.id) / str(drop)
     drop_tree.mkdir(parents=True, exist_ok=True)
@@ -228,8 +230,7 @@ def test_delete_project_reaps_build_jobs_and_refuses_while_running(store, tmp_pa
     under build-in-place the project tree is the running build's cwd, so
     deleting would rmtree under a live worker subprocess."""
     u = store.create_user("b@e.st", "pw")
-    pid = store.create_project(u.id, "drop")
-    store.finish_project(pid, "ok", stem="DROP")
+    pid = seed_project(store, u.id, "drop")
 
     ws_done = tmp_path / "ws_done"
     ws_done.mkdir()
@@ -268,23 +269,55 @@ def test_quota_status_reflects_tier(store):
 
 def test_free_quota_one_per_week(store):
     u = store.create_user("free@e.st", "pw")
-    pid = store.create_project(u.id, "a board")
+    pid = seed_project(store, u.id, "a board")
     store.finish_project(pid, "ok", stem="BOARD")
     assert store.quota_status(u)["remaining"] == 0  # used the 1/week
     _backdate(store, pid, 8)  # now older than the 7-day window
     assert store.quota_status(u)["remaining"] == 1  # window cleared it
 
 
+def test_design_admission_is_atomic_and_respects_rolling_window(store):
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+
+    user = store.create_user("admission@e.st", "pw")
+    assert store.create_project(user.id, "unverified") is None
+    store.consume_verification_token(store.create_verification_token(user.id))
+    start = threading.Barrier(2)
+
+    def reserve(brief):
+        start.wait(timeout=5)
+        return store.create_project(user.id, brief)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        ids = list(pool.map(reserve, ("one", "two")))
+    admitted = [pid for pid in ids if pid is not None]
+    assert len(admitted) == 1
+    assert store.count_active_designs(user.id, 7) == 1
+    store.finish_project(admitted[0], "ok")
+    _backdate(store, admitted[0], 8)
+    assert store.create_project(user.id, "after window") is not None
+
+
+def test_design_admission_does_not_publish_expired_private_request(store):
+    user = store.create_user("private-expired@e.st", "pw", tier="pro",
+                             tier_expires_at="2000-01-01T00:00:00+00:00")
+    store.consume_verification_token(store.create_verification_token(user.id))
+    assert store.create_project(user.id, "private", is_public=False) is None
+    assert store.list_projects(user.id) == []
+
+
 def test_running_design_reserves_a_slot(store):
     u = store.create_user("run@e.st", "pw")
-    store.create_project(u.id, "in flight")  # left at status 'running'
+    seed_project(store, u.id, "in flight")  # left at status 'running'
     assert store.quota_status(u)["remaining"] == 0  # reserved before it finishes
 
 
 def _backdate_secs(store, project_id, secs_ago):
     ts = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=secs_ago)).isoformat()
     with sqlite3.connect(store.path) as conn:
-        conn.execute("UPDATE projects SET created_at=? WHERE id=?", (ts, project_id))
+        conn.execute("UPDATE projects SET created_at=?, attempt_started_at=? WHERE id=?",
+                     (ts, ts, project_id))
 
 
 def test_list_orphaned_running_projects_selects_only_early_deaths(store):
@@ -292,12 +325,12 @@ def test_list_orphaned_running_projects_selects_only_early_deaths(store):
     excludes build-stage runs, terminal rows, and just-started runs."""
     u = store.create_user("orphan@e.st", "pw")
 
-    early = store.create_project(u.id, "lost during LLM stages")
-    build_stage = store.create_project(u.id, "reached the build queue")
+    early = seed_project(store, u.id, "lost during LLM stages")
+    build_stage = seed_project(store, u.id, "reached the build queue")
     store.enqueue_build(workspace="/ws", project_id=build_stage, user_id=u.id)
-    finished = store.create_project(u.id, "already done")
+    finished = seed_project(store, u.id, "already done")
     store.finish_project(finished, "ok", stem="DONE")
-    recent = store.create_project(u.id, "just started")  # inside the age floor
+    recent = seed_project(store, u.id, "just started")  # inside the age floor
 
     for pid in (early, build_stage, finished):
         _backdate_secs(store, pid, 300)
@@ -306,9 +339,77 @@ def test_list_orphaned_running_projects_selects_only_early_deaths(store):
     assert {p.id for p in orphans} == {early}
 
 
+def test_orphan_reaper_ignores_previous_attempt_and_stale_snapshot(store):
+    user = store.create_user("attempt@e.st", "pw")
+    pid = seed_project(store, user.id, "board")
+    old = store.enqueue_build(workspace="/attempt", project_id=pid)
+    assert store.claim_build(old, "pid:1")
+    assert store.finish_build(old, rc=1, status="failed")
+    store.finish_project(pid, "failed")
+    generation = store.begin_project_attempt(pid)
+    assert store.list_unfinalized_builds() == []
+    assert not store.finish_project_if_running(
+        pid, "failed", expected_attempt_generation=generation, expected_job_id=old)
+    _backdate_secs(store, pid, 300)
+    assert [p.id for p in store.list_orphaned_running_projects()] == [pid]
+    new = store.enqueue_build(workspace="/attempt", project_id=pid,
+                              attempt_generation=generation)
+    assert not store.finish_project_if_running(
+        pid, "interrupted", expected_attempt_generation=generation,
+        require_no_attempt_job=True)
+    assert store.claim_build(new, "pid:1")
+    assert store.finish_build(new, rc=0)
+    assert store.finish_project_if_running(
+        pid, "ok", expected_attempt_generation=generation, expected_job_id=new)
+
+
+def test_attempt_start_rejects_overlapping_run_and_active_job(store):
+    user = store.create_user("overlap@e.st", "pw")
+    pid = seed_project(store, user.id, "board")
+    with pytest.raises(ValueError):
+        store.begin_project_attempt(pid)
+    job = store.enqueue_build(workspace="/busy", project_id=pid)
+    store.finish_project(pid, "failed")
+    with pytest.raises(ValueError):
+        store.begin_project_attempt(pid)
+    assert store.finish_build(job, rc=1, status="failed", expect="queued")
+    generation = store.begin_project_attempt(pid)
+    with pytest.raises(ValueError):
+        store.enqueue_build(workspace="/busy", project_id=pid,
+                            attempt_generation=generation - 1)
+
+
+def test_stale_queued_job_neither_claims_nor_blocks_queue(store):
+    user = store.create_user("stale-job@e.st", "pw")
+    pid = seed_project(store, user.id, "board")
+    stale = store.enqueue_build(workspace="/stale", project_id=pid)
+    with sqlite3.connect(store.path) as conn:
+        conn.execute("UPDATE build_jobs SET attempt_generation=NULL WHERE id=?", (stale,))
+    current = store.enqueue_build(workspace="/current")
+    assert not store.claim_build(stale, "pid:1")
+    assert store.build_queue_position(current)[:2] == (0, 1)
+    assert store.claim_next_build("pid:1").id == current
+
+
+def test_legacy_job_migration_prefers_running_and_closes_ambiguous_queue(store):
+    user = store.create_user("legacy-attempt@e.st", "pw")
+    pid = seed_project(store, user.id, "board")
+    running = store.enqueue_build(workspace="/legacy-running", project_id=pid)
+    assert store.claim_build(running, "pid:1")
+    queued = store.enqueue_build(workspace="/legacy-queued", project_id=pid)
+    with sqlite3.connect(store.path) as conn:
+        conn.execute("ALTER TABLE build_jobs DROP COLUMN attempt_generation")
+
+    reopened = AccountStore(store.path, store.projects_dir)
+    assert reopened.get_build_job(running).attempt_generation == 0
+    assert reopened.get_build_job(running).status == "running"
+    assert reopened.get_build_job(queued).attempt_generation is None
+    assert reopened.get_build_job(queued).status == "failed"
+
+
 def test_awaiting_input_holds_the_slot(store):
     u = store.create_user("park@e.st", "pw")
-    pid = store.create_project(u.id, "parked on a question")
+    pid = seed_project(store, u.id, "parked on a question")
     store.update_project_status(pid, "awaiting_input")
     assert store.quota_status(u)["remaining"] == 0  # a parked run still holds the slot
     store.finish_project(pid, "failed")  # abandoning the design frees it
@@ -319,7 +420,7 @@ def test_failed_designs_do_not_count(store):
     store.create_user("fail@e.st", "pw")
     u = store.set_tier("fail@e.st", "pro")
     for _ in range(3):
-        pid = store.create_project(u.id, "x")
+        pid = seed_project(store, u.id, "x")
         store.finish_project(pid, "failed")
     assert store.quota_status(u)["used"] == 0  # failures free the slot
     assert store.quota_status(u)["remaining"] == 5
@@ -329,7 +430,7 @@ def test_pro_and_max_limits(store):
     store.create_user("p@e.st", "pw")
     u = store.set_tier("p@e.st", "pro")
     for _ in range(5):
-        store.finish_project(store.create_project(u.id, "x"), "ok")
+        store.finish_project(seed_project(store, u.id, "x"), "ok")
     assert store.quota_status(u)["remaining"] == 0
     u = store.set_tier("p@e.st", "max")  # same 5 now count against 20
     assert store.quota_status(u)["remaining"] == 15
@@ -338,10 +439,10 @@ def test_pro_and_max_limits(store):
 def test_window_expiry_for_month_tier(store):
     store.create_user("w@e.st", "pw")
     u = store.set_tier("w@e.st", "pro")
-    old = store.create_project(u.id, "old")
+    old = seed_project(store, u.id, "old")
     store.finish_project(old, "ok")
     _backdate(store, old, 40)  # outside the 30-day window
-    store.finish_project(store.create_project(u.id, "new"), "ok")
+    store.finish_project(seed_project(store, u.id, "new"), "ok")
     assert store.quota_status(u)["used"] == 1  # only the recent one counts
 
 
@@ -349,8 +450,8 @@ def test_window_expiry_for_month_tier(store):
 
 def test_projects_listed_newest_first(store):
     u = store.create_user("l@e.st", "pw")
-    p1 = store.create_project(u.id, "first")
-    p2 = store.create_project(u.id, "second")
+    p1 = seed_project(store, u.id, "first")
+    p2 = seed_project(store, u.id, "second")
     store.finish_project(p1, "ok", stem="FIRST", zip_path="/tmp/f.zip")
     projs = store.list_projects(u.id)
     assert [p.id for p in projs] == [p2, p1]
@@ -378,6 +479,35 @@ def test_reset_token_is_single_use(store):
     assert store.consume_reset_token(token, "second") is None  # already spent
     assert store.verify_reset_token(token) is None
     assert store.authenticate("once@e.st", "first") is not None  # second never applied
+
+
+def test_reset_token_concurrent_consumption_is_single_use(store, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+    import time
+    import kicraft.server.accounts as accounts
+
+    user = store.create_user("race@e.st", "old")
+    token = store.create_reset_token(user.email)
+    original_hash = accounts.hash_password
+    start = threading.Barrier(2)
+
+    def slow_hash(password):
+        time.sleep(0.2)  # allow the competing reset to reach the token check
+        return original_hash(password)
+
+    monkeypatch.setattr(accounts, "hash_password", slow_hash)
+
+    def reset(password):
+        start.wait(timeout=5)
+        return store.consume_reset_token(token, password)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(reset, ("first", "second")))
+    assert sum(result is not None for result in results) == 1
+    assert store.get_user(user.id).session_epoch == 1
+    assert sum(store.authenticate(user.email, password) is not None
+               for password in ("first", "second")) == 1
 
 
 def test_reset_token_expires(store):
@@ -409,6 +539,39 @@ def test_create_reset_token_cooldown(store):
     assert store.create_reset_token("cool@e.st") is None  # within the cooldown window
     _set_reset_times(store, created_secs_ago=120)
     assert store.create_reset_token("cool@e.st") is not None  # cooldown elapsed
+
+
+@pytest.mark.parametrize("kind", ["reset", "verification"])
+def test_token_mint_cooldown_is_atomic(store, monkeypatch, kind):
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+    import time
+    import kicraft.server.accounts as accounts
+
+    user = store.create_user("mint-race@e.st", "pw")
+    original_token = accounts.secrets.token_urlsafe
+    start = threading.Barrier(2)
+
+    def slow_token(n):
+        time.sleep(0.2)
+        return original_token(n)
+
+    monkeypatch.setattr(accounts.secrets, "token_urlsafe", slow_token)
+
+    def mint(_):
+        start.wait(timeout=5)
+        if kind == "reset":
+            return store.create_reset_token(user.email)
+        return store.create_verification_token(user.id)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        tokens = list(pool.map(mint, range(2)))
+    issued = [token for token in tokens if token is not None]
+    assert len(issued) == 1
+    if kind == "reset":
+        assert store.verify_reset_token(issued[0]).id == user.id
+    else:
+        assert store.consume_verification_token(issued[0]).id == user.id
 
 
 def test_reset_garbage_and_empty_token(store):
@@ -506,11 +669,12 @@ def test_staff_bypass_quota(store):
     # Verify so the block below is the quota, not the email-verification gate.
     store.consume_verification_token(store.create_verification_token(u.id))
     u = store.get_user(u.id)
-    store.create_project(u.id, "b1")        # consume the one slot
+    assert store.create_project(u.id, "b1") is not None
     assert store.can_design(u) is False
     assert store.quota_status(u)["unlimited"] is False
     u = store.set_role("op@e.st", "admin")
     assert store.can_design(u) is True
+    assert store.create_project(u.id, "admin extra") is not None
     q = store.quota_status(u)
     assert q["unlimited"] is True
     assert q["limit"] is None and q["remaining"] == float("inf")
@@ -547,7 +711,7 @@ def test_legacy_admin_tier_migrates_to_role(tmp_path):
 
 def _add_project(store, user_id, status="ok", cost=None, days_ago=0):
     """Create + finish a project, optionally back-dating it to exercise day buckets."""
-    pid = store.create_project(user_id, "brief")
+    pid = seed_project(store, user_id, "brief")
     store.finish_project(pid, status, "stem" if status == "ok" else None, cost)
     if days_ago:
         ts = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days_ago)).isoformat()
@@ -655,13 +819,41 @@ def test_disable_and_reenable_invite_code(store):
 
 
 def test_invite_code_max_uses_exhausts(store):
-    c = store.create_invite_code("TWICE", "pro", max_uses=2)
-    store.record_invite_use(c["id"])
-    assert store.check_invite_code("TWICE") is not None  # 1 of 2 used
-    store.record_invite_use(c["id"])
-    assert store.check_invite_code("TWICE") is None  # used up
+    store.create_invite_code("TWICE", "pro", max_uses=2)
+    assert store.create_user("one@e.st", "pw", invite_code="TWICE").tier == "pro"
+    assert store.check_invite_code("TWICE") is not None
+    assert store.create_user("two@e.st", "pw", invite_code="twice").tier == "pro"
+    assert store.check_invite_code("TWICE") is None
     listed = store.list_invite_codes()[0]
     assert listed["use_count"] == 2 and listed["last_used_at"] is not None
+    with pytest.raises(ValueError):
+        store.create_user("three@e.st", "pw", invite_code="TWICE")
+    assert store.get_user_by_email("three@e.st") is None
+
+
+def test_invite_last_use_is_atomic_and_duplicate_does_not_burn(store):
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+
+    store.create_user("duplicate@e.st", "pw")
+    store.create_invite_code("LAST", "max", max_uses=1)
+    with pytest.raises(ValueError):
+        store.create_user("duplicate@e.st", "pw", invite_code="LAST")
+    assert store.list_invite_codes()[0]["use_count"] == 0
+    start = threading.Barrier(2)
+
+    def signup(email):
+        start.wait(timeout=5)
+        try:
+            return store.create_user(email, "pw", invite_code="LAST")
+        except ValueError:
+            return None
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        users = list(pool.map(signup, ("one@e.st", "two@e.st")))
+    assert sum(user is not None for user in users) == 1
+    assert next(user for user in users if user is not None).tier == "max"
+    assert store.list_invite_codes()[0]["use_count"] == 1
 
 
 def test_invite_codes_listed_newest_first(store):
@@ -782,23 +974,17 @@ def test_users_with_project_counts_left_join(store):
 
 def _ok_public(store, user_id, brief="a board", stem="BOARD"):
     """Create + finish a public, completed project; return its id."""
-    pid = store.create_project(user_id, brief)
+    pid = seed_project(store, user_id, brief)
     store.finish_project(pid, "ok", stem=stem)
     return pid
 
 
-def test_new_project_columns_default(store):
-    u = store.create_user("np@e.st", "pw")
-    p = store.get_project(store.create_project(u.id, "x"))
-    assert p.is_public is True               # public by default (community rule)
-    assert p.cloned_from_id is None
-    assert (p.view_count, p.clone_count, p.like_count) == (0, 0, 0)
-    assert p.quality is None
 
 
 def test_create_project_private_override(store):
-    u = store.create_user("priv@e.st", "pw")
-    pid = store.create_project(u.id, "x", is_public=False)  # paid private clone path
+    u = store.create_user("priv@e.st", "pw", tier="pro")
+    store.consume_verification_token(store.create_verification_token(u.id))
+    pid = store.create_project(u.id, "x", is_public=False)
     assert store.get_project(pid).is_public is False
 
 
@@ -806,6 +992,8 @@ def test_project_visibility_follows_tier(store):
     free = store.create_user("ff@e.st", "pw")
     store.create_user("pp@e.st", "pw")
     paid = store.set_tier("pp@e.st", "pro")
+    for owner in (free, paid):
+        store.consume_verification_token(store.create_verification_token(owner.id))
     assert store.get_project(store.create_project(free.id, "x")).is_public is True
     assert store.get_project(store.create_project(paid.id, "x")).is_public is False
 
@@ -846,7 +1034,7 @@ def test_toggle_like_dedup_and_count(store):
 def test_clone_from_and_increment_clone_count(store):
     u = store.create_user("cf@e.st", "pw")
     src = _ok_public(store, u.id)
-    clone = store.create_project(u.id, "cloned")
+    clone = seed_project(store, u.id, "cloned")
     store.set_cloned_from(clone, src)
     store.increment_clone_count(src)
     store.increment_clone_count(src)
@@ -859,8 +1047,8 @@ def test_list_public_only_ok_and_public(store):
     ok_pub = _ok_public(store, u.id, stem="OKPUB")
     priv = _ok_public(store, u.id, stem="PRIV")
     store.set_visibility(priv, False)                  # ok but private -> excluded
-    store.finish_project(store.create_project(u.id, "f"), "failed")  # failed -> excluded
-    store.create_project(u.id, "r")                    # running -> excluded
+    store.finish_project(seed_project(store, u.id, "f"), "failed")  # failed -> excluded
+    seed_project(store, u.id, "r")                    # running -> excluded
     rows = store.list_public_projects()
     assert [r["id"] for r in rows] == [ok_pub]
     assert rows[0]["owner_email"] == "lp@e.st"         # join surfaces the owner
@@ -939,7 +1127,7 @@ def test_migration_adds_project_columns_to_legacy_db(tmp_path):
 
 def test_interactive_project_policy_survives_reopen(store):
     user = store.create_user("questions@e.st", "pw")
-    pid = store.create_project(user.id, "interactive board", auto_default_questions=False)
+    pid = seed_project(store, user.id, "interactive board", auto_default_questions=False)
     store.update_project_status(pid, "awaiting_input")
     reopened = AccountStore(store.path, store.projects_dir)
     project = reopened.get_project(pid)
@@ -972,8 +1160,8 @@ def test_board_code_format():
 
 def test_new_projects_get_unique_board_codes(store):
     u = store.create_user("bc@e.st", "pw")
-    p1 = store.get_project(store.create_project(u.id, "one"))
-    p2 = store.get_project(store.create_project(u.id, "two"))
+    p1 = store.get_project(seed_project(store, u.id, "one"))
+    p2 = store.get_project(seed_project(store, u.id, "two"))
     assert _BOARD_CODE_RE.fullmatch(p1.board_code)
     assert _BOARD_CODE_RE.fullmatch(p2.board_code)
     assert p1.board_code != p2.board_code
@@ -1004,7 +1192,7 @@ def test_board_code_backfilled_on_migration(tmp_path):
 
 def test_support_report_roundtrip(store):
     u = store.create_user("sup@e.st", "pw")
-    pid = store.create_project(u.id, "blinky")
+    pid = seed_project(store, u.id, "blinky")
     p = store.get_project(pid)
     rid = store.create_support_report(
         user_id=u.id, project_id=pid, board_code=p.board_code,
@@ -1023,16 +1211,33 @@ def test_support_report_roundtrip(store):
     assert store.list_support_reports(status="reviewed")[0].id == rid
 
 
-def test_support_reports_exported_and_purged_with_user(store):
+def test_support_reports_exported_and_purged_with_user(store, tmp_path):
     u = store.create_user("priv@e.st", "pw")
     other = store.create_user("other@e.st", "pw")
     rid = store.create_support_report(user_id=u.id, kind="user", message="help")
     other_rid = store.create_support_report(user_id=other.id, kind="user")
+    log_dir = tmp_path / "support_investigations"
+    log_dir.mkdir()
+    log = log_dir / f"investigate_report_{rid}.log"
+    other_log = log_dir / f"investigate_report_{other_rid}.log"
+    log.write_text("private diagnostics")
+    other_log.write_text("other user's diagnostics")
+    unrelated = tmp_path / "unrelated"
+    unrelated.write_text("must not be removed")
+    investigation = store.create_investigation(report_id=rid, log_path=str(unrelated))
+    store.finish_investigation(investigation, rc=0, report_md="private diagnostics")
+    other_investigation = store.create_investigation(report_id=other_rid)
     data = store.export_user(u.id)
     assert [r["id"] for r in data["support_reports"]] == [rid]
     store.delete_user(u.id)
     remaining = store.list_support_reports()
     assert [r.id for r in remaining] == [other_rid]  # other users' reports intact
+    assert store.get_investigation(investigation) is None
+    assert store.get_investigation(other_investigation) is not None
+    assert not log.exists()
+    assert other_log.exists() and unrelated.exists()
+    with pytest.raises(ValueError):
+        store.create_investigation(report_id=rid)
 
 
 # ---- email verification -------------------------------------------------

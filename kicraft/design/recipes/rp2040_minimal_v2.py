@@ -34,9 +34,9 @@ _SWD_PINS = ("24", "25")
 _UART_PINS = {"uart_tx": "2", "uart_rx": "3"}
 
 
-RP2040_MINIMAL_V2: RecipeDefinition = RP2040_CORE.model_copy(
+RP2040_MINIMAL_V3: RecipeDefinition = RP2040_CORE.model_copy(
     update={
-        "recipe": "rp2040-minimal@2",
+        "recipe": "rp2040-minimal@3",
         "family": "rp2040",
         "exact_part": "RP2040",
         "default_for_family": True,
@@ -52,6 +52,7 @@ RP2040_MINIMAL_V2: RecipeDefinition = RP2040_CORE.model_copy(
             "flash_mbit": 16,
             "logic_voltage_v": 3.3,
             "consumer_input_max_v": 3.3,
+            "gpio_exposed": 30,
         },
         "allowed_parameters": {
             "native_usb": (True, False),
@@ -59,6 +60,7 @@ RP2040_MINIMAL_V2: RecipeDefinition = RP2040_CORE.model_copy(
             "flash_mbit": (16,),
             "logic_voltage_v": (3.3,),
             "consumer_input_max_v": (3.3,),
+            "gpio_exposed": tuple(range(31)),
         },
         "ports": (
             Port(name="vdd", direction="power"),
@@ -150,21 +152,48 @@ def expand_rp2040_minimal(resolved):
     """Materialize either native USB recovery or a physically complete SWD recovery path."""
     from .registry import expand_static_definition
 
-    definition = RP2040_MINIMAL_V2
+    definition = RP2040_MINIMAL_V3
+    exposed = resolved.parameters["gpio_exposed"]
+    if type(exposed) is not int:
+        raise ValueError("recipe rp2040-minimal@3 gpio_exposed must be an integer")
     bindings = resolved.selection.port_bindings
+    unavailable = sorted(
+        name for name in bindings
+        if name.startswith("gpio") and name[4:].isdigit() and int(name[4:]) >= exposed
+    )
+    if unavailable:
+        raise ValueError(f"recipe rp2040-minimal@3 binds unexposed GPIOs: {unavailable}")
+    if exposed < 30:
+        removed = [
+            pin for pin in definition.pins
+            if pin.net.startswith("gpio") and pin.net[4:].isdigit()
+            and int(pin.net[4:]) >= exposed
+        ]
+        definition = definition.model_copy(update={
+            "pins": tuple(pin for pin in definition.pins if pin not in removed),
+            "no_connects": (*definition.no_connects, *(
+                NoConnect(role=pin.role, index=pin.index, pin=pin.pin)
+                for pin in removed
+            )),
+        })
     native_usb = resolved.parameters["native_usb"]
     programming = resolved.parameters["programming"]
     bound_usb = {"usb_dm", "usb_dp"}.intersection(bindings)
     if bound_usb and bound_usb != {"usb_dm", "usb_dp"}:
-        raise ValueError("recipe rp2040-minimal@2 requires usb_dm and usb_dp together")
+        raise ValueError("recipe rp2040-minimal@3 requires usb_dm and usb_dp together")
+    if bound_usb and (
+        bindings["usb_dm"] == bindings["usb_dp"]
+        or any(bindings[name] in {bindings.get("vdd"), bindings.get("gnd")} for name in bound_usb)
+    ):
+        raise ValueError("recipe rp2040-minimal@3 has shorted USB data or supply nets")
     bound_uart = {"uart_tx", "uart_rx"}.intersection(bindings)
     if bound_uart and bound_uart != {"uart_tx", "uart_rx"}:
         raise ValueError(
-            "recipe rp2040-minimal@2 UART bridge mode requires uart_tx and uart_rx together"
+            "recipe rp2040-minimal@3 UART bridge mode requires uart_tx and uart_rx together"
         )
-    if bound_uart and {"gpio0", "gpio1"}.intersection(bindings):
+    if bound_uart and ({"gpio0", "gpio1"}.intersection(bindings) or exposed != 30):
         raise ValueError(
-            "recipe rp2040-minimal@2 bridge mode reserves GPIO0/GPIO1 for UART0"
+            "recipe rp2040-minimal@3 UART bridge mode requires all GPIOs exposed and reserves GPIO0/GPIO1"
         )
     if bound_uart:
         definition = definition.model_copy(
@@ -189,7 +218,7 @@ def expand_rp2040_minimal(resolved):
     if native_usb:
         if programming != "native_usb" or bound_usb != {"usb_dm", "usb_dp"}:
             raise ValueError(
-                "recipe rp2040-minimal@2 native USB requires programming='native_usb' and a complete USB pair"
+                "recipe rp2040-minimal@3 native USB requires programming='native_usb' and a complete USB pair"
             )
         # Raspberry Pi hardware guide §2.4.1 requires 27-ohm termination at
         # the MCU, not the generic USB receptacle's 22-ohm pair.
@@ -217,11 +246,11 @@ def expand_rp2040_minimal(resolved):
         return expand_static_definition(definition, resolved)
     if programming != "swd":
         raise ValueError(
-            "recipe rp2040-minimal@2 native_usb=False requires programming='swd'"
+            "recipe rp2040-minimal@3 native_usb=False requires programming='swd'"
         )
     if bound_usb:
         raise ValueError(
-            "recipe rp2040-minimal@2 native_usb=False cannot bind the RP2040 USB PHY"
+            "recipe rp2040-minimal@3 native_usb=False cannot bind the RP2040 USB PHY"
         )
 
     pins = [

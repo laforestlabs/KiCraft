@@ -224,7 +224,7 @@ MAX3485_RS485_NODE = _recipe(
 )
 
 DRV8833_DUAL_MOTOR = _recipe(
-    recipe="drv8833-dual-motor@1",
+    recipe="drv8833-dual-motor@2",
     family="dual-dc-motor-driver",
     exact="DRV8833PWPR",
     safety=True,
@@ -291,8 +291,9 @@ DRV8833_DUAL_MOTOR = _recipe(
         ),
         *(
             Pin(role=role, pin="2", net="gnd")
-            for role in ("vm_bulk", "vm_decoupling", "vcp_cap", "vint_cap")
+            for role in ("vm_bulk", "vm_decoupling", "vint_cap")
         ),
+        Pin(role="vcp_cap", pin="2", net="vm"),
         Pin(role="sense", index=0, pin="1", net="aisense"),
         Pin(role="sense", index=0, pin="2", net="gnd"),
         Pin(role="sense", index=1, pin="1", net="bisense"),

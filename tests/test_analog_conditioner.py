@@ -267,3 +267,29 @@ def test_temt6000_direct_readout_owns_bias_and_filter_with_only_external_ports(f
 def test_temt6000_direct_readout_refuses_identity_voltage_and_pin_map_shims(requirement):
     with pytest.raises(ValueError):
         lower_requirement(requirement)
+
+
+@pytest.mark.parametrize("defect", ["supply_short", "output_ground", "output_supply", "output_sensor"])
+def test_conditioner_rejects_shorted_supply_or_driven_output(defect):
+    requirement = _requirement("temperature", 2, "MCP6002-I/SN")
+    ports = dict(requirement.ports)
+    if defect == "supply_short":
+        ports["vplus"] = ports["vminus"]
+    else:
+        net = {"output_ground": ports["vminus"], "output_supply": ports["vplus"],
+               "output_sensor": ports["sensor_1_signal"]}[defect]
+        ports["conditioned_1"] = ports["analog_out_1"] = net
+    with pytest.raises(ValueError):
+        lower_requirement(requirement.model_copy(update={"ports": ports}))
+
+
+def test_isolated_conditioner_rejects_cross_channel_output_alias():
+    requirement = _requirement("temperature", 2, "MCP6002-I/SN")
+    ports = {
+        **requirement.ports, "isolation_vdd": "HOST5", "isolation_enable": "RELEASE",
+        "analog_out_1": "OUT2", "analog_out_2": "HOST_OUT2",
+    }
+    with pytest.raises(ValueError):
+        lower_requirement(requirement.model_copy(update={
+            "ports": ports, "parameters": {**requirement.parameters, "power_cycle_isolation": True},
+        }))

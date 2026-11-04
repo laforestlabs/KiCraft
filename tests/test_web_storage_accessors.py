@@ -82,6 +82,8 @@ def test_price_cache_roundtrips_through_dotkicraft(tmp_path):
     # retail_stock must be a verified (non-None) reading: the schema-6 load
     # skips retail-unverified entries so they re-fetch on reopen.
     with web._PRICE_LOCK:
+        previous = web._PRICE_CACHE.get(key)
+        existed = key in web._PRICE_CACHE
         web._PRICE_CACHE[key] = {"unit": 1.23, "retail_stock": 7}
     try:
         web._save_price_cache(root, {key})
@@ -94,4 +96,7 @@ def test_price_cache_roundtrips_through_dotkicraft(tmp_path):
                                                  "retail_stock": 7}
     finally:
         with web._PRICE_LOCK:
-            web._PRICE_CACHE.pop(key, None)
+            if existed:
+                web._PRICE_CACHE[key] = previous
+            else:
+                web._PRICE_CACHE.pop(key, None)

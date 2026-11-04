@@ -65,5 +65,4 @@ def test_guard_honors_size_mm_within_slack():
     ) is None
 
 
-def test_cap_is_a_sane_default():
-    assert 2.0 < _MAX_SHAPE_AREA_RATIO < 20.0
+

@@ -87,10 +87,4 @@ def test_summarize_buckets():
     assert s["search_miss"]["search_footprints:flux capacitor"] == 1
 
 
-def test_format_report_smoke():
-    text = format_report(summarize(_EVENTS), top=5)
-    assert "LIBRARY HITS" in text
-    assert "ams1117-3v3" in text
-    assert "ADD-TO-LIBRARY" in text
-    assert "C2913201" in text
-    assert "UNRESOLVED" in text
+

@@ -577,61 +577,23 @@ def attempt_leaf_size_reduction(
                 summary["attempts"].append(attempt_record)
                 continue
 
-            width_delta = current_width - candidate_width
-            height_delta = current_height - candidate_height
-            reroute_threshold = float(cfg.get("leaf_size_reduction_reroute_threshold_mm", 1.5))
-            should_reroute = (
-                candidate["axis"] == "both"
-                or width_delta > reroute_threshold
-                or height_delta > reroute_threshold
-            )
-
-            rerouted: dict[str, Any] = {}
-            reroute_timing: dict[str, float] = {}
-
-            # Reuse the previous routing only when the delta is below the
-            # reroute threshold AND the previous routing was already
-            # accepted -- it's still legal in the slightly-shrunk box.
-            # Otherwise we MUST reroute: large deltas could leave traces
-            # outside the new outline, and an unaccepted prior routing
-            # has nothing to reuse. The previous code path missed the
-            # should_reroute=True case entirely (rerouted stayed {} and
-            # every large-delta attempt was silently rejected as
-            # "reroute_validation_failed"), which is why outlines never
-            # actually shrunk on disk -- only small deltas were ever
-            # accepted, via the reuse path that doesn't rewrite the PCB.
-            can_reuse = (
-                not edge_requirements["groups"]
-                and not should_reroute
-                and current_round.routing.get("validation", {}).get("accepted", False)
-            )
-            preserved_boards: dict[str, bytes] = {}
-            if can_reuse:
-                rerouted = copy.deepcopy(current_round.routing)
-                rerouted["validation"] = copy.deepcopy(current_round.routing.get("validation", {}))
-                rerouted["render_diagnostics"] = {
-                    "skipped": True,
-                    "reason": "size_reduction_reused_previous_route",
-                }
-                rerouted["size_reduction_reused_route"] = True
-            else:
-                # The reroute overwrites the current winner's boards on disk
-                # (shared canonical + its round snapshot); preserve them so a
-                # rejected candidate can be rolled back byte-for-byte.
-                preserved_boards = _preserve_round_boards(current_round.routing)
-                try:
-                    rerouted, reroute_timing = route_local_subcircuit(
-                        candidate_extraction,
-                        candidate_extraction.local_state.components,
-                        candidate_cfg,
-                        generate_diagnostics=False,
-                        round_index=current_round.round_index,
-                    )
-                except Exception as exc:
-                    _restore_round_boards(preserved_boards)
-                    attempt_record["rejection_reason"] = f"reroute_exception:{exc}"
-                    summary["attempts"].append(attempt_record)
-                    continue
+            # Every accepted outline needs a board stamped and validated for
+            # that candidate. Reusing the old board would report a reduction
+            # without changing or checking its physical geometry.
+            preserved_boards = _preserve_round_boards(current_round.routing)
+            try:
+                rerouted, reroute_timing = route_local_subcircuit(
+                    candidate_extraction,
+                    candidate_extraction.local_state.components,
+                    candidate_cfg,
+                    generate_diagnostics=False,
+                    round_index=current_round.round_index,
+                )
+            except Exception as exc:
+                _restore_round_boards(preserved_boards)
+                attempt_record["rejection_reason"] = f"reroute_exception:{exc}"
+                summary["attempts"].append(attempt_record)
+                continue
 
             attempt_record["routing"] = {
                 key: value for key, value in rerouted.items() if not key.startswith("_")

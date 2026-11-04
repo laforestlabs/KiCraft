@@ -59,6 +59,25 @@ JOB_KIND_COMMANDS: dict[str, list[str]] = {
     "manual_route": _MANUAL_ROUTE_CMD,
 }
 
+def job_command(kind: str, command: list[str], workspace: Path, *,
+                project_id: int | None, attempt_generation: int | None) -> list[str]:
+    """Select stable managed output without changing injected or scratch commands."""
+    cmd = list(command)
+    if project_id is None or attempt_generation is None or cmd != JOB_KIND_COMMANDS.get(kind):
+        return cmd
+    if kind == "build":
+        cmd[5] = f"generated/attempt-{attempt_generation}"
+    elif kind == "manual_route":
+        from .storage import _discover_generated_dir
+
+        project = _discover_generated_dir(workspace)
+        if project is None:
+            raise ValueError("no current synthesized project for manual routing")
+        cmd[5] = str(project.resolve())
+    return cmd
+
+
+
 _MAX_ATTEMPTS = 2  # claims a job may burn before it is failed instead of requeued
 
 
@@ -198,7 +217,13 @@ class BuildWorker:
         # mid-round with zero artifacts (same 0.9 factor as self_eval's
         # export); setdefault so an operator env override wins.
         env.setdefault("KICRAFT_BUILD_MAX_WALL_S", f"{self.timeout_s * 0.9:.0f}")
-        cmd = list(cmd_base)
+        try:
+            cmd = job_command(kind, cmd_base, ws, project_id=job.project_id,
+                              attempt_generation=job.attempt_generation)
+        except ValueError as exc:
+            _log(f"job {job.id}: {exc} -> failed")
+            self.store.finish_build(job.id, rc=None, status="failed")
+            return
         if kind == "build":
             quality = self.store.build_quality_for_user(job.user_id)
             if quality:

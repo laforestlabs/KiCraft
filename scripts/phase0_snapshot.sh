@@ -14,16 +14,21 @@ cd "$(dirname "$0")/.."
 PY=".venv/bin/python"; [ -x "$PY" ] || PY="python3"
 # Resolve DB paths the way the app does (honor .env, fall back to ~/.kicraft).
 eval "$("$PY" - <<'EOF'
-import os
+import os, shlex
 from kicraft.server.config import load_dotenv
 load_dotenv()
 home = os.path.expanduser("~/.kicraft")
 acct = os.environ.get("KICRAFT_USERS_DB", f"{home}/accounts.db")
 ledger = os.environ.get("KICRAFT_SPEND_LEDGER", f"{home}/spend_ledger.db")
-print(f"ACCT_DB={acct!r}")
-print(f"LEDGER_DB={ledger!r}")
+print(f"ACCT_DB={shlex.quote(acct)}")
+print(f"LEDGER_DB={shlex.quote(ledger)}")
 EOF
 )"
+if [ "$(basename "$ACCT_DB")" = "$(basename "$LEDGER_DB")" ]; then
+  echo "[snapshot] database basenames must differ" >&2
+  exit 2
+fi
+
 
 TS="$(date -u +%Y%m%dT%H%M%SZ)"
 SNAP_DIR="${1:-$HOME/.kicraft/loadtest_snapshots/$TS}"
@@ -53,10 +58,11 @@ done
   echo "--- df ---"; df -h "$HOME/.kicraft" 2>/dev/null || df -h "$HOME"
   echo "--- free ---"; free -m 2>/dev/null || true
   echo "--- spend ---"
-  "$PY" - <<EOF || true
-import sqlite3
+  "$PY" - "$LEDGER_DB" <<'EOF' || true
+import sqlite3, sys
+from pathlib import Path
 try:
-    c = sqlite3.connect("$LEDGER_DB")
+    c = sqlite3.connect(Path(sys.argv[1]).resolve().as_uri() + "?mode=ro", uri=True)
     print("spent_total_usd=%.4f" % (c.execute("SELECT COALESCE(SUM(cost_usd),0) FROM spend").fetchone()[0] or 0))
 except Exception as e:
     print("spend read failed:", e)

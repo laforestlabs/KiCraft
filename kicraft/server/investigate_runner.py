@@ -98,8 +98,12 @@ def enqueue_investigation(store: AccountStore, report: SupportReport, *,
     if log_dir is not None:
         log_dir.mkdir(parents=True, exist_ok=True)
         log_path = str(log_dir / f"investigate_report_{report.id}.log")
-    inv_id = store.create_investigation(
-        report_id=report.id, board_code=report.board_code, log_path=log_path)
+    try:
+        inv_id = store.create_investigation(
+            report_id=report.id, board_code=report.board_code, log_path=log_path)
+    except ValueError:
+        # Account deletion can remove the report while enqueue is in flight.
+        return None
     run = runner or run_investigation
     threading.Thread(target=run, args=(store, inv_id, target), daemon=True).start()
     return inv_id
@@ -135,7 +139,15 @@ def _run_omp(store: AccountStore, inv_id: int, target: str):
                       "headlessly. Install Oh My Pi (omp) or set KICRAFT_OMP_BIN, "
                       "then retry.")
     inv = store.get_investigation(inv_id)
-    log_path = Path(inv.log_path) if inv and inv.log_path else None
+    if inv is None:
+        return None, "Investigation was deleted before it started."
+    log_path = None
+    if inv.log_path and inv.report_id is not None:
+        root = (store.projects_dir.parent / "support_investigations").resolve()
+        candidate = Path(inv.log_path)
+        expected = root / f"investigate_report_{inv.report_id}.log"
+        if candidate.absolute() == expected and not candidate.is_symlink():
+            log_path = candidate
     repo = _repo_dir()
     prompt = f"Use the kicraft-investigate skill to investigate {target}."
     cmd = [omp, "-p", prompt, "--auto-approve"]
@@ -143,8 +155,15 @@ def _run_omp(store: AccountStore, inv_id: int, target: str):
     cmd += ["--model", model]
     _log(f"inv {inv_id}: kicraft-investigate {target} (cwd={repo})")
     chunks: list[str] = []
-    logf = log_path.open("a", encoding="utf-8") if log_path else None
+    logf = None
+    if log_path is not None:
+        fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
+        logf = os.fdopen(fd, "a", encoding="utf-8")
     try:
+        # Account deletion may have unlinked the log just before this open.
+        # Check after opening so a deleted investigation cannot recreate it.
+        if store.get_investigation(inv_id) is None:
+            return None, "Investigation was deleted before it started."
         proc = subprocess.Popen(
             cmd, cwd=str(repo), stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT, text=True, errors="replace",
@@ -185,6 +204,8 @@ def _run_omp(store: AccountStore, inv_id: int, target: str):
     finally:
         if logf:
             logf.close()
+        if log_path is not None and store.get_investigation(inv_id) is None:
+            log_path.unlink(missing_ok=True)
 
 
 def _kill(proc: subprocess.Popen) -> None:

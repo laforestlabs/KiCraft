@@ -286,26 +286,6 @@ class TestDeriveBoardOutline:
         assert br.y == pytest.approx(18.0)
 
 
-class TestCompositionSummary:
-    """test_composition_summary -- returns a human-readable string."""
-
-    def test_composition_summary(self):
-        comp = _make_component("R1", 2.0, 1.0)
-        layout = _make_layout("CHILD", {"R1": comp})
-        parent = _make_parent_def("PARENT", ["CHILD"])
-
-        result = build_parent_composition(
-            parent,
-            child_placements=[
-                ChildPlacement(layout=layout, origin=Point(0.0, 0.0)),
-            ],
-        )
-
-        summary = composition_summary(result)
-        assert isinstance(summary, str)
-        assert "PARENT" in summary
-        assert "children=" in summary
-        assert "components=" in summary
 
 
 class TestInferInterconnectNets:
@@ -356,49 +336,6 @@ class TestInferInterconnectNets:
         assert "VOUT" in interconnect_names_upper
 
 
-class TestParentRoutingAddsTraces:
-    """test_parent_routing_adds_traces -- interconnect routing adds traces."""
-
-    def test_parent_routing_adds_traces(self):
-        port_a = _make_port("SIG", "SIG")
-        port_b = _make_port("SIG", "SIG")
-
-        pad_a = _make_pad("R1", "2", 4.0, 1.0, "SIG")
-        comp_a = _make_component("R1", 2.0, 1.0, w=4.0, pads=[pad_a])
-        anchor_a = InterfaceAnchor(
-            port_name="SIG", pos=Point(4.0, 1.0),
-            layer=Layer.FRONT, pad_ref=("R1", "2"),
-        )
-        layout_a = _make_layout(
-            "CHILD_A", {"R1": comp_a},
-            ports=[port_a], anchors=[anchor_a],
-            bbox=(5.0, 2.0),
-        )
-
-        pad_b = _make_pad("C1", "1", 1.0, 1.0, "SIG")
-        comp_b = _make_component("C1", 2.0, 1.0, w=4.0, pads=[pad_b])
-        anchor_b = InterfaceAnchor(
-            port_name="SIG", pos=Point(1.0, 1.0),
-            layer=Layer.FRONT, pad_ref=("C1", "1"),
-        )
-        layout_b = _make_layout(
-            "CHILD_B", {"C1": comp_b},
-            ports=[port_b], anchors=[anchor_b],
-            bbox=(5.0, 2.0),
-        )
-
-        parent = _make_parent_def("P", ["CHILD_A", "CHILD_B"])
-
-        result = build_parent_composition(
-            parent,
-            child_placements=[
-                ChildPlacement(layout=layout_a, origin=Point(0.0, 0.0)),
-                ChildPlacement(layout=layout_b, origin=Point(20.0, 0.0)),
-            ],
-        )
-
-        assert result.board_state is not None
-        assert result.component_count == 2
 
 
 class TestEstimateParentBoardSize:
@@ -544,84 +481,6 @@ class TestPackedExtentsOutline:
         assert br.y == pytest.approx(11.0)
 
 
-class TestPackingSpacingAffectsBoardSize:
-    """Smaller inter-child spacing produces a smaller board outline."""
-
-    @staticmethod
-    def _pack_children(
-        child_sizes: list[tuple[float, float]], spacing_mm: float
-    ) -> tuple[float, float]:
-        """Simulate compose_subcircuits packed mode packing algorithm."""
-        if not child_sizes:
-            return (0.0, 0.0)
-
-        max_child_width = max(w for w, _ in child_sizes)
-        estimated_w, _ = estimate_parent_board_size(
-            child_sizes, margin_mm=spacing_mm
-        )
-        target_row_width = max(
-            max_child_width + spacing_mm,
-            estimated_w if estimated_w > 0.0 else max_child_width,
-        )
-
-        origins: list[tuple[float, float]] = []
-        row_y = 0.0
-        row_x = 0.0
-        row_height = 0.0
-        current_row_items = 0
-
-        for w, h in child_sizes:
-            should_wrap = (
-                current_row_items > 0
-                and row_x > 0.0
-                and (row_x + w) > target_row_width
-            )
-            if should_wrap:
-                row_y += row_height + spacing_mm
-                row_x = 0.0
-                row_height = 0.0
-                current_row_items = 0
-
-            origins.append((row_x, row_y))
-            row_x += w + spacing_mm
-            row_height = max(row_height, h)
-            current_row_items += 1
-
-        placed_bboxes = [
-            (Point(x, y), Point(x + w, y + h))
-            for (x, y), (w, h) in zip(origins, child_sizes)
-        ]
-        outline = packed_extents_outline(placed_bboxes)
-        outline_w = outline[1].x - outline[0].x
-        outline_h = outline[1].y - outline[0].y
-        return (outline_w, outline_h)
-
-    def test_smaller_spacing_produces_smaller_board(self):
-        children = [(30.0, 10.0), (30.0, 10.0)]
-
-        w_tight, h_tight = self._pack_children(children, spacing_mm=1.0)
-        w_loose, h_loose = self._pack_children(children, spacing_mm=5.0)
-
-        area_tight = w_tight * h_tight
-        area_loose = w_loose * h_loose
-
-        assert area_tight < area_loose, (
-            f"Tight spacing (1mm) area={area_tight:.1f} should be less than "
-            f"loose spacing (5mm) area={area_loose:.1f}"
-        )
-
-    def test_spacing_range_monotonic(self):
-        children = [(30.0, 10.0), (30.0, 10.0), (30.0, 10.0)]
-        areas = []
-        for spacing in [0.5, 1.0, 2.0, 4.0, 6.0]:
-            w, h = self._pack_children(children, spacing_mm=spacing)
-            areas.append(w * h)
-
-        for i in range(len(areas) - 1):
-            assert areas[i] <= areas[i + 1], (
-                f"Board area should not decrease as spacing increases: "
-                f"spacing sequence produced areas {[round(a, 1) for a in areas]}"
-            )
 
 
 

@@ -59,20 +59,41 @@ def check_conformance(
     ``delivered_xy`` is every pad centre on the board, in the template's
     board-local (top-left) frame. ``board_wh`` is the delivered board's
     (width, height); when given, it must match the template within ``tol_mm``.
-    A standard header pin "matches" when some delivered pad sits within
+    A standard header pin "matches" when a distinct delivered pad sits within
     ``tol_mm`` of its fixed position. Net names are deliberately ignored --
     only geometry decides whether the board mates.
     """
     exp = expected_pins(template)
     dpts = list(delivered_xy)
     tol_sq = tol_mm * tol_mm
-    matched = 0
-    missing: list[tuple[str, float, float]] = []
-    for net, ex, ey in exp:
-        if any((dx - ex) ** 2 + (dy - ey) ** 2 <= tol_sq for dx, dy in dpts):
-            matched += 1
-        else:
-            missing.append((net, round(ex, 3), round(ey, 3)))
+    candidates = [
+        [i for i, (dx, dy) in enumerate(dpts)
+         if (dx - ex) ** 2 + (dy - ey) ** 2 <= tol_sq]
+        for _net, ex, ey in exp
+    ]
+    # A pad may lie within tolerance of more than one expected contact.
+    # Find a maximum one-to-one matching, rather than counting it twice or
+    # depending on the order in which the expected pins happen to appear.
+    pad_owner: dict[int, int] = {}
+
+    def assign(pin: int, visited: set[int]) -> bool:
+        for pad in candidates[pin]:
+            if pad in visited:
+                continue
+            visited.add(pad)
+            if pad not in pad_owner or assign(pad_owner[pad], visited):
+                pad_owner[pad] = pin
+                return True
+        return False
+
+    for pin in range(len(exp)):
+        assign(pin, set())
+    assigned_pins = set(pad_owner.values())
+    matched = len(assigned_pins)
+    missing = [
+        (net, round(ex, 3), round(ey, 3))
+        for pin, (net, ex, ey) in enumerate(exp) if pin not in assigned_pins
+    ]
 
     outline_ok = True
     notes: list[str] = []

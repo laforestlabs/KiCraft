@@ -437,13 +437,13 @@ def _validate(obj):
         if sev not in _SEVERITIES:
             return False, [], f"finding {i} severity {f.get('severity')!r} not in {_SEVERITIES}"
         issue = f.get("issue")
-        if not issue:
-            return False, [], f"finding {i} missing 'issue'"
+        if not isinstance(issue, str) or not issue.strip():
+            return False, [], f"finding {i} missing a nonempty string 'issue'"
         out.append(
             {
                 "severity": sev,
                 "area": str(f.get("area") or "").strip(),
-                "issue": str(issue).strip(),
+                "issue": issue.strip(),
                 "suggestion": str(f.get("suggestion") or "").strip(),
             }
         )

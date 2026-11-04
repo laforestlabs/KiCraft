@@ -20,20 +20,21 @@ import hmac
 import os
 import sys
 from pathlib import Path
+from urllib.parse import quote
 
 # Match web.py: the same suffix whitelist the serve handler enforces.
-_ALLOWED_SUFFIXES = (".kicad_pcb", ".kicad_sch", ".kicad_pro", ".net", ".zip")
+_ALLOWED_SUFFIXES = (".kicad_pcb", ".kicad_sch", ".kicad_pro")
 
 
 def _secret() -> bytes:
     # Load .env the same way the server does (stdlib, no override) so a token
     # minted here verifies against the running app.
-    try:
-        from kicraft.server.config import load_dotenv
-        load_dotenv()
-    except Exception:
-        pass
-    return os.environ.get("KICRAFT_STORAGE_SECRET", "kicraft-dev-secret").encode("utf-8")
+    from kicraft.server.config import load_dotenv
+    load_dotenv()
+    secret = os.environ.get("KICRAFT_STORAGE_SECRET")
+    if not secret:
+        raise SystemExit("KICRAFT_STORAGE_SECRET must be set to mint a token for another process")
+    return secret.encode("utf-8")
 
 
 def _b64e(raw: bytes) -> str:
@@ -59,11 +60,12 @@ def main(argv=None) -> int:
     token = mint(project_dir)
     print(f"token: {token}\n")
     files = sorted(p.name for p in project_dir.iterdir()
-                   if p.is_file() and p.name.endswith(_ALLOWED_SUFFIXES))
+                   if p.is_file() and p.resolve().parent == project_dir.resolve()
+                   and p.name.endswith(_ALLOWED_SUFFIXES))
     if not files:
         print(f"(no servable files in {project_dir})", file=sys.stderr)
     for name in files:
-        print(f"{base}/project/{token}/{name}")
+        print(f"{base}/project/{token}/{quote(name, safe='')}")
     return 0
 
 

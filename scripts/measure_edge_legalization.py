@@ -128,12 +128,11 @@ def main():
                 pad_gap = _gap(side, edge, pads)
                 mouth_gap = _gap(side, edge, mouth)
                 rows.append((os.path.basename(run), ref, side,
-                             round(mouth_gap, 4), round(pad_gap, 4),
-                             round(pad_gap - mouth_gap, 4)))
+                             mouth_gap, pad_gap, pad_gap - mouth_gap))
     w = max((len(r[0]) for r in rows), default=8)
     print(f"{'run':<{w}}  {'ref':<5} {'side':<6} {'mouth_gap':>10} {'pad_gap':>9} {'pad_behind_mouth':>16}")
     for run, ref, side, mg, pg, behind in rows:
-        flag = "  <-- pad < 0.2" if pg < 0.2 else ""
+        flag = "  <-- pad < 0.2" if pg > -0.2 else ""
         print(f"{run:<{w}}  {ref:<5} {side:<6} {mg:>10.4f} {pg:>9.4f} {behind:>16.4f}{flag}")
 
 

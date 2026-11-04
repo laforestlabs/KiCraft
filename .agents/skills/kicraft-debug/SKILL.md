@@ -144,7 +144,7 @@ and read-only sessions. Report `+0` and `-0` when no changes remain.
 
 ## Resume selection
 
-At the start of a turn, read state and inspect `.kicraft/debug/<stage>.json` only for the current stage. Resume a pending artifact with status `needs_review` or `needs_input`. Otherwise choose the first incomplete stage in canonical order. Wiring is incomplete when `bom.connections` is empty. After accepting a stage, immediately prepare the next incomplete stage and present its input checkpoint in the same turn.
+At the start of a turn, read state and inspect `.kicraft/debug/<stage>.json` only for the current stage. Resume a pending artifact with status `needs_review` or `needs_input`. Otherwise choose the first incomplete stage in canonical order using `kicraft.design.stage_state.stage_done`; compiler-owned `bom.connections` alone do not prove wiring acceptance. A successful BOM commit marks `wiring_complete: false`, and a successful wiring commit marks it `true`; legacy states without the marker use the shared status/ownership-aware completion rules. Saved obsolete recipe ownership requires upstream regeneration, not relabeling the old BOM. After accepting a stage, immediately prepare the next incomplete stage and present its input checkpoint in the same turn.
 
 ## State machine
 

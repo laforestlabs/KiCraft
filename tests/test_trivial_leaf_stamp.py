@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from kicraft.autoplacer.brain import leaf_routing
+from kicraft.autoplacer.brain.types import BoardState
 
 
 class _CopyStampedBoard:
@@ -26,10 +27,7 @@ def _trivial_extraction(tmp_path: Path) -> SimpleNamespace:
         subcircuit=SimpleNamespace(
             schematic_path=str(tmp_path / "leaf.kicad_sch"), id="leaf-under-test"
         ),
-        local_state=SimpleNamespace(
-            nets={}, components={}, traces=[], vias=[], silkscreen=[], board_outline=None,
-            board_width=20.0, board_height=20.0,
-        ),
+        local_state=BoardState(nets={}, components={}, board_outline=None),
         internal_net_names=[],
         interface_ports=[],
         notes=[],
@@ -49,7 +47,8 @@ def fixed_leaf_geometry(monkeypatch, tmp_path):
         lambda extraction, comps, cfg: (copy.deepcopy(comps), {"resolved": True}),
     )
     monkeypatch.setattr(leaf_routing, "KiCadAdapter", _CopyStampedBoard)
-    monkeypatch.setattr(leaf_routing, "_outline_around_geometry", lambda comps, cfg: None)
+    monkeypatch.setattr(leaf_routing, "_outline_around_geometry",
+                        lambda comps, cfg, *, antenna_edge_intents=(): None)
     monkeypatch.setattr(leaf_routing, "_silk_for_leaf", lambda extraction, comps, cfg: [])
     return artifact_dir
 

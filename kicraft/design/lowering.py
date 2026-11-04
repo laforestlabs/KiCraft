@@ -2232,10 +2232,10 @@ def _i2c_pullups(requirement: CircuitRequirement) -> LoweringArtifact | None:
     max_r = (1000e-9 if speed == 100000 else 300e-9 if speed == 400000 else 120e-9) / (
         0.8473 * capacitance * 1e-12
     )
-    chosen = 10000 if max_r >= 10000 else 4700 if max_r >= 4700 else 2200
-    group = _passive(
-        "pullup", "R", f"{chosen // 1000}k" if chosen >= 1000 else f"{chosen}R", quantity=2
-    )
+    chosen = next((value for value in (10000, 4700, 2200) if value <= max_r), None)
+    if chosen is None:
+        return None
+    group = _passive("pullup", "R", _resistance(chosen), quantity=2)
     pins = tuple(
         pin
         for index, signal in enumerate(("sda", "scl"))
@@ -2684,6 +2684,7 @@ def _analog_power_cycle_reset(requirement: CircuitRequirement) -> LoweringArtifa
     ports = {key: str(value) for key, value in requirement.ports.items()}
     if (
         any(not ports[key].strip() for key in required_ports)
+        or any(net.startswith("__KICRAFT_ANALOG_POWER_CYCLE__") for net in ports.values())
         or len({ports[key] for key in required_ports}) != 3
         or (
             "isolation_enable" in ports
@@ -2692,11 +2693,10 @@ def _analog_power_cycle_reset(requirement: CircuitRequirement) -> LoweringArtifa
     ):
         return None
     source = ports["input"]
-    enable = "__KICRAFT_ANALOG_POWER_CYCLE__ENABLE"
-    supervisor_reset = "__KICRAFT_ANALOG_POWER_CYCLE__SUPERVISOR_RESET"
-    isolation_enable = ports.get(
-        "isolation_enable", "__KICRAFT_ANALOG_POWER_CYCLE__ISOLATION_ENABLE"
-    )
+    prefix = f"__KICRAFT_ANALOG_POWER_CYCLE__{requirement.id}__"
+    enable = f"{prefix}ENABLE"
+    supervisor_reset = f"{prefix}SUPERVISOR_RESET"
+    isolation_enable = ports.get("isolation_enable", f"{prefix}ISOLATION_ENABLE")
     supervisor = "TPS3808G50DBVR"
     supervisor_threshold = 4.65
     supervisor_accuracy = 0.02
@@ -2881,6 +2881,7 @@ def _common_anode_rgb_indicator(requirement: CircuitRequirement) -> LoweringArti
         or (requirement.exact_part or "xl-1615rgbc-rf").casefold()
         not in {"aptf1616lseezgkqbkc", "xl-1615rgbc-rf"}
         or len(set(ports.values())) != len(ports)
+        or any(net.startswith("__KICRAFT_RGB_INDICATOR_") for net in ports.values())
     ):
         return None
     led = reviewed_part(requirement.exact_part or "XL-1615RGBC-RF")
@@ -2940,10 +2941,10 @@ def _common_anode_rgb_indicator(requirement: CircuitRequirement) -> LoweringArti
             footprint="Resistor_SMD:R_0603_1608Metric",
         ),
     )
-    cathodes = ("__KICRAFT_RGB_INDICATOR_RED_K", "__KICRAFT_RGB_INDICATOR_GREEN_K",
-                "__KICRAFT_RGB_INDICATOR_BLUE_K")
-    collectors = tuple(f"__KICRAFT_RGB_INDICATOR_COLLECTOR_{color}" for color in range(3))
-    bases = tuple(f"__KICRAFT_RGB_INDICATOR_BASE_{color}" for color in range(3))
+    prefix = f"__KICRAFT_RGB_INDICATOR_{requirement.id}__"
+    cathodes = tuple(f"{prefix}{color}_K" for color in ("RED", "GREEN", "BLUE"))
+    collectors = tuple(f"{prefix}COLLECTOR_{color}" for color in range(3))
+    bases = tuple(f"{prefix}BASE_{color}" for color in range(3))
     controls = (ports["red"], ports["green"], ports["blue"])
     pins: list[LoweringPin] = [
         LoweringPin(role="rgb_led", pin=led.port_pins["common_anode"], net=ports["vdd_5v"]),
@@ -3050,6 +3051,7 @@ def _fused_power_distribution(requirement: CircuitRequirement) -> LoweringArtifa
         set(requirement.ports) != required_ports
         or set(indexed_outputs) != set(range(1, channels + 1))
         or any(not str(net).strip() for net in requirement.ports.values())
+        or any(net.startswith(("__KICRAFT_DISTRIBUTION__", "__KICRAFT_EFUSE_")) for net in requirement.ports.values())
         or len(set(indexed_outputs.values())) != channels
         or requirement.ports["input"] == requirement.ports["gnd"]
         or requirement.ports["gnd"] in set(indexed_outputs.values())
@@ -4002,6 +4004,12 @@ def _fused_power_distribution(requirement: CircuitRequirement) -> LoweringArtifa
             LoweringPin(role="indicator_led", pin="1", net=requirement.ports["gnd"]),
         )
     )
+    # Internal nodes belong to this requirement, not every distribution on a sheet.
+    for pin in pins:
+        for prefix in ("__KICRAFT_DISTRIBUTION__", "__KICRAFT_EFUSE_"):
+            if pin.net.startswith(prefix):
+                pin.net = f"{prefix}{requirement.id}__{pin.net[len(prefix):]}"
+                break
     return _artifact(
         "fused-power-distribution@1",
         requirement,

@@ -29,11 +29,9 @@ def _no_live_retail_stock(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _default_llm_keys(monkeypatch):
-    # The default `luna` design profile runs on OpenRouter and therefore needs
-    # only OPENROUTER_API_KEY (read from .env); the alternative `deepseek`
-    # profile needs DEEPSEEK_API_KEY. Provide a throwaway value so either
-    # profile resolves offline. Tests that assert the missing-key SystemExit
-    # delete it themselves.
+    # Never borrow real provider credentials through the checkout's .env.
+    # Missing-key tests explicitly remove these throwaway values themselves.
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
     monkeypatch.setenv("DEEPSEEK_API_KEY", "test-deepseek-key")
     # Settings.from_env(dotenv=True) reads the production .env via setdefault, so
     # a stale .env KICRAFT_MODEL/KICRAFT_PROVIDER_ORDER/KICRAFT_MAX_PRICE_* would
@@ -68,6 +66,9 @@ def _no_live_store(monkeypatch, tmp_path_factory):
     root = tmp_path_factory.mktemp("kicraft-store")
     monkeypatch.setenv("KICRAFT_USERS_DB", str(root / "accounts.db"))
     monkeypatch.setenv("KICRAFT_PROJECTS_DIR", str(root / "projects"))
+    monkeypatch.setenv("KICRAFT_SPEND_LEDGER", str(root / "spend.db"))
+    monkeypatch.setenv("KICRAFT_WORK_DIR", str(root / "work"))
+    monkeypatch.setenv("KICRAFT_BUILD_SLOTS_DIR", str(root / "build-slots"))
     try:
         from kicraft.server import web
         monkeypatch.setattr(web, "_STORE", None)
@@ -75,3 +76,10 @@ def _no_live_store(monkeypatch, tmp_path_factory):
         # web has heavy imports (NiceGUI); a test env without them still
         # gets the env-var guard above.
         pass
+
+
+@pytest.fixture(autouse=True)
+def _isolated_live_kill_switch_file(monkeypatch, tmp_path):
+    from kicraft.server import spend_guard
+
+    monkeypatch.setattr(spend_guard, "_KILL_SWITCH_ENV_PATH", tmp_path / ".env")

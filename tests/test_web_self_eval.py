@@ -138,6 +138,28 @@ def test_collect_web_metrics_clean_run(tmp_path):
     assert eval_script_gates(m, rub) == []
 
 
+def test_collect_web_metrics_uses_current_erc_receipt_not_stale_report(tmp_path):
+    base = _make_project(tmp_path)
+    generated = base / "generated" / "DEMO"
+    current = generated / "DEMO.0123456789abcdef_erc.rpt"
+    current.write_text(json.dumps({"sheets": [{"violations": [{"severity": "error"}]}]}))
+    check = generated / "synthesis_check.json"
+
+    def set_report(name):
+        check.write_text(json.dumps({"checks": [{"name": "9.12 ERC", "report_path": name}]}))
+
+    set_report(current.name)
+    assert collect_web_metrics(base)["erc"]["errors"] == 1
+    set_report(None)
+    assert collect_web_metrics(base)["erc"]["present"] is False
+    set_report("missing_erc.rpt")
+    assert collect_web_metrics(base)["erc"]["present"] is False
+    check.write_text(json.dumps({"checks": [
+        {"name": "9.12 ERC", "report_path": current.name}, {"name": "9.12 ERC"},
+    ]}))
+    assert collect_web_metrics(base)["erc"]["present"] is False
+
+
 def test_collect_web_metrics_distinguishes_stage_subprocess_crash(tmp_path):
     from kicraft.eval.metrics_web import analyze_events
 

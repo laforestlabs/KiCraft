@@ -220,6 +220,38 @@ def test_native_usb_reuses_the_existing_power_receptacle():
     assert power.port_bindings["usb_dm"] == mcu.port_bindings["usb_dm"]
 
 
+@pytest.mark.parametrize(
+    ("rail_name", "voltage", "usb_source", "expected"),
+    [
+        ("VBUS", 12.0, False, None),
+        ("VBUS", 5.0, False, "VBUS"),
+        ("USB_INPUT", 12.0, True, None),
+        ("USB_INPUT", 5.0, True, "USB_INPUT"),
+        ("+5V", 3.3, False, None),
+        ("+5V", 5.0, False, "+5V"),
+    ],
+)
+def test_usb_vbus_selection_checks_voltage_for_named_and_usb_source_rails(
+    rail_name, voltage, usb_source, expected,
+):
+    from kicraft.design.architecture_intent import _usb_vbus_rail
+
+    intent = ArchitectureIntent.model_validate({
+        "sheets": [],
+        "requirements": (
+            [{"id": "usb", "sheet": "POWER", "role": "power_input", "family": "usb-c"}]
+            if usb_source else []
+        ),
+        "power": {"rails": {
+            rail_name: {"voltage": voltage, "from": "usb.vbus" if usb_source else None},
+        }},
+    })
+    assert _usb_vbus_rail(intent) == expected
+
+
+
+
+
 def test_signal_endpoints_are_bound_and_directed_on_both_sheets():
     architecture = derive_architecture(_hub75_intent())
     hub75 = _requirement(architecture, "hub75")
@@ -3438,47 +3470,6 @@ def test_a_payload_without_duplicates_is_returned_untouched():
     assert complete_architecture_payload(payload) is payload
 
 
-def test_a_lowerer_family_is_replaced_by_the_reviewed_carriers_family():
-    """The writer's generic connector family cannot implement a demanded class that has a carrier.
-
-    Live walkthrough (2026-09-25): `lowerer pin-header@1 does not implement the exact part
-    'B2B-XH-A(LF)(SN)'` on every attempt, and the BOM then exhausted its rounds on
-    `missing-requirement-implementation=['motor_a']`, because the parts stage may not reopen a
-    family. The carrier's own family is adopted, the lowerer-only parameters go, and the
-    interface is built from the signals the draft already sends.
-    """
-    from kicraft.design.architecture_intent import complete_architecture_payload
-
-    payload = {
-        "power": {"rails": {"+18V": {"voltage": 18.0, "from": "power_in.pin1"}}},
-        "requirements": [
-            {"id": "power_in", "role": "power_input", "family": "screw-terminal",
-             "parameters": {"rows": 1}},
-            {"id": "motor_a", "role": "connector", "family": "pin-header",
-             "parameters": {"rows": 1, "gender": "female"},
-             "obligation_ids": ["xh"]},
-        ],
-        "obligations": [
-            {"kind": "physical", "original_obligation_id": "xh",
-             "component_class": "jst-xh-connector"}
-        ],
-        "signals": [
-            {"name": "MOTOR_A1", "from": "hbridge.aout1", "to": "motor_a.pin1"},
-            {"name": "MOTOR_A2", "from": "hbridge.aout2", "to": "motor_a.pin2"},
-        ],
-    }
-
-    complete_architecture_payload(payload)
-
-    connector = payload["requirements"][1]
-    assert connector["family"] == "jst-xh-connector"
-    assert connector["parameters"] == {}          # lowerer-only keys dropped
-    assert connector["declared_ports"] == [
-        {"key": "pin1", "pin": "1", "direction": "passive", "function": "carries MOTOR_A1"},
-        {"key": "pin2", "pin": "2", "direction": "passive", "function": "carries MOTOR_A2"},
-    ]
-    # The terminal's missing return is completed in the spelling the draft used.
-    assert payload["requirements"][0]["ties"] == {"pin2": "GND"}
 
 def test_generic_jst_carrier_uses_the_declared_four_contact_interface():
     """A generic JST request gets the reviewed four-contact XH carrier, never Qwiic or a 2-pin XH."""

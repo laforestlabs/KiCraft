@@ -302,7 +302,7 @@ def write_promote_provenance(
 ) -> Path:
     """Record what THIS run promoted to ``<stem>.kicad_pcb``. The authoritative,
     agent-facing answer to "which run produced the board on disk, and from what".
-    Written in the parent process at promote time.
+    Write only after the final board mutations, including the silkscreen legend.
 
     ``advisories`` are the RECORD-class codes the design shipped with (design-yield-recovery
     plan §4.2 step 2): the board itself says what it could not prove, so a reader of the
@@ -316,6 +316,7 @@ def write_promote_provenance(
         "promoted_pcb": str(pcb),
         "md5": file_md5(pcb),
         "source_board": str(source_board),
+        "source_md5": file_md5(source_board),
         "source_kind": source_kind,
         "source_run_id": board_run_id(source_board),
         "source_mtime": _safe_mtime(source_board),
@@ -323,9 +324,12 @@ def write_promote_provenance(
         "advisories": list(dict.fromkeys(str(code) for code in advisories)),
     }
     out = provenance_path(pcb)
-    tmp = out.with_suffix(out.suffix + ".tmp")
-    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-    tmp.replace(out)  # atomic
+    tmp = out.with_name(f".{out.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+        tmp.replace(out)
+    finally:
+        tmp.unlink(missing_ok=True)
     return out
 
 
@@ -334,9 +338,16 @@ def read_provenance(pcb: Path) -> dict | None:
     if not p.is_file():
         return None
     try:
-        return json.loads(p.read_text(encoding="utf-8"))
+        data = json.loads(p.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
+    if not isinstance(data, dict):
+        return None
+    current_md5 = file_md5(pcb)
+    data["current_md5"] = current_md5
+    data["hash_matches"] = current_md5 is not None and data.get("md5") == current_md5
+    data["fresh"] = data.get("fresh") is True and data["hash_matches"]
+    return data
 
 
 def _safe_mtime(path: Path) -> float | None:

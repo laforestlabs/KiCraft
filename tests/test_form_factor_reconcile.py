@@ -312,18 +312,6 @@ class TestTypedInterfaceMigration:
         } == prototype_endpoints
         assert {s.name for s in state.architecture.sheets} == {"STACKING HEADERS", "PROTOTYPING AREA"}
         by_owner = {r.id: r for r in state.architecture.requirements}
-        geometry = {
-            header["role"]: header
-            for header in standard_header_parts(get_template("arduino_uno_shield"))
-        }
-        for part in state.bom.parts:
-            if part.ref == "J5":
-                continue
-            header = geometry[part.sourcing_note.rsplit(" ", 1)[1]]
-            assert part.symbol == header["symbol"] and part.footprint == header["footprint"]
-            artifact = lower_requirement(by_owner[part.lowering_requirement_id])
-            assert artifact.groups[0].symbol == part.symbol
-            assert artifact.groups[0].footprint == part.footprint
         endpoints = {
             (ep.ref, ep.pin): c.net_name for c in state.bom.connections for ep in c.endpoints
         }

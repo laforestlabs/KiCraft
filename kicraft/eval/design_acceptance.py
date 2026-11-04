@@ -283,7 +283,20 @@ def _check_facts(check: Mapping[str, Any], facts: Mapping[str, Any]) -> str | No
             return f"does not prove required package {package}"
     elif kind == "part_inventory":
         inventory = facts.get("part_inventory")
-        if not isinstance(inventory, list) or not inventory or any(not isinstance(part, Mapping) or not all(part.get(field) for field in ("mpn", "manufacturer", "source_url", "package", "rated_limits")) for part in inventory):
+        if (
+            not isinstance(inventory, list) or not inventory
+            or any(
+                not isinstance(part, Mapping)
+                or not all(part.get(field) for field in ("mpn", "manufacturer", "source_url", "package"))
+                or not isinstance(part.get("rated_limits"), Mapping)
+                or not any(
+                    value is not None and value != ""
+                    for key, value in part["rated_limits"].items()
+                    if "stock" not in str(key).casefold()
+                )
+                for part in inventory
+            )
+        ):
             return "does not prove a sourceable rated part inventory"
     elif kind == "pin_mapping":
         mapping = facts.get("pin_mapping")

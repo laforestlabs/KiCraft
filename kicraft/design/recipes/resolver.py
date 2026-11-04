@@ -32,7 +32,7 @@ from kicraft.design.synthesis.validation import _net_voltage, named_part_tokens
 
 from .models import RecipeDefinition, RegisteredRecipe
 from .pin_allocator import PinAllocationError, allocate_requirement_pins
-from .registry import protected_identities, registered_recipes
+from .registry import migrate_recipe_selections, protected_identities, registered_recipes
 
 _PROGRAMMING_PEER_PORTS = {
     "uart_tx": "rx",
@@ -1191,6 +1191,11 @@ def _rp2040_mode_diagnostics(
             errors.append("native_usb=True requires programming='native_usb'")
         if usb != {"usb_dm", "usb_dp"}:
             errors.append("native_usb=True requires both usb_dm and usb_dp bindings")
+        elif (
+            bindings["usb_dm"] == bindings["usb_dp"]
+            or any(bindings[name] in {bindings.get("vdd"), bindings.get("gnd")} for name in usb)
+        ):
+            errors.append("native USB D-/D+ must be distinct from each other and supply rails")
     elif native_usb is False:
         if programming != "swd":
             errors.append("native_usb=False requires programming='swd'")
@@ -1462,6 +1467,9 @@ def resolve_architecture_recipes(
 ) -> ResolutionResult:
     """Resolve supported requirements stably; protected misses are blocking."""
     architecture_model = Architecture.model_validate(architecture)
+    architecture_model = architecture_model.model_copy(update={
+        "recipe_selections": migrate_recipe_selections(architecture_model.recipe_selections),
+    })
     intent_payload = (
         intent.model_dump(exclude_none=True)
         if isinstance(intent, BaseModel)
@@ -1855,6 +1863,65 @@ def resolve_architecture_recipes(
         # retain their programming method and exact selected silicon.
         uart_variants = _ROM_UART_VARIANTS
         existing_selection = existing_by_requirement.get(requirement.id)
+        if existing_selection is not None and existing_selection.recipe == "rp2040-minimal@3":
+            if definition.recipe != existing_selection.recipe:
+                result.blocking.append(ResolutionDiagnostic(
+                    code="conflicting_saved_recipe_selection",
+                    requirement_id=requirement.id,
+                    recipe=existing_selection.recipe,
+                    message="saved RP2040 selection conflicts with the requirement's selected recipe",
+                ))
+                continue
+            if (
+                set(existing_selection.sheets) != set(definition.required_sheet_roles)
+                or existing_selection.sheets.get("mcu") != requirement.sheet
+            ):
+                result.blocking.append(ResolutionDiagnostic(
+                    code="conflicting_saved_recipe_selection",
+                    requirement_id=requirement.id,
+                    recipe=existing_selection.recipe,
+                    message="saved RP2040 sheet ownership conflicts with the requirement",
+                ))
+                continue
+            if "usb" in requirement.parameters:
+                legacy_parameters = dict(requirement.parameters)
+                legacy_usb = legacy_parameters.pop("usb")
+                legacy_programming = legacy_parameters.get("programming", "bootsel")
+                if (
+                    legacy_usb is not True
+                    or legacy_programming != "bootsel"
+                    or legacy_parameters.get("native_usb", True) is not True
+                ):
+                    result.blocking.append(ResolutionDiagnostic(
+                        code="conflicting_saved_recipe_selection",
+                        requirement_id=requirement.id,
+                        recipe=existing_selection.recipe,
+                        message="legacy RP2040 requirement contradicts USB BOOTSEL programming",
+                    ))
+                    continue
+                legacy_parameters["native_usb"] = True
+                if "programming" in legacy_parameters:
+                    legacy_parameters["programming"] = "native_usb"
+                requirement = requirement.model_copy(update={"parameters": legacy_parameters})
+            conflicts = [
+                name for name, value in existing_selection.parameters.items()
+                if name in requirement.parameters and requirement.parameters[name] != value
+            ] + [
+                name for name, value in existing_selection.port_bindings.items()
+                if name in requirement.ports and requirement.ports[name] != value
+            ]
+            if conflicts:
+                result.blocking.append(ResolutionDiagnostic(
+                    code="conflicting_saved_recipe_selection",
+                    requirement_id=requirement.id,
+                    recipe=existing_selection.recipe,
+                    message=f"saved recipe selection conflicts with requirement fields: {sorted(conflicts)}",
+                ))
+                continue
+            requirement = requirement.model_copy(update={
+                "parameters": {**existing_selection.parameters, **requirement.parameters},
+                "ports": {**existing_selection.port_bindings, **requirement.ports},
+            })
         variant = _rom_uart_variant_for(definition, recipes)
         uart_recipe = variant.definition.recipe if variant is not None else None
         explicit_uart = existing_selection is not None and existing_selection.recipe == uart_recipe
@@ -2188,6 +2255,15 @@ def resolve_architecture_recipes(
         )
         sheet_map = {role: requirement.sheet for role in definition.required_sheet_roles}
         selection_requirement_ids = [requirement.id]
+        if existing is not None and existing.recipe == "rp2040-minimal@3":
+            sheet_map = dict(existing.sheets)
+            if requirement.role == "mcu_core":
+                selection_requirement_ids.extend(
+                    row.id for row in requirements
+                    if row.id in existing.requirement_ids
+                    and row.id != requirement.id
+                    and row.compiler_origin == "edge_connector"
+                )
         if edge_companion is not None:
             edge_sheet_role, companion = edge_companion
             sheet_map[edge_sheet_role] = companion.sheet
@@ -2231,6 +2307,43 @@ def resolve_architecture_recipes(
         )
     _coalesce_mcu_support_requirements(result, requirements, recipes)
     definitions = {recipe.definition.recipe: recipe.definition for recipe in recipes}
+    # A native RP2040 expansion already owns the 27-ohm termination pair.
+    # Direct callers of the resolver must not add the connector's 22-ohm pair.
+    rp2040_pairs = {
+        (row.port_bindings["usb_dm"], row.port_bindings["usb_dp"])
+        for row in result.selections
+        if row.recipe == "rp2040-minimal@3"
+        and row.parameters.get("native_usb") is True
+        and {"usb_dm", "usb_dp"} <= row.port_bindings.keys()
+    }
+    requirements_by_id = {row.id: row for row in requirements}
+    for index, selection in enumerate(result.selections):
+        if selection.recipe != "usb-c-usb2-device@1":
+            continue
+        pair = (selection.port_bindings.get("usb_dm"), selection.port_bindings.get("usb_dp"))
+        if pair not in rp2040_pairs:
+            continue
+        requirement = requirements_by_id[selection.requirement_ids[0]]
+        if requirement.parameters.get("series_resistors") is True:
+            result.blocking.append(ResolutionDiagnostic(
+                code="conflicting_recipe_parameter",
+                requirement_id=requirement.id,
+                recipe=selection.recipe,
+                message="RP2040 already owns USB termination; connector series_resistors=True would duplicate it",
+            ))
+            continue
+        result.selections[index] = selection.model_copy(update={
+            "parameters": {**selection.parameters, "series_resistors": False},
+        })
+        for position, resolved_requirement in enumerate(result.requirements):
+            if resolved_requirement.id == requirement.id:
+                result.requirements[position] = resolved_requirement.model_copy(update={
+                    "parameters": {**resolved_requirement.parameters, "series_resistors": False},
+                })
+                break
+        result.assumptions.append(
+            f"{requirement.id}: connector USB series pair omitted because the RP2040 owns it"
+        )
     # A USB-UART bridge is itself the one device-side USB PHY.  Native-USB MCU
     # pins may still implement UART programming, but MUST NOT share the bridge's
     # physical D+/D- pair: that would place two PHYs on one receptacle.

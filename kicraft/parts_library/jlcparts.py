@@ -219,15 +219,31 @@ def _candidate(row: sqlite3.Row) -> dict:
     }
 
 
-def search(query: str, limit: int = 10) -> list[dict]:
-    """Offline candidate search: exact MPN, then MPN substring, then all
-    query terms ANDed over mfr+description+manufacturer+package. Rows are
-    ordered in-stock-first so callers' exact-match/stock ranking works."""
+def search(query: str, limit: int = 10, *, strict: bool = False) -> list[dict]:
+    """Search the offline catalog, ordered in-stock-first.
+
+    Strict searches require every original query word in the full catalog
+    fields and never widen an MPN prefix. Use them when a returned query
+    match is evidence for a part's identity or function.
+    """
     q = (query or "").strip()
     if not q or not available():
         return []
     order = "ORDER BY stock DESC, library_type ASC LIMIT ?"
     sel = f"SELECT {_CANDIDATE_COLS} FROM jlc_components"
+    if strict:
+        terms = q.split()
+        hay = (
+            "(COALESCE(mfr, '') || ' ' || COALESCE(description, '') || ' ' "
+            "|| COALESCE(manufacturer, '') || ' ' || COALESCE(package, ''))"
+        )
+        cond = " AND ".join(f"instr(lower({hay}), lower(?)) > 0" for _ in terms)
+        con = _connect()
+        try:
+            rows = con.execute(f"{sel} WHERE {cond} {order}", [*terms, limit]).fetchall()
+        finally:
+            con.close()
+        return [_candidate(r) for r in rows]
     con = _connect()
     try:
         rows = con.execute(f"{sel} WHERE mfr = ? COLLATE NOCASE {order}",

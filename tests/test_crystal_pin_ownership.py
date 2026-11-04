@@ -9,7 +9,7 @@ from kicraft.design.synthesis.symbol_pinout import lookup_pins
     ("recipe", "crystal_role", "mcu_input", "mcu_output", "series_role"),
     [
         ("stm32f103c8t6-minimal@1", "hse_crystal", "5", "6", None),
-        ("rp2040-minimal@2", "crystal", "20", "21", "xout_resistor"),
+        ("rp2040-minimal@3", "crystal", "20", "21", "xout_resistor"),
     ],
 )
 def test_four_pad_crystal_keeps_oscillator_off_grounded_case(

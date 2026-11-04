@@ -107,3 +107,25 @@ def test_include_3d_false_skips_both(runner, pcb, tmp_path):
     assert out["step"] is None and out["board_3d_png"] is None
     assert "step" not in runner.kinds()
     assert "render" not in runner.kinds()
+
+
+@pytest.mark.parametrize("failed_kind,filename", [
+    ("step", "WIDGET.step"),
+    ("render", "board_3d.png"),
+])
+def test_partial_failed_3d_output_is_not_certified(
+    runner, pcb, tmp_path, monkeypatch, failed_kind, filename
+):
+    def write_then_fail(cmd, timeout=None):
+        runner(cmd, timeout=timeout)
+        kind = cmd[3] if cmd[2] == "export" else cmd[2]
+        if kind == failed_kind:
+            raise RuntimeError("converter left a partial file")
+
+    monkeypatch.setattr(fe, "_run", write_then_fail)
+    monkeypatch.setattr(fe.shutil, "which", lambda name: None)
+    result = fe.export_fab(str(pcb), str(tmp_path), "WIDGET")
+    assert result["step" if failed_kind == "step" else "board_3d_png"] is None
+    assert filename not in result["files"]
+    with zipfile.ZipFile(result["zip"]) as archive:
+        assert filename not in archive.namelist()

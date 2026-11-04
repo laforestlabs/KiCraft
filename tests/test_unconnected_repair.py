@@ -329,3 +329,22 @@ def test_pour_nets_readmits_extra_nets_but_never_gnd():
     )
     assert "VBUS" not in skip, "unresolved power net must be repairable here"
     assert "GND" in skip, "GND stays with the plane machinery, always"
+
+
+def test_signal_wrapper_restores_board_when_redrc_times_out(tmp_path, monkeypatch):
+    from kicraft.autoplacer import routing_board
+    from kicraft.autoplacer.brain.signal_repair_pass import attempt_signal_unconnected_repair
+
+    board = tmp_path / "board.kicad_pcb"
+    board.write_text("original")
+    monkeypatch.setattr(routing_board, "run_pcbnew_script", lambda _: board.write_text("modified"))
+    monkeypatch.setattr(
+        routing_board, "validate_routed_board",
+        lambda *a, **k: {"drc": {"unconnected": 0, "shorts": 0, "timed_out": True}},
+    )
+    result = attempt_signal_unconnected_repair(
+        board, {}, {"drc": {"unconnected": 1, "shorts": 0}}
+    )
+    assert board.read_text() == "original"
+    assert result["signal_unconnected_repair"]["reverted"]
+    assert not result["signal_unconnected_repair"]["kept"]

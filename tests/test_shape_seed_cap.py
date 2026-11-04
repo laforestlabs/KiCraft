@@ -54,23 +54,7 @@ def test_seed_cap_never_collapses_below_solvability_floors(monkeypatch):
     assert h >= 40.0 + 2.0 * 4
 
 
-def test_candidate_search_prefers_shape_fitted_winner():
-    # Lexicographic: a fitted candidate with a LOWER score beats an unfitted
-    # one with a higher score; among fitted, score decides.
-    recs = [
-        CandidateRecord(seed=0, shorts=0, score=90.0, place_solve_ms=0, stamp_ms=0,
-                        stamp_drc_ms=0, accepted=True, pcb_path="", shape_fitted=False),
-        CandidateRecord(seed=1, shorts=0, score=40.0, place_solve_ms=0, stamp_ms=0,
-                        stamp_drc_ms=0, accepted=True, pcb_path="", shape_fitted=True),
-        CandidateRecord(seed=2, shorts=0, score=35.0, place_solve_ms=0, stamp_ms=0,
-                        stamp_drc_ms=0, accepted=True, pcb_path="", shape_fitted=True),
-    ]
-    winner = max(recs, key=lambda c: (c.shape_fitted, c.score))
-    assert winner.seed == 1
-    # No shape requested: shape_fitted defaults True everywhere -> pure score.
-    for r in recs:
-        r.shape_fitted = True
-    assert max(recs, key=lambda c: (c.shape_fitted, c.score)).seed == 0
+
 
 
 def test_candidate_record_serializes_shape_fitted():

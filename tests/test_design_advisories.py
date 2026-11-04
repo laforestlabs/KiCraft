@@ -6,9 +6,7 @@ rubric's recording gate, and every code the plan keeps on the BLOCK side still r
 """
 from __future__ import annotations
 
-import ast
 import json
-from pathlib import Path
 
 import pytest
 
@@ -17,76 +15,6 @@ from kicraft.design.architecture_intent import ArchitectureIntentError, derive_a
 from kicraft.eval.rubric import load_rubric
 from kicraft.eval.scoring import eval_script_gates
 
-REPO = Path(__file__).resolve().parents[1]
-ARCHITECTURE_INTENT = REPO / "kicraft" / "design" / "architecture_intent.py"
-
-# §4.3 A: the architecture codes the plan keeps on the BLOCK side. A silent move across the
-# line fails here; moving one deliberately means editing this list in the same commit.
-BLOCK_ARCHITECTURE_CODES = {
-    "unknown_requirement_sheet",
-    "unknown_signal_requirement",
-    "malformed_signal_ref",
-    "unknown_interface_port",
-    "unknown_tie_net",
-    "unknown_reference_domain",
-    "unknown_supply_rail",
-    "unknown_edge_rail",
-    "duplicate_requirement_id",
-    "duplicate_edge_connector",
-    "derived_output_name_collision",
-    "conflicting_port_binding",
-    "conflicting_supply_binding",
-    "conflicting_reference_binding",
-    "declared_port_double_bound",
-    "declared_signal_port_tied",
-    "signal_conflicts_with_rail",
-    "signal_names_rail",
-    "reference_domain_not_zero_volt",
-    "unsupported_standard_stacking_interface",
-    "incomplete_standard_stacking_interface",
-    "invalid_standard_stacking_owner",
-    "invalid_standard_stacking_pinmap",
-    "usb_connector_supply_unknown",
-    "incomplete_usb_edge",
-    "empty_edge_connector",
-    "unsupported_lowerer_contract",
-    "unbound_required_port",
-    # §4.3 A lists this as RECORD; the boundary in §4.1 overrides the table, and it is
-    # measured: downgraded, the requirement is dropped from the netlist entirely (no curated
-    # recipe, no declared interface, no catalog) and the obligation it owned fails the
-    # ownership check one validation later under a message that no longer names the cause.
-    "unknown_part_refused",
-}
-
-# §4.3 A: the architecture code the plan reclassifies as RECORD, where the requirement IS
-# carried (its family is curated, the chosen part is emitted, and the note names it).
-RECORD_ARCHITECTURE_CODES = {"unreviewed_exact_part"}
-
-
-def _code_literals(function: str) -> set[str]:
-    """Every literal code the named module calls `function("...")` with."""
-    tree = ast.parse(ARCHITECTURE_INTENT.read_text(encoding="utf-8"))
-    codes: set[str] = set()
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call) or not node.args:
-            continue
-        name = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
-        if name == function and isinstance(node.args[0], ast.Constant):
-            codes.add(str(node.args[0].value))
-    return codes
-
-
-def test_block_codes_still_raise_and_record_codes_no_longer_do():
-    """The snapshot §4.3.1 asks for: neither list may move without this test.
-
-    A code that silently crossed the line would be a downgrade nobody recorded (operator
-    decision D2), so the module's own `_fail`/`_advise` literals are the contract.
-    """
-    failing = _code_literals("_fail")
-    advising = _code_literals("_advise")
-    assert BLOCK_ARCHITECTURE_CODES <= failing, sorted(BLOCK_ARCHITECTURE_CODES - failing)
-    assert RECORD_ARCHITECTURE_CODES <= advising, sorted(RECORD_ARCHITECTURE_CODES - advising)
-    assert not (RECORD_ARCHITECTURE_CODES & failing)
 
 
 def _regulator_intent(

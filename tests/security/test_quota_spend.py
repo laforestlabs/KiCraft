@@ -19,16 +19,18 @@ def test_free_user_quota_is_bounded(store):
     limit = TIERS["free"]["limit"]
     assert store.can_design(u) is True
     for _ in range(limit):
-        store.create_project(u.id, "a board")  # each row reserves a quota slot
+        assert store.create_project(u.id, "a board") is not None
     q = store.quota_status(u)
     assert q["used"] >= limit and q["remaining"] == 0
     assert store.can_design(u) is False  # cannot exceed the tier limit
+    assert store.create_project(u.id, "over quota") is None
 
 
 def test_awaiting_input_and_ok_still_consume_quota(store):
     """A parked or finished design holds a slot; only a 'failed' build frees it --
     so a user cannot dodge the quota by parking many runs on questions."""
     u = store.create_user("free2@x.io", "pw", tier="free")
+    store.consume_verification_token(store.create_verification_token(u.id))
     pid = store.create_project(u.id, "b")
     store.update_project_status(pid, "awaiting_input")
     assert store.count_active_designs(u.id, TIERS["free"]["window_days"]) == 1

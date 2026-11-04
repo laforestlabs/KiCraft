@@ -111,6 +111,78 @@ def test_rotate_component_in_place_rotates_pad_size_aabb():
     assert _close(c.pads[0].size_mm, Point(1.5, 0.8))
 
 
+def test_noncardinal_rotation_bounds_are_conservative_and_reversible():
+    c = _comp()
+    c.pads[0].size_mm = Point(4.0, 2.0)
+    geometry.rotate_component_in_place(c, 45)
+    expected = 6.0 / math.sqrt(2)
+    assert c.width_mm == pytest.approx(expected)
+    assert c.height_mm == pytest.approx(expected)
+    assert c.pads[0].size_mm.x == pytest.approx(expected)
+    assert c.pads[0].size_mm.y == pytest.approx(expected)
+    geometry.rotate_component_in_place(c, -45)
+    assert (c.width_mm, c.height_mm) == pytest.approx((2.0, 4.0))
+    assert (c.pads[0].size_mm.x, c.pads[0].size_mm.y) == pytest.approx((4.0, 2.0))
+
+
+def test_rotation_basis_resets_when_dimensions_are_replaced():
+    c = _comp()
+    c.pads[0].size_mm = Point(4, 2)
+    geometry.rotate_component_in_place(c, 90)
+    c.width_mm, c.height_mm = 8, 6
+    c.pads[0].size_mm = Point(3, 1)
+    geometry.rotate_component_in_place(c, 90)
+    assert (c.width_mm, c.height_mm) == (6, 8)
+    assert c.pads[0].size_mm == Point(1, 3)
+
+
+def test_pad_aware_placement_bounds_include_copper_and_clamp_it():
+    from kicraft.autoplacer.brain.placement_solver import PlacementSolver
+    from kicraft.autoplacer.brain.placement_utils import _effective_bbox, _pad_half_extents
+    from kicraft.autoplacer.brain.types import BoardState
+
+    c = Component(
+        "U1", "", Point(1, 5), 0, Layer.FRONT, 1, 1,
+        pads=[Pad("U1", "1", Point(0.5, 5), "N", Layer.FRONT, Point(1, 1))],
+    )
+    assert _effective_bbox(c)[0].x == 0
+    assert _pad_half_extents(c) == (1, 0.5)
+    state = BoardState(components={"U1": c}, board_outline=(Point(0, 0), Point(10, 10)))
+    solver = PlacementSolver(state)
+    assert solver.legality_diagnostics(state.components)["pad_outside_count"] == 1
+    solver._clamp_pads_to_board(state.components)
+    assert c.pads[0].bbox()[0].x == pytest.approx(0.3)
+    assert solver.legality_diagnostics(state.components)["legal"]
+
+
+def test_force_clamp_measures_extents_before_moving_origin():
+    from kicraft.autoplacer.brain.placement_solver import PlacementSolver
+    from kicraft.autoplacer.brain.types import BoardState
+
+    pad = Pad("U1", "1", Point(7, 5), "N", Layer.FRONT, Point(1, 1))
+    c = Component("U1", "", Point(7, 5), 0, Layer.FRONT, 1, 1, pads=[pad])
+    tl, br = Point(0, 0), Point(10, 10)
+    state = BoardState(components={"U1": c}, board_outline=(tl, br))
+    PlacementSolver(state)._apply_forces(state.components, ["U1"], {"U1": Point(1, 0)}, 1, tl, br)
+    assert c.pos == Point(8, 5)
+    assert pad.pos == Point(8, 5)
+
+
+def test_edge_datum_exempts_only_its_declared_side():
+    from kicraft.autoplacer.brain.placement_solver import PlacementSolver
+    from kicraft.autoplacer.brain.types import BoardState
+
+    pad = Pad("TP1", "1", Point(0, 0.5), "N", Layer.FRONT, Point(1, 1))
+    c = Component("TP1", "", Point(0, 0.5), 0, Layer.FRONT, 1, 1, pads=[pad])
+    state = BoardState(components={"TP1": c}, board_outline=(Point(0, 0), Point(10, 10)))
+    cfg = {"edge_interfaces": [{"refs": ["TP1"], "side": "left",
+                                "pitch_mm": 2.54, "exact_edge_datum": True}]}
+    diag = PlacementSolver(state, cfg).legality_diagnostics(state.components)
+    assert diag["pads_outside_board"][0]["sides"] == ["top"]
+    pad.pos.y = 5
+    assert PlacementSolver(state, cfg).legality_diagnostics(state.components)["legal"]
+
+
 def test_rotate_component_in_place_noop_for_zero():
     c = _comp()
     geometry.rotate_component_in_place(c, 0)

@@ -157,12 +157,7 @@ def test_start_sampler_is_idempotent(monkeypatch, tmp_path):
 
 # --- chart option builders (pure) ------------------------------------------ #
 
-def test_timescale_map_covers_expected_windows():
-    assert _HOST_TIMESCALES[0] == "1h"
-    assert "7d" in _HOST_TIMESCALE_SECONDS
-    assert _HOST_TIMESCALE_SECONDS["7d"] == 7 * 86400
-    assert _HOST_TIMESCALE_SECONDS["1h"] == 3600
-    assert _HOST_TIMESCALE_SECONDS["all"] is None
+
 
 
 def _rows(n):

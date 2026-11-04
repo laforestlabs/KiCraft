@@ -47,6 +47,7 @@ from pathlib import Path
 
 from kicraft.eval.artifacts import (
     _find_glob,
+    find_erc_report,
     _find_one,
     _load_json,
     analyze_state,
@@ -170,7 +171,7 @@ def read_scenario_band(scenario_id: str | None) -> tuple[int, int] | None:
 def collect_metrics(run_dir: Path, scenario_id: str | None, perm_baseline: int) -> dict:
     state = analyze_state(_find_one(run_dir, "state.json"))
     synth = parse_synthesis_check(_find_one(run_dir, "synthesis_check.json"))
-    erc = parse_erc(_find_glob(run_dir, "*_erc.rpt"))
+    erc = parse_erc(find_erc_report(run_dir, synth))
     generated = count_generated(run_dir)
     perm = perm_floor(run_dir, perm_baseline)
     transcript = analyze_transcript(run_dir)

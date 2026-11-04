@@ -77,6 +77,20 @@ def commit_stage(
     return (proc.returncode == 0 and out["ok"]), out
 
 
+def _read_state_for_update(state_path) -> dict:
+    """Refuse to overwrite an existing state that cannot be read as an object."""
+    p = Path(state_path)
+    try:
+        state = json.loads(p.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"state.json unreadable at {p}; cannot update it") from exc
+    if not isinstance(state, dict):
+        raise RuntimeError(f"state.json is not an object at {p}; cannot update it")
+    return state
+
+
 def stamp_stage_status(
     state_path,
     stage: str,
@@ -104,10 +118,7 @@ def stamp_stage_status(
 ) -> None:
     """Atomically record the durable operational and semantic stage outcome."""
     p = Path(state_path)
-    try:
-        sj = json.loads(p.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        sj = {}
+    sj = _read_state_for_update(p)
     entry: dict = {
         "ok": bool(ok),
         "finished_at": dt.datetime.now(dt.timezone.utc).isoformat(),
@@ -167,10 +178,7 @@ def attach_questions(state_path, stage: str, questions: list[dict]) -> None:
     """Write the stage's clarifying questions into state.json's open_questions
     (replacing any prior ones for this stage), so a reopened/parked project shows
     them. Tolerates a not-yet-created state.json (a first-stage question)."""
-    try:
-        sj = json.loads(Path(state_path).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        sj = {}
+    sj = _read_state_for_update(state_path)
     kept = [q for q in (sj.get("open_questions") or []) if q.get("stage") != stage]
     sj["open_questions"] = kept + list(questions)
     Path(state_path).parent.mkdir(parents=True, exist_ok=True)

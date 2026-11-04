@@ -24,6 +24,8 @@ from pathlib import Path
 from kicraft.design.stage_state import (
     downstream_stages as _downstream_stages,
     invalidate_downstream,
+    legacy_recipe_resume_stage,
+    stage_done,
 )
 from kicraft.fsutil import atomic_write_text
 
@@ -36,21 +38,12 @@ from .storage import _state_path
 BUILD_PHASES = ("synthesize", "place_route", "electrical_review", "fab")
 
 
-def _stage_done(stage: str, state: dict) -> bool:
-    """Whether `stage`'s contribution to the state is already present. wiring is
-    not a standalone slot: it populates bom.connections / bom.no_connect_pins."""
-    if stage == "wiring":
-        bom = state.get("bom") or {}
-        return bool(bom.get("connections")) or bool(bom.get("no_connect_pins"))
-    return state.get(stage) is not None
-
-
 def remaining_stages(state: dict) -> list[str]:
     """DESIGN_STAGES from the first incomplete stage onward (a hole re-runs the
     tail). Empty when every schematic stage is satisfied."""
     stages = list(DESIGN_STAGES)
     for i, stage in enumerate(stages):
-        if not _stage_done(stage, state):
+        if not stage_done(stage, state):
             return stages[i:]
     return []
 
@@ -70,9 +63,21 @@ def derive_stage_statuses(
     committed entries lacking semantic fields remain ``done``.
     """
     ss = state.get("stage_status") or {}
+    legacy_stage = legacy_recipe_resume_stage(state)
     out: dict[str, str] = {}
     for s in DESIGN_STAGES:
         e = ss.get(s)
+        if legacy_stage is not None and DESIGN_STAGES.index(s) >= DESIGN_STAGES.index(legacy_stage):
+            out[s] = "pending"
+            continue
+        if (
+            s == "wiring"
+            and state.get("wiring_complete") is not None
+            and not stage_done(s, state)
+            and not (isinstance(e, dict) and e.get("ok") is False)
+        ):
+            out[s] = "pending"
+            continue
         if isinstance(e, dict) and e.get("ok") is True:
             diagnostics = e.get("diagnostics") or []
             out[s] = (
@@ -86,7 +91,7 @@ def derive_stage_statuses(
             )
         elif isinstance(e, dict) and e.get("ok") is False:
             out[s] = "failed"
-        elif _stage_done(s, state):
+        elif stage_done(s, state):
             out[s] = "done"  # legacy project predating stage_status
         else:
             out[s] = "pending"
@@ -212,9 +217,10 @@ def _read_state_for_update(ws) -> dict | None:
     if not p.exists():
         return {}
     try:
-        return json.loads(p.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        state = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
         return None
+    return state if isinstance(state, dict) else None
 
 
 def record_answers(ws, stage: str, answers: list[dict]) -> None:
@@ -277,6 +283,17 @@ def run_session(
     stages = list(stages)
     if not stages:
         return {"status": "ok", "results": [], "guard": None, "questions": None, "last_stage": None}
+    state = _read_state_for_update(ws)
+    if state is None:
+        raise RuntimeError(f"state.json unreadable in {ws}; cannot resume stages")
+    legacy_stage = legacy_recipe_resume_stage(state)
+    if legacy_stage is not None:
+        first = min(DESIGN_STAGES.index(stages[0]), DESIGN_STAGES.index(legacy_stage))
+        stages = list(DESIGN_STAGES[first:])
+        invalidate_downstream(state, "functional_spec" if legacy_stage == "architecture" else "architecture")
+        state_path = _state_path(Path(ws))
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(state_path, json.dumps(state, indent=2) + "\n")
     results, guard, state_path = drive_chain(
         stages,
         brief,
@@ -1135,10 +1152,9 @@ def write_build_recovery(
     ``models.StageStatus`` (the typed fields live there, not in a side database).
     """
     state_path = build_recovery_state_path(ws)
-    try:
-        state = json.loads(state_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        state = {}
+    state = _read_state_for_update(ws)
+    if state is None:
+        raise RuntimeError(f"state.json unreadable in {ws}; cannot record build recovery")
     block = state.get("stage_status")
     if not isinstance(block, dict):
         block = {}

@@ -161,7 +161,7 @@ def _fixed_buck_artifact(*, branches=1, defect=None):
 
 
 def _adjustable_buck_artifact():
-    return _buck_artifact(["tps54331-adjustable@1"], equal_feedback=True)
+    return _buck_artifact(["tps54331-adjustable@2"], equal_feedback=True)
 
 
 def test_isolated_converter_cannot_establish_a_board_input_voltage_rating(tmp_path, monkeypatch):
@@ -260,7 +260,7 @@ def test_rp2040_swd_observer_requires_delivered_recovery_and_core_graph():
 
     expansion = expand_recipe(
         RecipeSelection(
-            recipe="rp2040-minimal@2",
+            recipe="rp2040-minimal@3",
             instance="rp",
             sheets={"mcu": "MCU", "io": "IO"},
             parameters={"native_usb": False, "programming": "swd"},
@@ -282,6 +282,15 @@ def test_rp2040_swd_observer_requires_delivered_recovery_and_core_graph():
     facts = mcu_circuit_facts(parts, {}, nets)
 
     assert facts["net_paths"]["rp2040_swd_recovery_complete_core"]
+    mcu = next(part for part in expansion.parts if part.recipe_role == "mcu")
+    flash = next(part for part in expansion.parts if part.recipe_role == "flash")
+    for mcu_pin, flash_pin in (("52", "6"), ("53", "5"), ("55", "2"), ("54", "3"), ("51", "7")):
+        broken = dict(nets)
+        del broken[mcu.ref, mcu_pin]
+        del broken[flash.ref, flash_pin]
+        assert "rp2040_swd_recovery_complete_core" not in mcu_circuit_facts(
+            parts, {}, broken
+        )["net_paths"]
     header = next(part for part in expansion.parts if part.recipe_role == "swd_header")
     del nets[header.ref, "3"]
     assert "rp2040_swd_recovery_complete_core" not in mcu_circuit_facts(
@@ -697,3 +706,43 @@ def test_programming_header_is_not_an_assumed_external_power_source():
     assert observed("+3V3", "GND", [header], {}, pads, state, []) is None
     actual_input = {**header, "value": "3V3 INPUT", "recipe_role": "power_input"}
     assert observed("+3V3", "GND", [actual_input], {}, pads, state, []) == 3.3
+
+
+def test_r2r_proof_requires_complete_delivered_lowered_graph(tmp_path):
+    from kicraft.design.models import Architecture, BOM, CircuitRequirement, Sheet
+    from kicraft.server.stage_work_units import probe_architecture_construction
+
+    requirement = CircuitRequirement.model_validate({
+        "id": "r2r", "sheet": "DAC", "role": "analog_block", "family": "r2r-ladder",
+        "parameters": {"bits": 8, "r_value": 10000, "two_r_value": 20000},
+        "ports": {**{f"bit{i}": f"D{i}" for i in range(8)}, "output": "OUT", "gnd": "GND"},
+        "obligations": [{"kind": "physical", "original_obligation_id": "r2r-network",
+                         "component_class": "resistor-network"}],
+    })
+    architecture = Architecture(
+        sheets=[Sheet(name="DAC", stem="DAC", function="R-2R DAC")],
+        power_nets=[], inter_sheet_nets=[], requirements=[requirement],
+    )
+    compiled = probe_architecture_construction({
+        "architecture": architecture.model_dump(mode="json"), "bom": {"parts": []},
+    })
+    bom = BOM.model_validate(compiled)
+    state = {"architecture": architecture.model_dump(mode="json"), "bom": bom.model_dump(mode="json")}
+    pads = {
+        (endpoint.ref, str(endpoint.pin)): connection.net_name
+        for connection in bom.connections for endpoint in connection.endpoints
+    }
+    def board(graph):
+        return _Board([
+            _Footprint(part.ref, part.footprint, [
+                (pin, net) for (ref, pin), net in graph.items() if ref == part.ref
+            ])
+            for part in bom.parts
+        ])
+
+    intact = electrical_artifact_evidence.extract_electrical_facts(tmp_path, state, board(pads), {})
+    assert intact["net_paths"].get("r2r_ladder") is True
+    broken = dict(pads)
+    broken[("R1", "2")] = "BROKEN_LADDER"
+    facts = electrical_artifact_evidence.extract_electrical_facts(tmp_path, state, board(broken), {})
+    assert facts["net_paths"].get("r2r_ladder") is not True

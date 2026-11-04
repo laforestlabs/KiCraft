@@ -138,6 +138,47 @@ def _back_layer_component(ref: str, pos: Point, w: float, h: float) -> Component
     return _comp(ref, pos=pos, width=w, height=h, pads=pads, layer=Layer.BACK)
 
 
+def test_manual_parent_local_override_moves_all_geometry_and_skips_snap(
+    tmp_path, monkeypatch
+):
+    from kicraft.cli import compose_subcircuits
+    from kicraft.layout_editor.model import (
+        ManualLayout, ManualLeafPlacement, ManualParentLocalPlacement,
+    )
+    from kicraft.layout_editor.outline import OutlineSpec
+
+    hole = _comp("H1", pos=Point(2, 3), pads=[_pad("H1", "1", 2, 3)])
+    hole.body_center = Point(2, 3)
+    monkeypatch.setattr(
+        compose_subcircuits, "extract_parent_local_components",
+        lambda *args, **kwargs: {"H1": hole},
+    )
+    monkeypatch.setattr(
+        "kicraft.autoplacer.config.discover_project_config", lambda *_: None
+    )
+    artifact = _make_artifact(
+        "LEAF", width=4, height=4,
+        components={"R1": _comp("R1", pos=Point(2, 2))},
+    )
+    layout = ManualLayout(
+        placements=[ManualLeafPlacement(instance_path=artifact.instance_path, origin=Point(5, 5))],
+        outline=OutlineSpec.rect(Point(0, 0), Point(40, 40)),
+        parent_local=[ManualParentLocalPlacement(ref="H1", pos=Point(20, 30))],
+    )
+
+    state, _ = _compose_artifacts(
+        [artifact], spacing_mm=2.0, rotation_step_deg=0.0,
+        pcb_path=tmp_path / "board.kicad_pcb",
+        cfg={"component_zones": {"H1": {"corner": "top-left"}}},
+        manual_layout=layout,
+    )
+
+    placed = state.composition.board_state.components["H1"]
+    assert placed.pos == Point(20, 30)
+    assert placed.body_center == Point(20, 30)
+    assert placed.pads[0].pos == Point(20, 30)
+
+
 # ---------------------------------------------------------------------------
 # Scenario 1: three blocks, no constraints -> no bbox overlaps after solve.
 

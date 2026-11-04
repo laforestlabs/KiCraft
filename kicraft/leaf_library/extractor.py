@@ -199,8 +199,9 @@ def extract_leaf(
 ) -> Path:
     """Build a leaf directory under ``target_library_dir``.
 
-    Writes atomically: target_library_dir/.<name>.tmp/ is populated in
-    full, then ``os.replace``'d into ``target_library_dir/<name>``.
+    Stages the complete leaf before installation. An existing version is
+    backed up and restored if the final rename fails; a failed restoration
+    leaves that backup on disk for recovery.
 
     Refuses to overwrite an existing leaf directory with the same name
     and version; the caller (GUI) is responsible for bumping the patch
@@ -326,15 +327,31 @@ def extract_leaf(
         manifest = manifest.model_copy(update={"content_hash": real_hash})
         dump_manifest(manifest, staging)
 
-        # Final atomic move into place. If target_dir exists (different
-        # version), shutil.rmtree it first -- spec says replace-after-confirm.
-        if target_dir.exists():
-            shutil.rmtree(target_dir)
-        # os.replace can't move a non-empty dir across filesystems but
-        # within the same fs it works; we're inside target_library_dir
-        # so this is safe.
+        # Keep the previous version recoverable until the new version is in
+        # place. A failed final rename must not destroy the installed leaf.
         import os as _os
-        _os.replace(staging, target_dir)
+        backup_root = None
+        backup = None
+        if target_dir.exists():
+            backup_root = Path(tempfile.mkdtemp(
+                dir=target_library_dir, prefix=f".{req.name}.backup."
+            ))
+            backup = backup_root / req.name
+            try:
+                _os.replace(target_dir, backup)
+            except BaseException:
+                backup_root.rmdir()
+                raise
+        try:
+            _os.replace(staging, target_dir)
+        except BaseException:
+            if backup is not None:
+                # If restoration itself fails, leave the backup on disk.
+                _os.replace(backup, target_dir)
+                backup_root.rmdir()
+            raise
+        if backup_root is not None:
+            shutil.rmtree(backup_root)
 
     log.info("promoted leaf %s@%s to %s", req.name, req.version, target_dir)
     return target_dir

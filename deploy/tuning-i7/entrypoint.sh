@@ -14,8 +14,12 @@ mkdir -p "$DATA"
 
 echo "[entrypoint] repo: $URL @ $BRANCH"
 if [ -d "$REPO/.git" ]; then
-    git -C "$REPO" fetch --depth 1 origin "$BRANCH"
-    git -C "$REPO" reset --hard "origin/$BRANCH"
+    if ! git -C "$REPO" diff --quiet || ! git -C "$REPO" diff --cached --quiet; then
+        echo "[entrypoint] refusing to reset a checkout with tracked changes: $REPO" >&2
+        exit 1
+    fi
+    git -C "$REPO" fetch origin "$BRANCH"
+    git -C "$REPO" merge --ff-only FETCH_HEAD
 else
     git clone --depth 1 --branch "$BRANCH" "$URL" "$REPO"
 fi

@@ -123,3 +123,48 @@ def test_identical_printed_order_codes_do_not_merge_manufacturers():
     assert _ordered_package_is_qualified(part, record, row)
     row["exact_lcsc"] = "C7519"
     assert not _ordered_package_is_qualified(part, record, row)
+
+
+@pytest.mark.parametrize(
+    "mpn,code,symbol,footprint",
+    [
+        ("CL10A105KB8NNNC", "C15849", "Device:C", "Capacitor_SMD:C_0603_1608Metric"),
+        ("PTFR0603B680RP9", "C351634", "Device:R", "Resistor_SMD:R_0603_1608Metric"),
+        ("0603WAF1003T5E", "C25803", "Device:R", "Resistor_SMD:R_0603_1608Metric"),
+        ("KT-0603R", "C2286", "Device:LED", "LED_SMD:LED_0603_1608Metric"),
+    ],
+)
+@pytest.mark.parametrize("defect", [None, "wrong_code", "wrong_model", "wrong_package", "wrong_land"])
+def test_selected_generic_part_requires_matching_catalog_order(mpn, code, symbol, footprint, defect):
+    part = {"ref": "X1", "mpn": None, "symbol": symbol, "footprint": footprint}
+    facts = {
+        "bom_parts": [part],
+        "all_bom_parts": [part],
+        "board_footprints": {"X1": footprint},
+        "board_pad_observations": [
+            {"footprint_pad": "X1.1"}, {"footprint_pad": "X1.2"},
+        ],
+    }
+    row = {
+        "ref": "X1", "verdict": "pass", "catalog_mpn": mpn,
+        "exact_lcsc": code, "package": "0603", "manufacturer": "catalog",
+    }
+    if defect == "wrong_code":
+        row["exact_lcsc"] = "C999999999"
+    elif defect == "wrong_model":
+        row["catalog_mpn"] = "UNREVIEWED-ORDER"
+    elif defect == "wrong_package":
+        row["package"] = "0805"
+    elif defect == "wrong_land":
+        part["footprint"] = "Other:Land"
+        facts["board_footprints"]["X1"] = "Other:Land"
+    facts["sourcing_validation"] = {
+        "schema_version": 1, "parts_digest": _bom_parts_digest([part]), "parts": [row],
+    }
+    _reconcile_inventory(facts)
+    if defect is None:
+        assert facts["unqualified_source_refs"] == []
+        assert facts["part_inventory"][0]["rated_limits"]
+        assert facts["part_identities"][0]["identity"] == mpn.casefold()
+    else:
+        assert facts["part_inventory"] == []

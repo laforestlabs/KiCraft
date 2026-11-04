@@ -101,12 +101,7 @@ def test_an_unavailable_auditor_yields_no_findings(monkeypatch):
 
 
 def test_driver_runs_the_audit_and_folds_its_findings_into_the_round(tmp_path, monkeypatch):
-    """A Jev finding reaches the correction round, and its call is billed.
-
-    The audit exists so a rule the compiler would refuse outright is instead stated to the
-    corrector, in the same round as the deterministic findings. It is fail-soft: an unreachable
-    auditor contributes nothing.
-    """
+    """A Jev finding reaches the correction round; an unavailable auditor is fail-soft."""
     import json
 
     from kicraft.server import stage_runtime
@@ -119,17 +114,16 @@ def test_driver_runs_the_audit_and_folds_its_findings_into_the_round(tmp_path, m
         message="the driver runs above its part rating",
         evidence=["confidence=0.90"],
     )
-    billed: list[tuple] = []
 
-    def fake_audit(candidate, *, model, confidence, recorder):
-        recorder({"input_tokens": 100, "output_tokens": 20, "cost": 0.0001})
+    def fake_audit(candidate, **kwargs):
+        assert kwargs["stage"] == "architecture"
+        assert kwargs["guard"] is not None
         return [finding]
 
     monkeypatch.setattr("kicraft.server.draft_audit.audit_architecture", fake_audit)
 
     class _Guard:
-        def record(self, model, input_tokens, output_tokens, cost_usd, meta=""):
-            billed.append((model, cost_usd))
+        pass
 
     class _Client:
         def __init__(self, replies):
@@ -171,9 +165,6 @@ def test_driver_runs_the_audit_and_folds_its_findings_into_the_round(tmp_path, m
     )
 
     assert any(f["code"] == "audit_part_over_rating" for f in result["diagnostics"])
-    assert billed, "the audit's call was never billed"
-    assert {model for model, _cost in billed} == {"typesafe/jev-1.13"}
-    assert {cost for _model, cost in billed} == {0.0001}
 
 
 def test_part_alternatives_are_offered_only_when_the_catalogue_has_them():
@@ -211,7 +202,7 @@ def test_a_draft_the_compiler_refuses_is_still_audited(tmp_path, monkeypatch):
         seen.append(parsed)
         return [finding]
 
-    monkeypatch.setattr(stage_runtime, "_pre_audit_hook", lambda client: fake_pre_audit)
+    monkeypatch.setattr(stage_runtime, "_pre_audit_hook", lambda client, **kwargs: fake_pre_audit)
 
     class _Client:
         def __init__(self):

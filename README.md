@@ -74,6 +74,31 @@ is listed as having no recorded approval. An automatic default recorded on a
 cosmetic question, and a model-selected part's automatic alternative, are listed
 as actions KiCraft took — never as the user's approval.
 
+STEP exports additionally report their actual assembly-reference coverage.
+Missing component bodies and unknown coverage are explicit; a model occurrence
+does not qualify geometry, clearance or the rendered image. See
+[`docs/ARTIFACTS.md`](docs/ARTIFACTS.md) for the package receipt and coverage contract.
+
+### Account admission and billing safety
+
+Design creation reserves verification, rolling tier quota and visibility in one
+SQLite transaction; a separate quota pre-check does not authorize an insert.
+Invite redemption and single-use account tokens are likewise atomic. Login
+attempts are limited per account and trusted ASGI peer, not caller-supplied
+forwarding headers.
+
+Stripe customer and Checkout creation use durable idempotency keys and
+single-owner admission. Pre-cutover open sessions/subscriptions are reconciled
+before creating another chargeable session; mismatched or uncertain state is
+refused. Account deletion settles open Checkout and confirms subscription
+cancellation before removing local billing linkage. Unresolved requests older
+than the safe idempotency window require reconciliation, not a new key.
+
+Build jobs and project updates carry attempt generations. A prior failed worker
+cannot finalize or reap a newer attempt. Cloning preserves only the selected
+generation and rebases its own artifact paths; a saved design without generated
+artifacts can still be cloned, without advertising an old package.
+
 ## Installation
 
 ```bash
@@ -122,6 +147,10 @@ No prior schematic is required.
 - The five design stages (`intent`, `functional_spec`, `architecture`, `bom`,
   and `wiring`) use the `ConversationState` Pydantic schema in
   `.kicraft/state.json`.
+  Completion uses the shared `stage_done` rule, not merely nonempty connections:
+  a BOM can already contain compiler-owned support wiring. A successful BOM commit
+  sets `wiring_complete: false`; successful wiring acceptance sets it to `true`.
+  Legacy states without the marker retain status/ownership-aware recovery.
 - Portable Agent Skills live under `.agents/skills/`. The ordinary `kicraft`
   skill uses whichever LLM the active agent runtime provides.
 - `.omp/config.yml` points OMP at that generic directory as a custom skill
@@ -256,6 +285,17 @@ MYPROJ/
   MYPROJ.kicad_pcb                    # empty pcbnew stub
 ```
 
+Managed web builds isolate each attempt under
+`generated/attempt-<generation>/<STEM>/`; requeued work retains that attempt's
+directory. `state.artifacts.project_dir` identifies the recorded output, but
+previews and downloads must also belong to the current attempt. Older outputs
+remain evidence, not current delivery.
+
+Synthesis records hashes of the generated files it owns. An explicit CLI output
+directory containing untracked or user-modified outputs is refused rather than
+silently adopted or overwritten. Completed partial outputs are recorded so a
+failed attempt can recover without claiming unrelated files.
+
 Everything past that is the existing layout/routing pipeline:
 
 ```bash
@@ -274,9 +314,9 @@ the failing check rather than shipping a broken file set.
 
 ### Notes
 
-- Custom footprints (`<PROJECT>.pretty/`) are out of scope for v1 --
-  if the BOM references a footprint not in the stock KiCad libraries,
-  the skill surfaces a blocking question instead.
+- Resolved curated bundles can provide project-local symbols, footprints and
+  models. An unresolved or unqualified part remains blocking; a matching name
+  or stock count alone does not establish electrical or physical suitability.
 - State persists as `.kicraft/state.json` in the project directory —
   gitignore it (or commit it; it's plain JSON and reviewable).
 
@@ -677,6 +717,23 @@ Intentionally generic, null-MPN chip parts retain only the finite reviewed
 standard-case exception, with an exact catalog package match; an explicit
 unknown MPN cannot use that exception. Missing proof stays unverified.
 This does not replace the independent audit of actual pad geometry and exports.
+
+## Saved recipe and spend safety
+
+Saved selections migrate explicitly to the current recipe contract:
+`rp2040-minimal@1/@2` → `@3`, and the DRV8833/TPS54331 `@1` recipes → `@2`.
+Migration preserves known programming, GPIO and net-binding intent; ambiguous
+legacy parameters are refused rather than guessed. Derived BOMs carrying obsolete
+ownership must be regenerated upstream. Changing their recipe labels is not a
+migration of the electrical graph.
+
+Provider admission reserves conservative full-request exposure before dispatch.
+Verified receipt cost is billed spend; failed, cancelled or missing-cost responses
+retain uncertain exposure rather than being reported as free. Existing project,
+daily and lifetime limits include outstanding reservations and uncertainty.
+Stage progress, successful synthesis and green checks do not establish a complete
+fabrication-ready product.
+
 
 ## Package Structure
 

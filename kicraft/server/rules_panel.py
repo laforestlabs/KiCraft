@@ -229,6 +229,12 @@ class PlacementRulesPanel:
         if self.is_run_active():
             ui.notify("A run is already in progress.", color="warning")
             return
+        if not self._auto_size.value and (
+            not self._w_input.value or not self._h_input.value
+        ):
+            ui.notify("Enter both board dimensions when Auto size is off.",
+                      color="warning")
+            return
         with ui.dialog() as dialog, ui.card():
             ui.label("Apply placement rules and re-place the board?") \
                 .classes("text-sm font-medium")

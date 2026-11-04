@@ -20,12 +20,9 @@ from pathlib import Path
 
 from kicraft.render import EdgeCutsExtent, render_pcb
 
-# Bump this to invalidate every cached canvas PNG + sidecar. v4 =
-# kicad-cli no longer called with --fit-page-to-board, so SVG path
-# coords equal raw KiCad mm and the viewBox rewrite to the Edge.Cuts
-# AABB lands on the actual board content (was clipping tall narrow
-# leaves to a half-content slice).
-RENDERER_VERSION = 4
+# Bump this to invalidate every cached canvas PNG + sidecar. v5 reflects
+# corrected Edge.Cuts bounds for circles and arcs.
+RENDERER_VERSION = 5
 
 DEFAULT_DPI = 420
 

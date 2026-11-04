@@ -417,10 +417,10 @@ class PlacementSolver:
                 unlocked_refs = [r for r in comps if not comps[r].locked]
                 for ref in unlocked_refs:
                     old_pos = Point(comps[ref].pos.x, comps[ref].pos.y)
+                    hw, hh = _pad_half_extents(comps[ref])
                     comps[ref].pos.x += self.rng.gauss(0, kick_mag)
                     comps[ref].pos.y += self.rng.gauss(0, kick_mag)
                     # Clamp to board (pad-aware)
-                    hw, hh = _pad_half_extents(comps[ref])
                     comps[ref].pos.x = max(tl_r.x + hw + 1, min(br_r.x - hw - 1, comps[ref].pos.x))
                     comps[ref].pos.y = max(tl_r.y + hh + 1, min(br_r.y - hh - 1, comps[ref].pos.y))
                     _update_pad_positions(comps[ref], old_pos, comps[ref].rotation)
@@ -769,11 +769,12 @@ class PlacementSolver:
                 any_outside = False
                 for comp in best_comps.values():
                     for pad in comp.pads:
+                        pad_tl, pad_br = pad.bbox()
                         if (
-                            pad.pos.x < tl_v.x + inset_v
-                            or pad.pos.x > br_v.x - inset_v
-                            or pad.pos.y < tl_v.y + inset_v
-                            or pad.pos.y > br_v.y - inset_v
+                            pad_tl.x < tl_v.x + inset_v
+                            or pad_br.x > br_v.x - inset_v
+                            or pad_tl.y < tl_v.y + inset_v
+                            or pad_br.y > br_v.y - inset_v
                         ):
                             any_outside = True
                             break
@@ -1694,8 +1695,9 @@ class PlacementSolver:
             """
             if not comp.pads:
                 return
-            pad_xs = [p.pos.x for p in comp.pads]
-            pad_ys = [p.pos.y for p in comp.pads]
+            pad_boxes = [pad.bbox() for pad in comp.pads]
+            pad_xs = [x for low, high in pad_boxes for x in (low.x, high.x)]
+            pad_ys = [y for low, high in pad_boxes for y in (low.y, high.y)]
             shift_x = shift_y = 0.0
 
             # X axis shifts (skip the assigned-edge side)
@@ -1820,14 +1822,7 @@ class PlacementSolver:
                 new_rot = antenna_rotation_for_edge(intent.local_direction, edge, comp.layer)
             else:
                 new_rot = self._best_rotation_for_edge(comp, edge, self.cfg)
-            old_rot = comp.rotation
-            if abs((new_rot - old_rot) % 360.0) < 0.001:
-                return
-            comp.rotation = new_rot
-            # Rotate pads + body_center in place around the current position.
-            _update_pad_positions(comp, comp.pos, old_rot)
-            if round((new_rot - old_rot) / 90.0) % 2 != 0:
-                comp.width_mm, comp.height_mm = comp.height_mm, comp.width_mm
+            rotate_component_in_place(comp, new_rot - comp.rotation)
 
         def _place_at(comp: Component, edge: str, pos: Point):
             """Translate an already-oriented connector to its packed slot."""
@@ -4029,14 +4024,16 @@ class PlacementSolver:
                 dy *= max_step / mag
                 mag = max_step
 
-            old_pos = Point(comps[ref].pos.x, comps[ref].pos.y)
-            old_rot = comps[ref].rotation
-            comps[ref].pos.x += dx
-            comps[ref].pos.y += dy
-
-            # Hard clamp: pad-aware extents must stay inside board
             c = comps[ref]
+            old_pos = Point(c.pos.x, c.pos.y)
+            old_rot = c.rotation
+            # Measure before changing the origin, while body and pads still
+            # share its coordinate frame.
             hw, hh = _pad_half_extents(c)
+            c.pos.x += dx
+            c.pos.y += dy
+
+            # Hard clamp: pad-aware extents must stay inside board.
             c.pos.x = max(tl.x + hw + 1.0, min(br.x - hw - 1.0, c.pos.x))
             c.pos.y = max(tl.y + hh + 1.0, min(br.y - hh - 1.0, c.pos.y))
 
@@ -4544,13 +4541,14 @@ class PlacementSolver:
         for ref, comp in comps.items():
             for pad in comp.pads:
                 violations: list[str] = []
-                if pad.pos.x < tl.x + inset:
+                pad_tl, pad_br = pad.bbox()
+                if pad_tl.x < tl.x + inset:
                     violations.append("left")
-                if pad.pos.x > br.x - inset:
+                if pad_br.x > br.x - inset:
                     violations.append("right")
-                if pad.pos.y < tl.y + inset:
+                if pad_tl.y < tl.y + inset:
                     violations.append("top")
-                if pad.pos.y > br.y - inset:
+                if pad_br.y > br.y - inset:
                     violations.append("bottom")
                 datum_side = datum_sides.get((ref, pad.pad_id))
                 on_datum = (
@@ -5033,14 +5031,15 @@ class PlacementSolver:
             shift_up = 0.0  # positive = need to move down
             shift_down = 0.0  # negative = need to move up
             for pad in comp.pads:
-                if pad.pos.x < min_x:
-                    shift_left = max(shift_left, min_x - pad.pos.x)
-                if pad.pos.x > max_x:
-                    shift_right = min(shift_right, max_x - pad.pos.x)
-                if pad.pos.y < min_y:
-                    shift_up = max(shift_up, min_y - pad.pos.y)
-                if pad.pos.y > max_y:
-                    shift_down = min(shift_down, max_y - pad.pos.y)
+                pad_tl, pad_br = pad.bbox()
+                if pad_tl.x < min_x:
+                    shift_left = max(shift_left, min_x - pad_tl.x)
+                if pad_br.x > max_x:
+                    shift_right = min(shift_right, max_x - pad_br.x)
+                if pad_tl.y < min_y:
+                    shift_up = max(shift_up, min_y - pad_tl.y)
+                if pad_br.y > max_y:
+                    shift_down = min(shift_down, max_y - pad_br.y)
 
             # Use the larger magnitude violation for each axis
             shift_x = shift_left if abs(shift_left) >= abs(shift_right) else shift_right

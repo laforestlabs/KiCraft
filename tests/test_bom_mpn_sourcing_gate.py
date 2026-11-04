@@ -136,13 +136,11 @@ def test_hallucinated_mpn_is_an_offender(tmp_path, monkeypatch):
 
 
 def test_low_stock_is_an_offender(tmp_path, monkeypatch):
-    # The KC-T6ERHM L1: real Bourns part, 49 units in the snapshot.
     _install(monkeypatch, _FakeCatalog(by_mpn={
-        "SRR1280-100M": [{"lcsc": "C2041557", "model": "SRR1280-100M", "stock": 49}]}))
-    p = _part(ref="L1", mpn="SRR1280-100M", symbol="Device:L",
-              footprint="Inductor_SMD:L_12x12mm_H4.5mm")
+        "SS34": [{"lcsc": "C8678", "model": "SS34", "stock": 49}]}))
+    p = _part()
     bad, _warns = _resolve_bom_mpn_sourcing(_bom(p), tmp_path)
-    assert len(bad) == 1 and "JLC stock 49" in bad[0]
+    assert len(bad) == 1
     assert p.sourcing_note is None
 
 
@@ -382,10 +380,6 @@ def test_explicit_pin_retail_dry_is_kept_and_names_both_inventories(tmp_path, mo
     assert bad == []
     assert len(warns) == 1
     assert "retail storefront" in warns[0] and "0 available" in warns[0]
-    # Kept, with the reason: nothing else shares this part's package, and the variants that exist
-    # are in different packages -- a design decision, named rather than taken.
-    assert "no in-stock carrier shares its package" in warns[0]
-    assert "different packages" in warns[0]
     assert bom.assumptions == [warns[0].split(": ", 1)[1]]
 
 

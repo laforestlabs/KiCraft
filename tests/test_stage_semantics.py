@@ -173,6 +173,47 @@ def test_external_load_budget_does_not_treat_logic_regulator_rating_as_load_budg
     assert external_load_budget_stated("The HUB75 panel and LED string draw up to 2 A at 5 V.")
 
 
+@pytest.mark.parametrize("current", ["1.5 A", "250.5 mA"])
+def test_external_load_budget_preserves_decimal_current(current):
+    assert external_load_budget_stated(f"The HUB75 panel draws {current}.")
+    assert not external_load_budget_stated(
+        f"The HUB75 panel is external. The logic regulator supplies {current}."
+    )
+
+
+@pytest.mark.parametrize(
+    ("answer", "source_current", "no_headroom"),
+    [("1 A", "2 A", False), ("500 mA", "0.5 A", True)],
+)
+def test_external_load_capacity_uses_only_relevant_answer_current(
+    answer, source_current, no_headroom
+):
+    upstream = {
+        "functional_spec": {
+            "blocks": [
+                {"name": "PANEL", "purpose": "HUB75 panel power"},
+                {"name": "STRIP", "purpose": "LED strip power"},
+            ],
+            "connections": [
+                {"to_block": target, "signal_type": "power"}
+                for target in ("PANEL", "STRIP")
+            ],
+        },
+        "_stage_answers": [
+            {
+                "text": "Is the external load current 20 A? State the actual current.",
+                "answer": answer,
+            },
+            {"text": "What current does the motor draw?", "answer": "20 A"},
+        ],
+    }
+    candidate = {"topologies": {"INPUT": f"USB input 5 V / {source_current}"}}
+    codes = _codes("architecture", candidate, upstream)
+    assert "architecture_external_load_current_unspecified" not in codes
+    assert ("architecture_external_load_source_has_no_headroom" in codes) is no_headroom
+    assert "architecture_external_load_source_capacity_unspecified" not in codes
+
+
 def test_live_intent_candidate_reports_classification_defects():
     codes = _codes("intent", _load("rp2040_intent_candidate.json"))
     assert {
@@ -1344,7 +1385,10 @@ def test_architecture_rejects_source_without_headroom_for_external_loads():
                 },
             ]
         },
-        "_stage_answers": [{"answer": "5A"}],
+        "_stage_answers": [{
+            "text": "What is the external load current budget?",
+            "answer": "5A",
+        }],
         "_stage_extras": {},
     }
 
@@ -1476,7 +1520,10 @@ def test_architecture_power_contract_fixtures_preserve_dual_buck_and_right_size(
                 {"to_block": "LED_STRING_OUTPUT", "signal_type": "power"},
             ]
         },
-        "_stage_answers": [{"answer": "Board supplies both loads, 5 A maximum"}],
+        "_stage_answers": [{
+            "text": "What is the maximum external load current?",
+            "answer": "Board supplies both loads, 5 A maximum",
+        }],
         "_stage_extras": {},
     }
     oversized_diagnostics = diagnose_stage(
@@ -2445,7 +2492,6 @@ def test_the_rail_fix_corrects_the_statements_it_invalidates():
         conversion_sheet["function"]
     )
     assert "18 V input" in fixed["topologies"]["POWER"], fixed["topologies"]["POWER"]
-    assert text  # the ledger is non-empty
 
 
 def test_a_drive_on_the_logic_rail_gets_its_own_rail_too():
@@ -3075,7 +3121,7 @@ def test_the_rp2040_recipes_own_bootsel_button_realizes_a_pushbutton_demand():
     candidate = {
         "requirements": [requirement],
         "recipe_selections": [
-            {"recipe": "rp2040-minimal@2", "instance": "rp2040",
+            {"recipe": "rp2040-minimal@3", "instance": "rp2040",
              "requirement_ids": ["rp2040"]}
         ],
     }

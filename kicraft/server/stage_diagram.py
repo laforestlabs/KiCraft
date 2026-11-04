@@ -253,11 +253,13 @@ def architecture_diagram(slot: dict) -> dict | None:
     n = len(reps)
     nodes = []
     pos: dict[str, tuple[float, float]] = {}
+    node_names: dict[str, str] = {}
     for i, (rep_name, s, count) in enumerate(reps):
         angle = 2 * math.pi * i / n - math.pi / 2  # start at top
         x = _CIRCLE_R * math.cos(angle)
         y = _CIRCLE_R * math.sin(angle)
         label = rep_name if count <= 1 else f"{rep_name} ×{count}"
+        node_names[rep_name] = label
         pos[rep_name] = (x, y)
         nodes.append({
             "name": label,
@@ -291,7 +293,7 @@ def architecture_diagram(slot: dict) -> dict | None:
         for ep in endpoints:
             sheet_name = ep.get("sheet", "")
             rep_name, _ = rep_map.get(sheet_name, (sheet_name, 1))
-            if rep_name in seen_ep:
+            if rep_name not in pos or rep_name in seen_ep:
                 continue
             seen_ep.add(rep_name)
             mapped.append((rep_name, ep.get("direction", "bidirectional")))
@@ -335,7 +337,7 @@ def architecture_diagram(slot: dict) -> dict | None:
                     continue
                 edges.append({
                     "source": hub_label,
-                    "target": r,
+                    "target": node_names[r],
                     "edgeSymbol": ["none", "none"],
                     "lineStyle": {"color": hub_color, "width": 1.5},
                     "value": net_name,
@@ -347,8 +349,8 @@ def architecture_diagram(slot: dict) -> dict | None:
             if src is None or tgt is None or src not in pos or tgt not in pos:
                 continue
             edges.append({
-                "source": src,
-                "target": tgt,
+                "source": node_names[src],
+                "target": node_names[tgt],
                 "edgeSymbol": arrow,
                 "lineStyle": {"color": SIGNAL_HUB_COLOR, "width": 1.8},
                 "label": {"show": True, "formatter": net_name,

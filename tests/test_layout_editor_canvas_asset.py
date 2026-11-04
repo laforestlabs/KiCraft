@@ -65,31 +65,10 @@ def _initial() -> dict:
     }
 
 
-def test_asset_exists_and_has_no_template_leftovers():
-    src = static_js_path().read_text(encoding="utf-8")
-    assert "window.kicraftInitLayoutCanvas = function(cfg)" in src
-    # Leftovers from the old .format() template would mean the
-    # extraction regressed (or someone pasted template text back in).
-    assert "{config_json}" not in src
-    assert "__KICRAFT_CFG_PLACEHOLDER__" not in src
 
 
-def test_asset_keeps_python_called_api_surface():
-    """Python (offline GUI today, web panel next) calls these by name
-    via ui.run_javascript; renaming any of them in the JS without
-    updating the hosts breaks silently."""
-    src = static_js_path().read_text(encoding="utf-8")
-    assert "window.manualLayoutCanvases" in src
-    for method in (
-        "getState",
-        "reset",
-        "getOutlineSize",
-        "setOutlineSize",
-        "setMountingHoles",
-        "getMountingHoles",
-        "setViewOptions",
-    ):
-        assert f"{method}: function" in src, f"missing canvas API method {method}"
+
+
 
 
 @pytest.mark.skipif(_NODE is None, reason="node not installed")

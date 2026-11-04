@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
-from kicraft.tuning.workspace import PATH_TOKEN, discover_stem
+from kicraft.tuning.workspace import PATH_TOKEN, _reject_overlapping_paths, discover_stem
 
 MANIFEST_NAME = "manifest.json"
 
@@ -182,6 +182,7 @@ def freeze_workspace(
     enough to commit. Lean freezes need no tokenization (nothing references the
     source path)."""
     src, dest = Path(src), Path(dest)
+    _reject_overlapping_paths(src, dest)
     if dest.exists():
         shutil.rmtree(dest)
     if lean:

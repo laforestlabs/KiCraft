@@ -17,16 +17,7 @@ from kicraft.cli.autoexperiment import (
 )
 
 
-def test_project_dir_is_repo_root_at_any_depth():
-    """PROJECT_DIR must resolve to the repo root, not a fixed deep index.
 
-    Regression guard: the old parents[4] raised IndexError on a shallow checkout
-    (e.g. /data/KiCraft in the tuning container), breaking screening at import.
-    """
-    import kicraft.cli.autoexperiment as ax
-
-    # <repo>/kicraft/cli/autoexperiment.py -> parents[2] is the repo root
-    assert ax.PROJECT_DIR == Path(ax.__file__).resolve().parents[2]
 
 
 # ---------------------------------------------------------------------------

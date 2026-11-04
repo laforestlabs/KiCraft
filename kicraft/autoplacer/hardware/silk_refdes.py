@@ -1,32 +1,16 @@
-"""Geometric silkscreen reference-designator legalization.
+"""Place readable reference designators outside component bodies.
 
-No stage manages per-footprint refdes, so on a dense array a default ~1 mm
-"D147" label is bigger than its 1.5-2 mm part and overlaps neighbours. This
-pass runs on a loaded pcbnew board (at the end of parent/leaf stamping) and,
-per footprint reference:
-
-  * shrink-to-fit its courtyard (down to a readable floor) and centre it; if it
-    fits and clears neighbouring courtyards, keep it on silk;
-  * otherwise move it to F.Fab/B.Fab -- the designator survives for assembly /
-    pick-and-place but no longer clutters the silkscreen.
-
-The resulting invariant is checkable: every *visible silk* refdes fits within
-its own courtyard (minus margin) and overlaps no other footprint's courtyard.
-Pure geometry, deterministic, no synthesis hints (so it captures dense array
-members without plumbing an array_member flag).
+Courtyards are placement envelopes, not empty space: centering a reference in
+one can print it on a component, its polarity marks, or exposed pads. Search
+outside all courtyards and preserve an unplaceable reference on Fab instead.
 """
 from __future__ import annotations
 
 import pcbnew
 
-# Discrete text heights (mm) tried largest-first when fitting a refdes to its
-# courtyard. The smallest is the readability floor: a refdes that needs to go
-# below it to fit is hidden to Fab instead of shrunk into illegibility.
-# The floor must not go below kicad_pro.DEFAULT_RULES["min_text_height"]
-# (0.8 mm): the old 0.7 step made every board with 0603-class parts warn
-# 'silk text height 0.7 < 0.8' — the noisiest fleet-wide DRC class
-# (self-eval 2026-07-07). A refdes that only fits at 0.7 goes to Fab, which
-# the silk text-height constraint doesn't police.
+from kicraft.autoplacer.hardware.silk_geometry import bbox_inside_poly, boxes_overlap
+
+# Readability floor matches kicad_pro.DEFAULT_RULES["min_text_height"].
 _TEXT_HEIGHTS_MM = (1.0, 0.9, 0.8)
 _THICKNESS_RATIO = 0.15  # KiCad's nominal stroke:height ratio
 
@@ -42,83 +26,132 @@ def _courtyard_bbox(fp):
     return bb
 
 
-def _fits(item_bbox, court, margin_iu) -> bool:
-    return (
-        item_bbox.GetWidth() <= court.GetWidth() - 2 * margin_iu
-        and item_bbox.GetHeight() <= court.GetHeight() - 2 * margin_iu
-    )
-
-
-def _overlaps(a, b) -> bool:
-    ox = min(a.GetRight(), b.GetRight()) - max(a.GetLeft(), b.GetLeft())
-    oy = min(a.GetBottom(), b.GetBottom()) - max(a.GetTop(), b.GetTop())
-    return ox > 0 and oy > 0
-
 
 def _move_to_fab(fp, item) -> None:
     item.SetLayer(pcbnew.B_Fab if fp.GetLayer() == pcbnew.B_Cu else pcbnew.F_Fab)
     item.SetVisible(True)  # keep for assembly / pick-and-place
 
 
+def _board_polygon(board):
+    shape = pcbnew.SHAPE_POLY_SET()
+    if not board.GetBoardPolygonOutlines(shape) or shape.OutlineCount() != 1:
+        return None
+    def points(chain):
+        return [(pcbnew.ToMM(chain.CPoint(i).x), pcbnew.ToMM(chain.CPoint(i).y))
+                for i in range(chain.PointCount())]
+    outer = points(shape.COutline(0))
+    holes = [points(shape.CHole(0, i)) for i in range(shape.HoleCount(0))]
+    return (outer, holes) if len(outer) >= 3 else None
+
+
+def _box_mm(bb):
+    return tuple(pcbnew.ToMM(v) for v in
+                 (bb.GetLeft(), bb.GetTop(), bb.GetRight(), bb.GetBottom()))
+
+
+def _inside_outline(box, polygon, clearance, holes=()):
+    # The probes alone do not prove containment for a concave outline. Also
+    # reject any box intersecting the bounding box of an outline segment.
+    if not bbox_inside_poly(box, polygon, margin=clearance):
+        return False
+    expanded = (box[0] - clearance, box[1] - clearance,
+                box[2] + clearance, box[3] + clearance)
+    for hole in holes:
+        if len(hole) < 3:
+            return False
+        bounds = (min(p[0] for p in hole), min(p[1] for p in hole),
+                  max(p[0] for p in hole), max(p[1] for p in hole))
+        if boxes_overlap(expanded, bounds):
+            return False
+    for a, b in zip(polygon, polygon[1:] + polygon[:1]):
+        edge = (min(a[0], b[0]), min(a[1], b[1]),
+                max(a[0], b[0]), max(a[1], b[1]))
+        if (expanded[0] <= edge[2] and edge[0] <= expanded[2] and
+                expanded[1] <= edge[3] and edge[1] <= expanded[3]):
+            return False
+    return True
+
+
 def legalize_refdes(board, cfg: dict | None = None) -> dict[str, list[str]]:
-    """Legalize every footprint reference designator on ``board`` in place.
-
-    Returns ``{"kept": [...], "moved_to_fab": [...]}`` (refs) for logging/tests.
-    """
+    """Search outside component courtyards; keep unplaceable refs on Fab."""
     cfg = cfg or {}
-    margin = pcbnew.FromMM(float(cfg.get("refdes_courtyard_margin_mm", 0.1)))
+    clearance = max(0.2, float(cfg.get("refdes_courtyard_margin_mm", 0.1)))
+    polygon = _board_polygon(board)
+    footprints = list(board.Footprints())
+    obstacles = {"F": [], "B": []}
+    envelopes = {}
+    for fp in footprints:
+        side = "B" if fp.GetLayer() == pcbnew.B_Cu else "F"
+        start = len(obstacles[side])
+        court = _courtyard_bbox(fp)
+        if court is not None:
+            obstacles[side].append(_box_mm(court))
+        for pad in fp.Pads():
+            box = _box_mm(pad.GetBoundingBox())
+            obstacles[side].append(box)
+            if pad.HasHole():
+                obstacles["F" if side == "B" else "B"].append(box)
+        for item in fp.GraphicalItems():
+            layer = item.GetLayer()
+            if layer == pcbnew.F_SilkS:
+                obstacles["F"].append(_box_mm(item.GetBoundingBox()))
+            elif layer == pcbnew.B_SilkS:
+                obstacles["B"].append(_box_mm(item.GetBoundingBox()))
+        if court is not None:
+            own = obstacles[side][start:]
+            envelopes[fp.GetReferenceAsString()] = (
+                min(box[0] for box in own), min(box[1] for box in own),
+                max(box[2] for box in own), max(box[3] for box in own),
+            )
+    for item in board.GetDrawings():
+        if item.GetLayer() == pcbnew.F_SilkS:
+            obstacles["F"].append(_box_mm(item.GetBoundingBox()))
+        elif item.GetLayer() == pcbnew.B_SilkS:
+            obstacles["B"].append(_box_mm(item.GetBoundingBox()))
 
-    courtyards: dict[str, object] = {}
-    for fp in board.Footprints():
-        cb = _courtyard_bbox(fp)
-        if cb is not None:
-            courtyards[fp.GetReferenceAsString()] = cb
-
-    kept: list[str] = []
-    moved: list[str] = []
-    for fp in board.Footprints():
-        ref = fp.GetReferenceAsString()
+    kept, moved = [], []
+    for fp in footprints:
         item = fp.Reference()
         if not item.IsVisible():
             continue
-        court = courtyards.get(ref)
-        if court is None:
-            continue  # no courtyard to reason about -> leave as authored
-
-        orig_size = item.GetTextSize()
-        orig_thick = item.GetTextThickness()
-
-        # 1. Largest readable size that fits the courtyard.
-        fitted = False
-        for h in _TEXT_HEIGHTS_MM:
-            hi = pcbnew.FromMM(h)
-            item.SetTextSize(pcbnew.VECTOR2I(hi, hi))
-            item.SetTextThickness(pcbnew.FromMM(h * _THICKNESS_RATIO))
-            if _fits(item.GetBoundingBox(), court, margin):
-                fitted = True
-                break
-        if not fitted:
-            item.SetTextSize(orig_size)
-            item.SetTextThickness(orig_thick)
+        side = "B" if fp.GetLayer() == pcbnew.B_Cu else "F"
+        if item.GetLayer() not in (pcbnew.F_SilkS, pcbnew.B_SilkS):
+            continue
+        ref = fp.GetReferenceAsString()
+        envelope = envelopes.get(ref)
+        original_pos, original_size, original_thick = item.GetPosition(), item.GetTextSize(), item.GetTextThickness()
+        placed = False
+        if envelope is not None and polygon is not None:
+            left, top, right, bottom = envelope
+            for height in _TEXT_HEIGHTS_MM:
+                h = pcbnew.FromMM(height)
+                item.SetTextSize(pcbnew.VECTOR2I(h, h))
+                item.SetTextThickness(pcbnew.FromMM(height * _THICKNESS_RATIO))
+                bb = _box_mm(item.GetBoundingBox())
+                half_w, half_h = (bb[2] - bb[0]) / 2, (bb[3] - bb[1]) / 2
+                # Strict clearance comparisons and integer coordinates must not
+                # turn a boundary-equal placement into a rejected collision.
+                gap = clearance + 0.001
+                candidates = [(pcbnew.ToMM(original_pos.x), pcbnew.ToMM(original_pos.y)),
+                              ((left + right) / 2, top - gap - half_h),
+                              ((left + right) / 2, bottom + gap + half_h),
+                              (left - gap - half_w, (top + bottom) / 2),
+                              (right + gap + half_w, (top + bottom) / 2)]
+                for x, y in candidates:
+                    item.SetPosition(pcbnew.VECTOR2I(pcbnew.FromMM(x), pcbnew.FromMM(y)))
+                    box = _box_mm(item.GetBoundingBox())
+                    if (_inside_outline(box, polygon[0], clearance, polygon[1]) and
+                            not any(boxes_overlap(box, obstacle, clearance) for obstacle in obstacles[side])):
+                        obstacles[side].append(box)
+                        kept.append(ref)
+                        placed = True
+                        break
+                if placed:
+                    break
+        if not placed:
+            item.SetPosition(original_pos)
+            item.SetTextSize(original_size)
+            item.SetTextThickness(original_thick)
             _move_to_fab(fp, item)
             moved.append(ref)
-            continue
-
-        # 2. Centre it in the courtyard.
-        item.SetPosition(court.GetCenter())
-
-        # 3. If the centred label still crosses a neighbour courtyard, hide it.
-        rb = item.GetBoundingBox()
-        if any(
-            other_ref != ref and _overlaps(rb, other_court)
-            for other_ref, other_court in courtyards.items()
-        ):
-            item.SetTextSize(orig_size)
-            item.SetTextThickness(orig_thick)
-            _move_to_fab(fp, item)
-            moved.append(ref)
-            continue
-
-        kept.append(ref)
-
     return {"kept": kept, "moved_to_fab": moved}

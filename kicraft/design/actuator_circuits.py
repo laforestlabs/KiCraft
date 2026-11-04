@@ -257,7 +257,8 @@ def _a4988_socket(requirement: CircuitRequirement) -> LoweringArtifact | None:
     ports = _required_ports(requirement, _socket_ports())
     if ports is None or not _different(ports["vmotor"], ports["vdd"], ports["gnd"]):
         return None
-    if len({ports[key] for key in ("coil_1a", "coil_1b", "coil_2a", "coil_2b")}) != 4:
+    coils = {ports[key] for key in ("coil_1a", "coil_1b", "coil_2a", "coil_2b")}
+    if len(coils) != 4 or coils & {ports["vmotor"], ports["vdd"], ports["gnd"]}:
         return None
     groups = [
         _group("carrier_socket", "J", "A4988 carrier socket", "a4988-carrier-socket:A4988_CARRIER_SOCKET", "a4988-carrier-socket:A4988_CARRIER_SOCKET_POLolu_1182", datasheet=_POLOLU_A4988),

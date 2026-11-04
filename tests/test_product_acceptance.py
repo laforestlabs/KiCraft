@@ -390,6 +390,34 @@ def test_artifact_extractor_selects_canonical_delivered_board_not_best_candidate
     )
 
 
+def test_generated_attempt_selection_uses_current_state_and_inventory(tmp_path):
+    from kicraft.eval.artifacts import count_generated
+    from kicraft.eval.self_eval import _find_parent_board
+
+    old = tmp_path / "generated/attempt-1/OLD"
+    current = tmp_path / "generated/attempt-2/NEW"
+    old.mkdir(parents=True)
+    current.mkdir(parents=True)
+    (old / "OLD.kicad_pcb").write_text("old")
+    board = current / "NEW.kicad_pcb"
+    board.write_text("new")
+    (current / "NEW.kicad_sch").write_text("current schematic")
+    state = {"artifacts": {"project_dir": str(current), "routed_pcb": str(board)}}
+    (tmp_path / ".kicraft").mkdir()
+    (tmp_path / ".kicraft/state.json").write_text(json.dumps(state))
+
+    assert artifact_evidence._delivered_board_path(tmp_path, state, tmp_path / "generated") == board
+    assert _find_parent_board(tmp_path) == board
+    assert count_generated(tmp_path) == {"pcb": 1, "sch": 1, "pro": 0, "synthesized": True}
+    assert "generated/attempt-2/NEW/NEW.kicad_pcb" in product._artifact_inventory(tmp_path)
+
+    board.unlink()
+    (current / "NEW.kicad_sch").unlink()
+    assert artifact_evidence._delivered_board_path(tmp_path, state, tmp_path / "generated") is None
+    assert _find_parent_board(tmp_path) is None
+    assert count_generated(tmp_path)["synthesized"] is False
+
+
 def _unchanged_run_copy(tmp_path):
     original = tmp_path / "original"
     board = original / "generated/board/board.kicad_pcb"

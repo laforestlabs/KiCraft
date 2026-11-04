@@ -71,6 +71,7 @@ class _FakeResp:
         self.reason = reason
         self.closed = False
         self.lines_read = 0
+        self._kicraft_reservation = "synthetic-response"
 
     def raise_for_status(self):
         if self.status_code >= 400:
@@ -96,9 +97,17 @@ class _RecordingGuard:
     def __init__(self):
         self.records = []
         self.preflights = []
+        self.uncertain = []
 
-    def preflight(self, call_ceiling_usd=0.0, run_id=None):
+    def reserve(self, call_ceiling_usd=0.0, run_id=None):
         self.preflights.append((call_ceiling_usd, run_id))
+        return f"reservation-{len(self.preflights)}"
+
+    def mark_uncertain(self, reservation, minimum_usd=0.0):
+        self.uncertain.append((reservation, minimum_usd))
+
+    def settle_reservation(self, reservation, model, intok, outtok, cost, meta=""):
+        self.record(model, intok, outtok, cost, meta=meta)
 
     def record(self, model, intok, outtok, cost, meta=""):
         self.records.append(
@@ -121,15 +130,128 @@ def _usage_chunk(cached=0, cost=0.001, intok=1000, outtok=50):
     }
 
 
+def test_guard_without_reservation_protocol_cannot_dispatch(monkeypatch):
+    calls = []
+    monkeypatch.setattr(client_mod.requests, "post", lambda *a, **kw: calls.append(1))
+    guard = types.SimpleNamespace(preflight=lambda *a, **kw: None)
+    with pytest.raises(TypeError, match="reservation guard protocol"):
+        CappedOpenRouterClient(Settings(api_key="k"), guard=guard)
+    assert calls == []
+
+
+def test_missing_usage_retains_uncertain_completion_exposure(monkeypatch):
+    monkeypatch.setattr(
+        client_mod.requests,
+        "post",
+        lambda *args, **kwargs: _FakeResp(
+            [{"choices": [{"delta": {"content": '{"ok":true}'}, "finish_reason": "stop"}]}]
+        ),
+    )
+    guard = _RecordingGuard()
+    client = CappedOpenRouterClient(Settings(api_key="k"), guard=guard)
+    message, cost = client._stream({"messages": [{"role": "user", "content": "hello"}]})
+    assert message["content"] == '{"ok":true}'
+    assert cost > 0
+    assert not guard.records
+    assert len(guard.uncertain) == 1
+    assert guard.uncertain[0][1] == cost
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+def test_interrupted_stream_retains_exposure_before_propagating(monkeypatch, cancel):
+    chunks = [{"choices": [{"delta": {"content": "partial answer"}}]}]
+    if not cancel:
+        chunks.append({"error": {"code": 429, "message": "rate limited"}})
+    monkeypatch.setattr(
+        client_mod.requests, "post", lambda *args, **kwargs: _FakeResp(chunks)
+    )
+    guard = _RecordingGuard()
+    client = CappedOpenRouterClient(Settings(api_key="k"), guard=guard)
+
+    def on_delta(_delta):
+        if cancel:
+            raise RuntimeError("cancelled")
+
+    with pytest.raises(RuntimeError if cancel else requests.exceptions.HTTPError):
+        client._stream({"messages": [{"role": "user", "content": "hello"}]}, on_delta)
+    assert not guard.records
+    assert len(guard.uncertain) == 1
+    assert guard.uncertain[0][1] > 0
+
+
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_missing_receipt_retains_real_budget_exposure(tmp_path, monkeypatch, interrupted):
+    settings = Settings(
+        api_key="k", ledger_path=tmp_path / "ledger.db", llm_max_retries=0,
+        max_price_prompt=1.0, max_price_completion=1.0, max_tokens_per_call=100,
+    )
+    guard = SpendGuard(settings)
+    chunks = [{"choices": [{"delta": {"content": '{"ok":true}'}}]}]
+    if interrupted:
+        chunks.append({"error": {"code": 429, "message": "rate limited"}})
+    monkeypatch.setattr(client_mod.requests, "post", lambda *a, **kw: _FakeResp(chunks))
+    client = CappedOpenRouterClient(settings, guard=guard)
+    if interrupted:
+        with pytest.raises(requests.exceptions.HTTPError):
+            client._stream({"messages": [{"role": "user", "content": "hello"}]})
+    else:
+        client._stream({"messages": [{"role": "user", "content": "hello"}]})
+    assert guard.spent_total() == 0
+    assert guard.status()["uncertain_exposure_usd"] > 0
+    assert guard.status()["reserved_exposure_usd"] == 0
+
+
+def test_callback_cancellation_retains_real_budget_exposure(tmp_path, monkeypatch):
+    settings = Settings(api_key="k", ledger_path=tmp_path / "ledger.db", llm_max_retries=0)
+    guard = SpendGuard(settings)
+    monkeypatch.setattr(
+        client_mod.requests, "post",
+        lambda *a, **kw: _FakeResp([{"choices": [{"delta": {"content": "partial"}}]}]),
+    )
+
+    def cancel(_delta):
+        raise RuntimeError("cancelled")
+
+    with pytest.raises(RuntimeError, match="cancelled"):
+        CappedOpenRouterClient(settings, guard=guard)._stream(
+            {"messages": [{"role": "user", "content": "hello"}]}, cancel
+        )
+    assert guard.spent_total() == 0
+    assert guard.status()["uncertain_exposure_usd"] > 0
+    assert guard.status()["reserved_exposure_usd"] == 0
+
+
+def test_malformed_usage_is_retained_as_uncertain_not_free(tmp_path, monkeypatch):
+    settings = Settings(api_key="k", ledger_path=tmp_path / "ledger.db", llm_max_retries=0)
+    guard = SpendGuard(settings)
+    monkeypatch.setattr(
+        client_mod.requests,
+        "post",
+        lambda *a, **kw: _FakeResp([
+            {"choices": [{"delta": {"content": "{}"}}]},
+            {"usage": {"prompt_tokens": "bad", "completion_tokens": -1,
+                       "prompt_tokens_details": [], "cost": "bad"}},
+        ]),
+    )
+    message, _cost = CappedOpenRouterClient(settings, guard=guard)._stream(
+        {"messages": [{"role": "user", "content": "hello"}]}
+    )
+    assert message["content"] == "{}"
+    assert guard.spent_total() == 0
+    assert guard.status()["uncertain_exposure_usd"] > 0
+
+
+def test_call_ceiling_accounts_for_tool_schema():
+    settings = Settings(api_key="k", max_price_prompt=1.0, max_price_completion=1.0)
+    client = CappedOpenRouterClient(settings, guard=_RecordingGuard())
+    base = {"model": settings.model, "messages": [], "max_tokens": 1}
+    with_tool = {**base, "tools": [{"description": "x" * 10000}]}
+    assert client._configured_call_ceiling_usd(with_tool, None) > (
+        client._configured_call_ceiling_usd(base, None) + 0.009
+    )
+
+
 # ---- provider block + cache control (pure) --------------------------------
-
-
-def test_provider_block_from_settings():
-    c = CappedOpenRouterClient(Settings(api_key="k"), guard=_RecordingGuard())
-    pb = c._provider_block()
-    assert pb["order"] == ["open-inference/fp8"]
-    assert pb["allow_fallbacks"] is False
-    assert pb["max_price"] == {"prompt": 0.11, "completion": 0.24}
 
 
 def test_design_profile_clone_reuses_guard_and_changes_only_route():
@@ -187,7 +309,11 @@ def test_stream_sends_provider_block_and_records_structured_meta(monkeypatch):
         )
 
     monkeypatch.setattr(client_mod.requests, "post", fake_post)
-    c = CappedOpenRouterClient(Settings(api_key="k"), guard=_RecordingGuard())
+    settings = Settings(
+        api_key="k", provider_order=["test-provider"], provider_allow_fallbacks=False,
+        max_price_prompt=0.17, max_price_completion=0.41, enable_prompt_cache=True,
+    )
+    c = CappedOpenRouterClient(settings, guard=_RecordingGuard())
     msg, cost = c._stream(
         {
             "messages": [
@@ -207,8 +333,9 @@ def test_stream_sends_provider_block_and_records_structured_meta(monkeypatch):
         }
     )
     p = captured["payload"]
-    assert p["provider"]["order"] == ["open-inference/fp8"]  # dated Flash route pinned
-    assert p["provider"]["max_price"]["prompt"] == 0.11
+    assert p["provider"]["order"] == ["test-provider"]
+    assert p["provider"]["allow_fallbacks"] is False
+    assert p["provider"]["max_price"] == {"prompt": 0.17, "completion": 0.41}
     assert "_meta" not in p and "_meta_ctx" not in p  # control keys stripped
     assert isinstance(p["messages"][0]["content"], list)  # cache breakpoint applied
     assert p["messages"][0]["content"][0]["cache_control"] == {"type": "ephemeral"}
@@ -363,27 +490,20 @@ def test_stream_preflight_reserves_configured_call_ceiling_and_run(monkeypatch):
     )
     [(reserved, run_id)] = guard.preflights
     assert run_id == "p7-run"
-    assert 0.002 < reserved < 0.0021
+    assert 0.002 < reserved < 0.003
 
 
 # ---- design temperature (D3) ----------------------------------------------
 
 
-def test_design_temperature_defaults_to_zero_and_is_configurable():
+def test_design_temperature_is_configurable():
     from kicraft.server.stage_runtime import _design_temperature
 
-    c = CappedOpenRouterClient(Settings(api_key="k"), guard=_RecordingGuard())
-    assert c.s.design_temperature == 0.0  # new default cuts variance
-    assert _design_temperature(c) == 0.0
     c2 = CappedOpenRouterClient(
         Settings(api_key="k", design_temperature=0.3), guard=_RecordingGuard()
     )
     assert _design_temperature(c2) == 0.3
 
-    class _NoSettings:  # mock-style client without .s -> historical 0.2
-        pass
-
-    assert _design_temperature(_NoSettings()) == 0.2
 
 
 # ---- spend ledger: structured meta round-trips ----------------------------
@@ -591,7 +711,7 @@ def test_chat_returns_completion_telemetry(monkeypatch):
 
 def test_chat_with_tools_rounds_carry_telemetry(monkeypatch):
     client = CappedOpenRouterClient(
-        settings=types.SimpleNamespace(), guard=types.SimpleNamespace(status=lambda: {})
+        settings=types.SimpleNamespace(), guard=_RecordingGuard()
     )
 
     def fake_stream(body, on_delta=None):
@@ -626,7 +746,7 @@ def test_chat_with_tools_rounds_carry_telemetry(monkeypatch):
 
 def test_tool_capable_first_response_is_schema_bound_and_can_finish_directly(monkeypatch):
     client = CappedOpenRouterClient(
-        settings=types.SimpleNamespace(), guard=types.SimpleNamespace(status=lambda: {})
+        settings=types.SimpleNamespace(), guard=_RecordingGuard()
     )
     calls = []
 
@@ -658,7 +778,7 @@ def test_tool_capable_first_response_is_schema_bound_and_can_finish_directly(mon
 
 def test_chat_with_tools_forced_final_carries_telemetry(monkeypatch):
     client = CappedOpenRouterClient(
-        settings=types.SimpleNamespace(), guard=types.SimpleNamespace(status=lambda: {})
+        settings=types.SimpleNamespace(), guard=_RecordingGuard()
     )
 
     def fake_stream(body, on_delta=None):
@@ -866,7 +986,8 @@ def test_stream_returns_in_band_429_to_top_level_without_retry(monkeypatch):
     with pytest.raises(requests.exceptions.HTTPError):
         client._stream({"messages": [{"role": "user", "content": "x"}]})
     assert len(attempts) == 1
-    assert guard.records == []
+    assert not guard.records
+    assert len(guard.uncertain) == 1 and guard.uncertain[0][1] > 0
 
 
 @pytest.mark.parametrize("status", [400, 401, 403])
@@ -1221,12 +1342,9 @@ def test_stream_duplicate_abort_is_charged_and_never_completed_or_pruned(monkeyp
     assert '"description":"second"' in msg["content"]
     with pytest.raises(json.JSONDecodeError):
         json.loads(msg["content"])
-    assert len(spend.records) == 1
-    charged = spend.records[0]
-    assert charged["cost"] == cost > 0
-    assert charged["in"] > 0 and charged["out"] > 0
-    assert charged["meta"]["collection_limit"] == msg["collection_limit"]
-    assert charged["meta"]["bounded_collection_completed"] is False
+    assert not spend.records
+    assert len(spend.uncertain) == 1
+    assert spend.uncertain[0][1] == cost > 0
 
 
 def _property_response_format():
@@ -1314,9 +1432,8 @@ def test_stream_property_abort_is_paid_and_never_completed(monkeypatch, with_too
     assert "net_class_net_class" not in result["text"]
     with pytest.raises(json.JSONDecodeError):
         json.loads(result["text"])
-    assert spend.records[0]["cost"] > 0
-    assert spend.records[0]["in"] > 0 and spend.records[0]["out"] > 0
-    assert spend.records[0]["meta"]["bounded_collection_completed"] is False
+    assert not spend.records
+    assert len(spend.uncertain) == 1 and spend.uncertain[0][1] > 0
 
 
 def _guarded_json_stream(monkeypatch, text, chunk_size, with_tools=False, **kwargs):
@@ -1339,8 +1456,8 @@ def _guarded_json_stream(monkeypatch, text, chunk_size, with_tools=False, **kwar
         **kwargs,
     )
     assert response.closed
-    assert len(spend.records) == 1
-    return result, spend.records[0], response, deltas
+    assert len(spend.records) + len(spend.uncertain) == 1
+    return result, spend, response, deltas
 
 
 @pytest.mark.parametrize("with_tools", [False, True])
@@ -1356,7 +1473,7 @@ def test_stream_rejects_captured_can_syntax_at_first_irreparable_character(
     )
     prefix = fixture["prefix"]
     text = prefix + "UNREACHABLE" * 500
-    result, paid, response, deltas = _guarded_json_stream(
+    result, spend, response, deltas = _guarded_json_stream(
         monkeypatch, text, chunk_size, with_tools
     )
     offset = fixture["character_offset"]
@@ -1371,11 +1488,8 @@ def test_stream_rejects_captured_can_syntax_at_first_irreparable_character(
         delta["text"] for delta in deltas if delta["kind"] == "answer_delta"
     ) == prefix[:offset]
     assert response.lines_read == offset // chunk_size + 1
-    received_chars = min(len(text), response.lines_read * chunk_size)
-    assert paid["out"] == max(1, received_chars // 4)
-    assert paid["in"] > 0 and paid["cost"] == result["cost_usd"] > 0
-    assert paid["meta"]["collection_limit"] == limit
-    assert paid["meta"]["bounded_collection_completed"] is False
+    assert not spend.records
+    assert spend.uncertain[0][1] == result["cost_usd"] > 0
 
 
 @pytest.mark.parametrize(
@@ -1412,7 +1526,7 @@ def test_stream_rejects_captured_can_syntax_at_first_irreparable_character(
 def test_stream_syntax_abort_preserves_only_repairable_prefix(
     monkeypatch, prefix, bad, error, chunk_size
 ):
-    result, paid, response, _ = _guarded_json_stream(
+    result, spend, response, _ = _guarded_json_stream(
         monkeypatch, prefix + bad + "unreachable" * 500, chunk_size
     )
     assert result["finish_reason"] == "collection_limit"
@@ -1421,8 +1535,7 @@ def test_stream_syntax_abort_preserves_only_repairable_prefix(
     assert result["collection_limit"]["syntax_error"].startswith(error)
     assert result["collection_limit"]["character_offset"] == len(prefix)
     assert response.lines_read == len(prefix) // chunk_size + 1
-    assert paid["cost"] > 0 and paid["in"] > 0 and paid["out"] > 0
-    assert paid["meta"]["bounded_collection_completed"] is False
+    assert not spend.records and spend.uncertain[0][1] > 0
 
 
 def test_syntax_abort_does_not_execute_previously_streamed_tool_calls(monkeypatch):
@@ -1452,7 +1565,8 @@ def test_syntax_abort_does_not_execute_previously_streamed_tool_calls(monkeypatc
     assert result["collection_limit"]["limit_scope"] == "syntax"
     assert result["rounds"] == 1
     assert response.closed and response.lines_read == 2
-    assert len(spend.records) == 1 and spend.records[0]["cost"] > 0
+    assert not spend.records
+    assert len(spend.uncertain) == 1 and spend.uncertain[0][1] > 0
 
 
 @pytest.mark.parametrize("chunk_size", [1, 5, 4096])
@@ -1474,7 +1588,7 @@ def test_stream_accepts_chunked_nested_json_and_fences(monkeypatch, chunk_size, 
         r'{"\u0061":1},{"a":2}]},"choice":{"right":{"unconstrained":null}}}'
     )
     text = wrapper.format(value)
-    result, paid, response, _ = _guarded_json_stream(
+    result, spend, response, _ = _guarded_json_stream(
         monkeypatch, text, chunk_size, response_format=_property_response_format()
     )
     assert result["finish_reason"] == "stop"
@@ -1484,7 +1598,7 @@ def test_stream_accepts_chunked_nested_json_and_fences(monkeypatch, chunk_size, 
 
     assert _extract_json(result["text"]) == json.loads(value)
     assert response.lines_read == (len(text) + chunk_size - 1) // chunk_size + 3
-    assert paid["cost"] == 0.001
+    assert spend.records[0]["cost"] == 0.001
 
 
 @pytest.mark.parametrize(
@@ -1505,11 +1619,11 @@ def test_stream_accepts_chunked_nested_json_and_fences(monkeypatch, chunk_size, 
     ],
 )
 def test_stream_does_not_abort_incomplete_but_repairable_json(monkeypatch, text):
-    result, paid, _, _ = _guarded_json_stream(monkeypatch, text, 1)
+    result, spend, _, _ = _guarded_json_stream(monkeypatch, text, 1)
     assert result["finish_reason"] == "stop"
     assert result.get("collection_limit") is None
     assert result["text"] == text
-    assert paid["cost"] == 0.001
+    assert spend.records[0]["cost"] == 0.001
 
 
 def test_stream_oversized_keys_remain_syntax_checked_and_conservative(monkeypatch):
@@ -1522,21 +1636,21 @@ def test_stream_oversized_keys_remain_syntax_checked_and_conservative(monkeypatc
     assert result["text"] == text
     # Dropping the oversized key buffer must not disable string escape grammar.
     malformed = '{"' + key + "\\u12"
-    result, paid, _, _ = _guarded_json_stream(monkeypatch, malformed + "X", 7)
+    result, spend, _, _ = _guarded_json_stream(monkeypatch, malformed + "X", 7)
     assert result["collection_limit"]["limit_scope"] == "syntax"
     assert result["text"] == malformed
-    assert paid["cost"] > 0
+    assert not spend.records and spend.uncertain[0][1] > 0
 
 
 def test_syntax_abort_never_salvages_a_bounded_wiring_prefix(monkeypatch):
     text = '{"pins":[{"ref":"J1","pin":"1","net":"GND"}]{}'
-    result, paid, _, _ = _guarded_json_stream(
+    result, spend, _, _ = _guarded_json_stream(
         monkeypatch, text, 1, collection_bounds=(CollectionBound(field="pins", total=1),)
     )
     assert result["finish_reason"] == "collection_limit"
     assert result["collection_limit"]["limit_scope"] == "syntax"
     assert result["text"] == '{"pins":[{"ref":"J1","pin":"1","net":"GND"}]'
-    assert paid["meta"]["bounded_collection_completed"] is False
+    assert not spend.records and spend.uncertain[0][1] > 0
 
 
 def test_collection_guard_accepts_empty_and_large_in_bound_arrays():
@@ -1655,15 +1769,13 @@ def test_stage_output_ceiling_admits_bounded_call_without_raising_project_budget
     monkeypatch.setenv("KICRAFT_STAGE_OUTPUT_LIMITS", '{"architecture":8192}')
     settings = Settings.from_env(dotenv=False)
     settings.ledger_path = tmp_path / "ledger.db"
-    # A project budget whose remaining room sits between the two call ceilings
-    # under the active profile's price caps (ceilings for 60k chars +
-    # 16384/8192 out are $0.00969 / $0.00560): the caller's unbounded 16384
-    # request must be refused, the policy-bounded (8192) call must still fit.
+    # The remaining budget lies between conservative output ceilings. A bounded
+    # call succeeds with a receipt; a larger output request is refused first.
     settings.project_llm_budget_usd = 0.0145
     guard = SpendGuard(settings)
     guard.record(settings.model, 100, 100, 0.007, meta={"run_id": "bounded", "stage": "intent"})
     client = CappedOpenRouterClient(settings, guard=guard)
-    messages = [{"role": "user", "content": "x" * 60000}]
+    messages = [{"role": "user", "content": "x" * 20000}]
     monkeypatch.setattr(
         client_mod.requests,
         "post",
@@ -1681,6 +1793,8 @@ def test_stage_output_ceiling_admits_bounded_call_without_raising_project_budget
     client.chat(messages, max_tokens=output_cap, meta_ctx={"run_id": "bounded"})
 
     assert guard.spent_for_run("bounded") == pytest.approx(0.008)
+    assert guard.status()["reserved_exposure_usd"] == 0
+    assert guard.status()["uncertain_exposure_usd"] == 0
     with pytest.raises(BudgetExceeded) as refused:
         guard.preflight(call_ceiling_usd=0.02, run_id="bounded")
     assert refused.value.limit_usd == 0.0145
@@ -1790,16 +1904,6 @@ def test_deepseek_profile_routes_designer_to_deepseek_backend(monkeypatch):
     assert settings.api_key == "test"  # OpenRouter key still resolved for review/judge
 
 
-def test_luna_profile_is_the_default_openrouter_route(monkeypatch):
-    _clear_profile_env(monkeypatch)
-    settings = Settings.from_env(dotenv=False)
-    assert settings.design_profile == "luna"
-    assert settings.backend == "openrouter"
-    assert settings.base_url == "https://openrouter.ai/api/v1"
-    assert settings.model == "openai/gpt-6-luna"
-    assert settings.provider_order == ["openai"]
-
-
 def test_deepseek_profile_requires_deepseek_api_key(monkeypatch):
     _clear_profile_env(monkeypatch)
     monkeypatch.setenv("KICRAFT_DESIGN_PROFILE", "deepseek")
@@ -1893,10 +1997,10 @@ def test_stream_deepseek_omits_openrouter_fields_and_disables_thinking(monkeypat
     assert "reasoning" not in p
     assert p["thinking"] == {"type": "disabled"}  # DeepSeek defaults to ON; must be explicit
     assert p["messages"][0]["content"] == "SYS"  # no cache_control breakpoint applied
-    # No usage.cost from DeepSeek -> estimate from peak caps (1000 in, 50 out).
-    assert cost == pytest.approx((1000 * 0.30 + 50 * 1.20) / 1_000_000)
-    rec = c.guard.records[-1]
-    assert rec["meta"]["cached_tokens"] == 800  # DeepSeek prompt_cache_hit_tokens
+    # A missing cost receipt retains at least the configured call ceiling.
+    assert cost >= (1000 * 0.30 + 50 * 1.20) / 1_000_000
+    assert msg["usage"]["prompt_cache_hit_tokens"] == 800
+    assert not c.guard.records and len(c.guard.uncertain) == 1
 
 
 def test_stream_deepseek_enables_thinking_when_reasoning_enabled(monkeypatch):

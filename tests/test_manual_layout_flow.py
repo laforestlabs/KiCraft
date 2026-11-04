@@ -85,3 +85,60 @@ def test_load_parent_local_components(tmp_path: Path):
     (snap_dir / "parent_pipeline.json").write_text(
         json.dumps({"state": {"entries": []}}), encoding="utf-8")
     assert load_parent_local_components(exp) == []
+
+
+def test_seeded_grid_places_offset_leaf_bounds_inside_outline(tmp_path: Path):
+    from kicraft.layout_editor.leaves import LeafInfo
+    from kicraft.layout_editor.runner import load_initial_layout
+
+    leaves = [
+        LeafInfo(
+            instance_path="/offset", sheet_name="offset", width_mm=10, height_mm=10,
+            artifact_dir=tmp_path, edge_min_x=100, edge_min_y=200,
+            edge_max_x=110, edge_max_y=210,
+        ),
+        LeafInfo(
+            instance_path="/wide", sheet_name="wide", width_mm=10, height_mm=10,
+            artifact_dir=tmp_path, edge_min_x=-8, edge_min_y=-5,
+            edge_max_x=12, edge_max_y=7,
+        ),
+    ]
+    layout = load_initial_layout(tmp_path, leaves)
+    boxes = []
+    for leaf, placement in zip(leaves, layout["placements"]):
+        origin = placement["origin"]
+        box = (
+            origin["x"] + leaf.edge_min_x, origin["y"] + leaf.edge_min_y,
+            origin["x"] + leaf.edge_max_x, origin["y"] + leaf.edge_max_y,
+        )
+        outline = layout["board_outline"]
+        assert outline["min"]["x"] <= box[0] < box[2] <= outline["max"]["x"]
+        assert outline["min"]["y"] <= box[1] < box[3] <= outline["max"]["y"]
+        boxes.append(box)
+    assert boxes[0][2] < boxes[1][0]
+
+
+def test_old_canvas_extent_version_is_not_reused(tmp_path: Path):
+    import os
+
+    from kicraft.layout_editor.render import RENDERER_VERSION, _read_sidecar
+
+    pcb = tmp_path / "leaf_routed.kicad_pcb"
+    png = tmp_path / "leaf_canvas.png"
+    sidecar = tmp_path / "leaf_canvas.png.extent.json"
+    pcb.write_text("(kicad_pcb)", encoding="utf-8")
+    png.write_bytes(b"cached")
+    payload = {
+        "renderer_version": 4, "x_mm": 10, "y_mm": 10,
+        "width_mm": 3, "height_mm": 4,
+    }
+    sidecar.write_text(json.dumps(payload), encoding="utf-8")
+    os.utime(pcb, (1, 1))
+    os.utime(png, (2, 2))
+    os.utime(sidecar, (2, 2))
+    assert _read_sidecar(png, pcb) is None
+
+    payload.update(renderer_version=RENDERER_VERSION, x_mm=5, y_mm=5,
+                   width_mm=10, height_mm=10)
+    sidecar.write_text(json.dumps(payload), encoding="utf-8")
+    assert _read_sidecar(png, pcb) == (5, 5, 10, 10)

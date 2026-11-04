@@ -10,6 +10,24 @@ from __future__ import annotations
 from kicraft.server import web
 
 
+
+def test_china_catalogue_price_does_not_replace_jlc_stock(monkeypatch):
+    import io
+    import json
+
+    response = {"result": {
+        "lcsc": {"number": "C123", "price": 1, "stock": 0},
+        "szlcsc": {"number": "C123", "price": 2, "stock": 500},
+    }}
+    monkeypatch.setattr(web.urllib.request, "urlopen",
+                        lambda *args, **kwargs: io.BytesIO(json.dumps(response).encode()))
+    price = web._easyeda_lcsc_price("C123")
+    assert price["unit_price"] == 2
+    assert price["stock"] == 0
+    parts = web._inspector_spec("bom", _SJ, {}, None, [],
+                                prices={"id:C2687116": price})
+    table = next(section for section in parts if section["title"] == "Parts")
+    assert table["rows"][1][3] == "0 / —"
 # ------------------------------------------------------ _resolve_part / _price_key
 
 def test_resolve_part_embedded_id_manifest_mpn_kw_and_none():

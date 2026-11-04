@@ -1,15 +1,11 @@
-"""Login/auth rate-limiting.
-
-RED-UNTIL-FIXED: there is currently NO per-account or per-IP throttle on
-authenticate()/login, so credential stuffing is unmetered. This test ENCODES that
-gap (it documents today's behavior) and is the regression that will flip to
-asserting the new limiter once hardening item F lands. Marked xfail so CI is green
-while the gap is tracked, and will fail loudly (xpass) the moment a limiter exists,
-prompting this test to be rewritten to assert it.
-"""
+"""Login rate limits at the account and trusted-client boundaries."""
 from __future__ import annotations
 
-import pytest
+import datetime as dt
+import threading
+from concurrent.futures import ThreadPoolExecutor
+
+from kicraft.server import accounts
 
 
 def test_wrong_password_returns_none(store):
@@ -18,16 +14,50 @@ def test_wrong_password_returns_none(store):
     assert store.authenticate("user@x.io", "correct-horse") is not None
 
 
-@pytest.mark.xfail(reason="no login rate-limit yet (hardening item F); flips to a "
-                          "real assertion once a limiter is added", strict=True)
-def test_repeated_failures_are_throttled(store):
-    """Hammer authenticate() with many wrong passwords; assert a lockout/throttle
-    kicks in. EXPECTED TO FAIL today (no limiter) -> the tracked finding."""
+def test_account_lock_expires_and_success_resets_failures(store, monkeypatch):
+    now = dt.datetime(2030, 1, 1, tzinfo=dt.timezone.utc)
+    monkeypatch.setattr(accounts, "_utcnow", lambda: now)
     store.create_user("victim@x.io", "secret")
-    attempts = 0
-    for _ in range(50):
-        store.authenticate("victim@x.io", "guess")
-        attempts += 1
-    # A limiter would either raise, return a sentinel, or expose a lock counter.
-    # None of these exist yet, so this assertion fails (xfail) until F is built.
-    assert hasattr(store, "is_rate_limited") and store.is_rate_limited("victim@x.io")
+    for _ in range(accounts._LOGIN_ACCOUNT_LIMIT):
+        assert store.authenticate("victim@x.io", "guess", client_ip="192.0.2.1") is None
+    assert store.authenticate("victim@x.io", "secret", client_ip="192.0.2.1") is None
+    now += dt.timedelta(seconds=accounts._LOGIN_WINDOW_SECONDS + 1)
+    assert store.authenticate("victim@x.io", "secret", client_ip="192.0.2.1") is not None
+    assert store.authenticate("victim@x.io", "wrong", client_ip="192.0.2.1") is None
+    assert store.authenticate("victim@x.io", "secret", client_ip="192.0.2.1") is not None
+
+
+def test_concurrent_attempts_cannot_bypass_account_limit(store, monkeypatch):
+    store.create_user("victim@x.io", "secret")
+    start = threading.Barrier(10)
+    original = accounts.verify_password
+    calls = []
+    lock = threading.Lock()
+
+    def counted_verify(password, stored):
+        with lock:
+            calls.append(1)
+        return original(password, stored)
+
+    monkeypatch.setattr(accounts, "verify_password", counted_verify)
+
+    def fail(_):
+        start.wait(timeout=5)
+        return store.authenticate("victim@x.io", "wrong")
+
+    with ThreadPoolExecutor(max_workers=10) as pool:
+        assert all(result is None for result in pool.map(fail, range(10)))
+    assert len(calls) == accounts._LOGIN_ACCOUNT_LIMIT
+    assert store.authenticate("victim@x.io", "secret") is None
+
+
+def test_ip_limit_covers_many_account_names_and_expires(store, monkeypatch):
+    now = dt.datetime(2030, 1, 1, tzinfo=dt.timezone.utc)
+    monkeypatch.setattr(accounts, "_utcnow", lambda: now)
+    store.create_user("real@x.io", "secret")
+    for i in range(accounts._LOGIN_IP_LIMIT):
+        assert store.authenticate(f"missing{i}@x.io", "wrong", client_ip="192.0.2.2") is None
+    assert store.authenticate("real@x.io", "secret", client_ip="192.0.2.2") is None
+    assert store.authenticate("real@x.io", "secret", client_ip="192.0.2.3") is not None
+    now += dt.timedelta(seconds=accounts._LOGIN_WINDOW_SECONDS + 1)
+    assert store.authenticate("real@x.io", "secret", client_ip="192.0.2.2") is not None

@@ -287,7 +287,7 @@ def _route_parent_board(
 
         measured = measure_courtyard_overlaps(str(routed_pcb))
         _, gross = classify_courtyard_overlaps(
-            measured,
+            measured or [],
             max_penetration_mm=float(
                 cfg.get("courtyard_overlap_warn_penetration_mm", 0.5)
             ),
@@ -301,7 +301,7 @@ def _route_parent_board(
             )
             if reason not in reasons:
                 reasons.append(reason)
-            validation["courtyard_overlaps"] = [o.to_dict() for o in measured]
+            validation["courtyard_overlaps"] = [o.to_dict() for o in (measured or [])]
 
     return {
         "failed": False,
@@ -446,6 +446,13 @@ def _attempt_illegal_geometry_repair(
         re_drc = revalidation.get("drc") or {}
         unconnected_after = int(re_drc.get("unconnected", 0) or 0)
         shorts_after = int(re_drc.get("shorts", 0) or 0)
+        evidence_failed = (
+            re_drc.get("timed_out")
+            or re_drc.get("missing_cli")
+            or (re_drc.get("ran") and re_drc.get("returncode", 0) != 0)
+            or revalidation.get("python_exception")
+            or "empty_board" in revalidation.get("rejection_reasons", ())
+        )
         geometry_clean = not (
             revalidation.get("malformed_board_geometry")
             or revalidation.get("obviously_illegal_routed_geometry")
@@ -453,6 +460,7 @@ def _attempt_illegal_geometry_repair(
         record["unconnected"] = [unconnected_before, unconnected_after]
         record["shorts"] = [shorts_before, shorts_after]
         if (geometry_clean
+                and not evidence_failed
                 and shorts_after <= shorts_before
                 and unconnected_after <= unconnected_before):
             print(

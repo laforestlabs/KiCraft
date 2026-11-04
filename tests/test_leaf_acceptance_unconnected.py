@@ -122,3 +122,42 @@ def test_config_from_dict_maps_keys():
 
     cfg_none = acceptance_config_from_dict({"leaf_acceptance_max_unconnected": None})
     assert cfg_none.max_unconnected is None
+
+
+def test_partially_unidentified_open_is_not_waived_with_ground():
+    from kicraft.autoplacer.routing_board import _parse_unconnected_report
+
+    report = (
+        "[unconnected_items]: Missing connection\n"
+        "    @(1 mm, 1 mm): Pad 1 [GND] of J1\n"
+        "[unconnected_items]: Missing connection\n"
+        "    @(2 mm, 2 mm): Pad 1 of J2\n"
+    )
+    nets, unnamed = _parse_unconnected_report(report)
+    val = _validation(2, nets)
+    val["drc"]["unconnected_unnamed"] = unnamed
+    result = evaluate_leaf_acceptance(val, {}, LeafAcceptanceConfig(max_unconnected=0))
+    assert unnamed == 1
+    assert not result.accepted
+    assert result.gate_results["no_unconnected"]["unconnected_unnamed"] == 1
+
+
+def test_multiple_ground_opens_remain_waived():
+    from kicraft.autoplacer.routing_board import _parse_unconnected_report
+
+    block = "[unconnected_items]: Missing connection\n    @(1 mm, 1 mm): Pad 1 [Net 3](GND) of J1\n"
+    nets, unnamed = _parse_unconnected_report(block * 2)
+    val = _validation(2, nets)
+    val["drc"]["unconnected_unnamed"] = unnamed
+    assert nets == ["GND"]
+    assert unnamed == 0
+    assert evaluate_leaf_acceptance(val, {}, LeafAcceptanceConfig(max_unconnected=0)).accepted
+
+
+def test_leaf_rejects_unavailable_validation_evidence():
+    for reason in ("drc_timeout", "drc_unavailable", "drc_failed", "empty_board"):
+        val = _validation(0, [])
+        val["rejection_reasons"] = [reason]
+        result = evaluate_leaf_acceptance(val, {})
+        assert not result.accepted
+        assert reason in result.gate_results["validation_evidence"]["failures"]

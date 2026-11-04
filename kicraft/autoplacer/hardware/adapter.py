@@ -111,7 +111,8 @@ def _atomic_save_board(
     time and cause phantom clearance violations.
     """
     import shutil
-    board.Save(output_path)
+    if board.Save(output_path) is False:
+        raise RuntimeError(f"pcbnew failed to save board: {output_path}")
     if source_pro_path and os.path.exists(source_pro_path):
         sibling_pro = os.path.splitext(output_path)[0] + ".kicad_pro"
         if os.path.abspath(source_pro_path) != os.path.abspath(sibling_pro):

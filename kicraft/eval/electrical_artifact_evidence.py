@@ -2879,12 +2879,6 @@ def _functional_facts(parts, names, pad_nets, state, contract: dict[str, Any] | 
             record = _record(pot); rmax = 10_000.0 if record and record.identity == "3296w-1-103lf" else None
             if c and rmax:
                 numeric["cutoff_hz"] = 1.0 / (2 * math.pi * rmax * c)
-    # R-2R must contain at least 8 input header paths and both R/R2 values; opamp follower requires OUT tied to -IN.
-    resistors = [(p, _resistance_ohms(str(p.get("value") or ""))) for p in parts if _is_kind(p, "resistor")]
-    vals = [v for _, v in resistors if v]
-    if len(vals) >= 16 and any(abs(a * 2 - b) / b < .03 for a in vals for b in vals if b):
-        logic = sum(1 for c in connectors for _, net in _all_pads(str(c["ref"]), pad_nets) if not _is_ground(net) and not _is_rail(net))
-        if logic >= 8: paths["r2r_ladder"] = True; counts["logic_input"] = min(logic, 8)
     opamps = [
         p for p in parts
         if any(
@@ -2892,7 +2886,6 @@ def _functional_facts(parts, names, pad_nets, state, contract: dict[str, Any] | 
             for feature in _physical_features(p)
         )
     ]
-    if paths.get("r2r_ladder") and any(_one_pin(str(p["ref"]), names, pad_nets, r"^(OUT|OUTPUT)$") and _one_pin(str(p["ref"]), names, pad_nets, r"^(IN-|INV|-)IN$") and _one_pin(str(p["ref"]), names, pad_nets, r"^(OUT|OUTPUT)$")[1] == _one_pin(str(p["ref"]), names, pad_nets, r"^(IN-|INV|-)IN$")[1] for p in opamps): paths["analog_output_buffer"] = True
     # MAX31855: dedicated T+/T- plus CS/SCK/SO header evidence and actual supply/ground pins.
     for chip in _device(parts, "max31855"):
         tc = _pins_for(str(chip["ref"]), names, pad_nets, r"^(T\+|T-|TPLUS|TMINUS)$")
@@ -3641,6 +3634,50 @@ def extract_electrical_facts(rundir: Path, state: dict, board: object, contract:
         functional["electrical_diagnostics"].append(
             f"required terminal reconciliation unavailable: {type(exc).__name__}: {exc}"
         )
+    # The native lowerer witness proves the whole R-2R topology, not merely a
+    # population of R/2R values. Reconciliation above binds that canonical BOM
+    # graph to the delivered pads before the witness can become board evidence.
+    if bom is not None and connections_complete:
+        try:
+            from kicraft.design.models import Architecture
+            from kicraft.design.synthesis.validation import _canonical_lowerer_refs
+
+            architecture = Architecture.model_validate(state.get("architecture"))
+            ladders = [
+                requirement for requirement in architecture.requirements
+                if len(refs := _canonical_lowerer_refs(
+                    requirement, bom, component_class="resistor-network"
+                )) >= 16
+                and all(
+                    part.resolution_id == "r2r-ladder@1"
+                    for part in bom.parts if part.ref in refs
+                )
+            ]
+            if ladders:
+                functional["net_paths"]["r2r_ladder"] = True
+                connector_nets = {
+                    net for connector in _connector(parts)
+                    for _, net in _all_pads(str(connector["ref"]), pad_nets)
+                }
+                if any(
+                    len(bits := {requirement.ports.get(f"bit{i}") for i in range(8)}) == 8
+                    and None not in bits and bits <= connector_nets
+                    for requirement in ladders
+                ):
+                    functional["channel_counts"]["logic_input"] = 8
+                for part in parts:
+                    if not any(
+                        feature == "op-amp" or "operational-amplifier" in feature
+                        for feature in _physical_features(part)
+                    ):
+                        continue
+                    output = _one_pin(str(part["ref"]), names, pad_nets, r"^(OUT|OUTPUT)$")
+                    inverted = _one_pin(str(part["ref"]), names, pad_nets, r"^(IN-|INV|-)IN$")
+                    if output and inverted and output[1] == inverted[1]:
+                        functional["net_paths"]["analog_output_buffer"] = True
+                        break
+        except (TypeError, ValueError, AttributeError):
+            pass
     # Programming is an established BOM semantic check, but its BOM-only result
     # cannot outlive a missing, netless, or substituted delivered endpoint.
     try:

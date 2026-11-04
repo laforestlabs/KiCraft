@@ -131,7 +131,8 @@ include = ["kicraft*"]
 [tool.setuptools.package-data]
 "kicraft.eval" = ["rubric.yaml", "corpora/*/*.json"]
 "kicraft.layout_editor" = ["static/*.js"]
-"kicraft.parts_library" = ["core_blocks.json"]
+"kicraft.server" = ["static/*"]
+"kicraft.parts_library" = ["core_blocks.json", "*/manifest.json", "*/*.kicad_sym", "*/*.pretty/*.kicad_mod", "*/3d/*.[sS][tT][eE][pP]", "*/3d/*.[sS][tT][pP]", "*/3d/*.[wW][rR][lL]", "*/3d/LICENSE.txt"]
 
 [tool.ruff]
 line-length = 100

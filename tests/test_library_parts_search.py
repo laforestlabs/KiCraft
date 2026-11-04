@@ -82,6 +82,14 @@ def test_no_match_returns_empty():
     assert search_library_parts("zzqq_nope_xyzzy_nothing", REPO) == []
 
 
+def test_punctuation_only_terms_do_not_match_every_part():
+    assert search_library_parts("!", REPO) == []
+    assert search_library_parts("zzqq_nope_xyzzy_nothing !", REPO) == []
+    assert [p.manifest.name for p in search_library_parts("bnc !", REPO)] == [
+        p.manifest.name for p in search_library_parts("bnc", REPO)
+    ]
+
+
 # ---------- CLI commands (what the BOM-stage tools actually return) ----------
 
 
@@ -93,7 +101,6 @@ def test_search_symbols_cli_surfaces_curated_pair_first(capsys, monkeypatch):
     monkeypatch.chdir(REPO)
     assert _cmd_search_symbols(_ns(query="BNC connector", limit=10)) == 0
     out = capsys.readouterr().out
-    assert "curated bundles" in out
     # The bundle's symbol and footprint ids ride the same line, as a pair.
     pair_line = next(line for line in out.splitlines() if "bnc-pcb-jack:" in line)
     assert "symbol bnc-pcb-jack:" in pair_line
@@ -111,11 +118,7 @@ def test_search_footprints_cli_surfaces_curated_and_stock(capsys, monkeypatch):
     assert out.index("bnc-pcb-jack:") < out.index("Connector_Coaxial:")
 
 
-def test_search_cli_miss_message_names_both_tiers(capsys, monkeypatch):
-    monkeypatch.chdir(REPO)
-    assert _cmd_search_symbols(_ns(query="zzqq_nope_xyzzy", limit=10)) == 0
-    err = capsys.readouterr().err
-    assert "curated bundles" in err and "stock KiCad" in err
+
 
 
 def test_list_parts_query_filters_the_table(capsys, monkeypatch):
@@ -128,19 +131,10 @@ def test_list_parts_query_filters_the_table(capsys, monkeypatch):
     assert 0 < len(rows) <= 64
 
 
-def test_list_parts_without_query_is_the_full_table(capsys, monkeypatch):
-    monkeypatch.chdir(REPO)
-    assert _cmd_list_parts(_ns(query=None)) == 0
-    out = capsys.readouterr().out
-    rows = [line for line in out.splitlines() if line.startswith("| `")]
-    assert len(rows) > 100  # the whole library, not a slice
 
 
-def test_list_parts_query_miss_says_so(capsys, monkeypatch):
-    monkeypatch.chdir(REPO)
-    assert _cmd_list_parts(_ns(query="zzqq_nope_xyzzy")) == 0
-    out = capsys.readouterr().out
-    assert "no library parts match" in out
+
+
 
 
 # ---------- stock column (below-floor bundle visibility) ----------

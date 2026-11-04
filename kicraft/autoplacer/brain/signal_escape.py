@@ -185,6 +185,8 @@ def fine_pitch_signal_escape_specs(
     fine-pitch geometry this reservation addresses.  No spec is an exemption:
     the shared breakout stamper drops one unless its complete path, tip via,
     drilled-hole spacing, rule areas and already-reserved copper all clear.
+    Each stub uses the source pad's copper face, including bottom-side pads;
+    a pad with no outer copper layer has no supported escape.
     """
     cfg = cfg or {}
     via_size_mm, via_drill_mm = fanout_via(cfg)
@@ -192,14 +194,23 @@ def fine_pitch_signal_escape_specs(
     width_mm = floors["track_mm"]
     specs: list[BreakoutSpec] = []
     for footprint in sorted(board.GetFootprints(), key=lambda fp: fp.GetReferenceAsString()):
-        candidates = [
-            pad
-            for pad in footprint.Pads()
-            if _is_fine_pitch_signal_pad(footprint, pad)
-        ]
+        candidates = []
+        pad_layers = {}
+        for pad in footprint.Pads():
+            if not _is_fine_pitch_signal_pad(footprint, pad):
+                continue
+            if pad.IsOnLayer(pcbnew.F_Cu):
+                layer, layer_name = pcbnew.F_Cu, "F.Cu"
+            elif pad.IsOnLayer(pcbnew.B_Cu):
+                layer, layer_name = pcbnew.B_Cu, "B.Cu"
+            else:
+                continue
+            candidates.append(pad)
+            pad_layers[_pad_identity(pad)] = (layer, layer_name)
         clearance_mm = max(
             floors["clearance_mm"],
-            *(_own_clearance_mm(pad, pcbnew.F_Cu, floors["clearance_mm"]) for pad in candidates),
+            *(_own_clearance_mm(pad, pad_layers[_pad_identity(pad)][0], floors["clearance_mm"])
+              for pad in candidates),
         ) if candidates else floors["clearance_mm"]
         for pad, waypoints in _staggered_fanout_paths(
             footprint, candidates, via_size_mm=via_size_mm,
@@ -213,6 +224,7 @@ def fine_pitch_signal_escape_specs(
                     near_xy=(pcbnew.ToMM(pos.x), pcbnew.ToMM(pos.y)),
                     waypoints=waypoints,
                     width_mm=width_mm,
+                    layer=pad_layers[_pad_identity(pad)][1],
                     via_at_end=True,
                     strict_same_footprint=True,
                     via_size_mm=via_size_mm,

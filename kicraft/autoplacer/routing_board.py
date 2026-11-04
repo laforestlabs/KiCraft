@@ -232,6 +232,45 @@ def _classify_clearance_violations(
     return {"waived": waived, "genuine": genuine}
 
 
+def _classify_copper_edge_violations(
+    report_text: str, ignorable_refs: set[str]
+) -> dict[str, int]:
+    """Waive only individual pad-to-edge blocks on explicitly allowed parts."""
+    waived = genuine = 0
+    items: list[str] | None = None
+
+    def close_block() -> None:
+        nonlocal waived, genuine, items
+        if items is None:
+            return
+        refs = set()
+        safe = bool(items)
+        for item in items:
+            match = re.search(r"\bof\s+(\S+)", item)
+            if match and re.search(r"\bpad\b", item, re.I):
+                refs.add(match.group(1))
+            elif match:
+                safe = False
+            elif not re.search(r"\bboard edge\b|\bEdge\.Cuts\b", item, re.I):
+                safe = False
+        if safe and refs and refs <= ignorable_refs:
+            waived += 1
+        else:
+            genuine += 1
+        items = None
+
+    for line in report_text.splitlines():
+        header = re.match(r"\[([^\]]+)\]", line)
+        if header:
+            close_block()
+            if header.group(1) == "copper_edge_clearance":
+                items = []
+        elif items is not None and line.startswith((" ", "\t")) and "@(" in line:
+            items.append(line)
+    close_block()
+    return {"waived": waived, "genuine": genuine}
+
+
 def count_board_tracks(kicad_pcb_path: str) -> dict[str, Any]:
     """Count traces, vias, length, and the placed footprints from a board.
 
@@ -466,24 +505,37 @@ def parse_unconnected_nets(report_text: str) -> list[str]:
     Returns the de-duplicated nets (order preserved) so callers can tell a
     poured power/ground net (closes on zone fill) from a real signal-net miss.
     """
+    return _parse_unconnected_report(report_text)[0]
+
+
+def _parse_unconnected_report(report_text: str) -> tuple[list[str], int]:
+    """Return named nets and the number of open blocks with no identifiable net."""
     nets: list[str] = []
     seen: set[str] = set()
     in_block = False
+    unnamed = 0
+    block_named = False
     for line in report_text.splitlines():
         header = re.match(r"^\[(\w+)\]:", line)
         if header:
+            if in_block and not block_named:
+                unnamed += 1
             in_block = header.group(1) == "unconnected_items"
+            block_named = False
             continue
         if not in_block or "@(" not in line:
             continue
-        for net in re.findall(r"\[([^\]]+)\]", line):
-            # Guard against any "[Net 3]"-style token that is not a net name.
-            if re.match(r"(?i)^net\s+\d+$", net):
+        for formatted, bare in re.findall(r"\[Net\s+\d+\]\(([^)]+)\)|\[([^\]]+)\]", line):
+            net = (formatted or bare).strip()
+            if re.match(r"(?i)^net\s+\d+$", net) or net.lower() in {"no net", "<no net>"}:
                 continue
+            block_named = True
             if net not in seen:
                 seen.add(net)
                 nets.append(net)
-    return nets
+    if in_block and not block_named:
+        unnamed += 1
+    return nets, unnamed
 
 
 def run_kicad_cli_drc(kicad_pcb_path: str, timeout_s: int = 30) -> dict[str, Any]:
@@ -492,6 +544,7 @@ def run_kicad_cli_drc(kicad_pcb_path: str, timeout_s: int = 30) -> dict[str, Any
         "shorts": 0,
         "unconnected": 0,
         "unconnected_nets": [],
+        "unconnected_unnamed": 0,
         "clearance": 0,
         "copper_edge_clearance": 0,
         "courtyard": 0,
@@ -532,7 +585,7 @@ def run_kicad_cli_drc(kicad_pcb_path: str, timeout_s: int = 30) -> dict[str, Any
         else:
             report = ""
         counts["report_text"] = report
-        counts["unconnected_nets"] = parse_unconnected_nets(report)
+        counts["unconnected_nets"], counts["unconnected_unnamed"] = _parse_unconnected_report(report)
 
         current: dict[str, Any] | None = None
         for line in report.splitlines():
@@ -691,11 +744,13 @@ def validate_routed_board(
     # An accepted board MUST contain placed components. A board with zero
     # footprints is empty (everything dropped) -- it has no shorts and no
     # ratsnest, so it would otherwise sail through the gate looking "clean".
-    # ``footprints == -1`` means the count subprocess failed (unknown), which
-    # is handled by ``track_count_failed`` above, not treated as empty.
+    # The count helper reports subprocess failure as -1, not an exception.
     _fp = validation["track_summary"].get("footprints", -1)
     if _fp is None:
         _fp = -1
+    if "footprints" in validation["track_summary"] and int(_fp) < 0:
+        validation["python_exception"] = True
+        validation["rejection_reasons"].append("track_count_failed")
     if int(_fp) == 0:
         validation["rejection_reasons"].append("empty_board")
 
@@ -757,11 +812,11 @@ def validate_routed_board(
         )
         drc["copper_edge_footprint_refs"] = sorted(copper_edge_refs)
         ignorable_refs = set(cfg.get("ignorable_footprint_refs", [])) if cfg else set()
-        if copper_edge_refs and copper_edge_refs <= ignorable_refs:
-            validation["footprint_internal_copper_edge_count"] = int(
-                drc.get("copper_edge_clearance", 0)
-            )
-        else:
+        edge_verdict = _classify_copper_edge_violations(report_text, ignorable_refs)
+        if edge_verdict["waived"]:
+            validation["footprint_internal_copper_edge_count"] = edge_verdict["waived"]
+        if (edge_verdict["genuine"]
+                or edge_verdict["waived"] != int(drc.get("copper_edge_clearance", 0))):
             validation["obviously_illegal_routed_geometry"] = True
 
     # Connector-shield through-hole pads (USB-C shield tabs, etc.) are zero- or

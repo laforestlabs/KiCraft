@@ -25,6 +25,7 @@ import os
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 from ..autoplacer.brain.pins import pin_leaf
 from ..autoplacer.brain.subcircuit_artifacts import derive_leaf_key
@@ -80,24 +81,19 @@ def verify_content_hash_at_install(leaf: LoadedLeaf) -> None:
         )
 
 
-def _kicad_search_paths() -> list[Path]:
-    """Best-effort list of directories where stock KiCad libs may live.
+def _kicad_search_paths() -> tuple[list[Path], list[Path]]:
+    """Return existing symbol and footprint library directories."""
+    def paths(var: str, kind: str) -> list[Path]:
+        override = os.environ.get(var)
+        candidates = ([Path(override)] if override else []) + [
+            Path("/usr/share/kicad") / kind,
+            Path("/usr/local/share/kicad") / kind,
+        ]
+        return [path for path in candidates if path.is_dir()]
 
-    Honors ``$KICAD9_SYMBOL_DIR`` / ``$KICAD9_FOOTPRINT_DIR`` if set;
-    otherwise checks the standard system paths on Linux.
-    """
-    env_paths: list[Path] = []
-    for var in ("KICAD9_SYMBOL_DIR", "KICAD9_FOOTPRINT_DIR"):
-        val = os.environ.get(var)
-        if val:
-            env_paths.append(Path(val))
-    system_paths = [
-        Path("/usr/share/kicad/symbols"),
-        Path("/usr/share/kicad/footprints"),
-        Path("/usr/local/share/kicad/symbols"),
-        Path("/usr/local/share/kicad/footprints"),
-    ]
-    return [p for p in env_paths + system_paths if p.exists()]
+    return paths("KICAD9_SYMBOL_DIR", "symbols"), paths(
+        "KICAD9_FOOTPRINT_DIR", "footprints"
+    )
 
 
 def verify_dependencies(manifest: Manifest, *, strict: bool = True) -> list[str]:
@@ -107,8 +103,8 @@ def verify_dependencies(manifest: Manifest, *, strict: bool = True) -> list[str]
     check returns the list without raising even on a totally missing
     KiCad install (useful for tests).
     """
-    search_paths = _kicad_search_paths()
-    if not search_paths:
+    sym_dirs, fp_dirs = _kicad_search_paths()
+    if not sym_dirs and not fp_dirs:
         if strict:
             log.warning(
                 "no KiCad library paths found on system; skipping dep check"
@@ -116,8 +112,6 @@ def verify_dependencies(manifest: Manifest, *, strict: bool = True) -> list[str]
         return []
 
     missing: list[str] = []
-    sym_dirs = [p for p in search_paths if p.name == "symbols"]
-    fp_dirs = [p for p in search_paths if p.name == "footprints"]
 
     for lib in manifest.dependencies.kicad_symbol_libs:
         if not any((d / f"{lib}.kicad_sym").exists() for d in sym_dirs):
@@ -141,6 +135,7 @@ def install_leaf(
     project_refs: list[str],
     autoplacer_dict: dict[str, object],
     check_dependencies: bool = True,
+    on_schematic_written: Callable[[Path], None] | None = None,
 ) -> InstalledLeaf:
     """Install ``leaf`` into ``project_dir`` as a library-backed sheet.
 
@@ -151,6 +146,8 @@ def install_leaf(
 
     ``autoplacer_dict`` is mutated in place: the leaf's renumbered
     fragment is merged additively (see :func:`_merge_fragment`).
+    ``on_schematic_written`` records the generated sheet immediately after
+    writing, even if a later artifact install fails.
     """
     project_dir = Path(project_dir)
     verify_content_hash_at_install(leaf)
@@ -188,6 +185,8 @@ def install_leaf(
     sch_out.parent.mkdir(parents=True, exist_ok=True)
     assert_schematic_parses(new_sch, sch_out)
     sch_out.write_text(new_sch, encoding="utf-8")
+    if on_schematic_written is not None:
+        on_schematic_written(sch_out)
 
     # 4. Write renumbered triad to .experiments/subcircuits/<leaf_key>/
     artifact_dir = project_dir / ".experiments" / "subcircuits" / leaf_key

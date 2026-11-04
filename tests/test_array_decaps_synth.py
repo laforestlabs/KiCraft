@@ -1,16 +1,25 @@
 """Tests for the synthesis-stage per-LED-decap thinning rule."""
 from __future__ import annotations
 
+
+import pytest
 from kicraft.design.models import (
     BOM,
+    Architecture,
+    CircuitRequirement,
     ArraySpec,
     BomPart,
     NetConnection,
     PinEndpoint,
+    RecipeOwnershipManifest,
+    RecipeSelection,
+    Sheet,
 )
 from kicraft.design.synthesis.array_decaps import (
     drop_decap_only_arrays,
     normalize_array_decaps,
+    isolate_array_sheets,
+    isolate_opposite_edge_connectors,
 )
 
 
@@ -164,3 +173,93 @@ def test_single_array_is_noop() -> None:
     bom = _build_bom(n_leds=6, n_caps=6)  # only the LED array spec present
     assert drop_decap_only_arrays(bom) == []
     assert len(bom.arrays) == 1
+
+
+def test_power_resistor_is_not_a_decap_or_thinned() -> None:
+    bom = _build_bom(n_leds=4, n_caps=2)
+    bom.parts.append(BomPart(ref="R1", value="1k", symbol="Device:R",
+                             footprint="Resistor_SMD:R_0603_1608Metric",
+                             sheet="LED ARRAY"))
+    bom.connections[-2].endpoints.append(PinEndpoint(ref="R1", pin="1"))
+    bom.connections[-1].endpoints.append(PinEndpoint(ref="R1", pin="2"))
+    assert normalize_array_decaps(bom) == []
+    assert any(p.ref == "R1" for p in bom.parts)
+    assert sum(ep.ref == "R1" for c in bom.connections for ep in c.endpoints) == 2
+
+
+def test_distinct_and_sourced_caps_are_preserved() -> None:
+    bom = _build_bom(n_leds=4, n_caps=4)
+    bom.parts[-2].value = "100uF"
+    bom.parts[-1].mpn = "CL10A104KB8NNNC"
+    assert normalize_array_decaps(bom) == []
+    assert {p.ref for p in bom.parts if p.ref.startswith("C")} == {"C1", "C2", "C3", "C4"}
+
+
+def test_non_led_array_does_not_trigger_led_thinning() -> None:
+    bom = _build_bom(n_leds=4, n_caps=4)
+    for part in bom.parts:
+        if part.ref.startswith("D"):
+            part.symbol = "Device:R"
+    assert normalize_array_decaps(bom) == []
+    assert len(bom.parts) == 8
+
+
+def test_array_sheet_split_refuses_to_split_a_requirement() -> None:
+    bom = _build_bom(n_leds=4, n_caps=0)
+    bom.parts[0].lowering_requirement_id = "shared"
+    bom.parts.append(BomPart(
+        ref="J1", value="header", symbol="Connector:Conn_01x02",
+        footprint="Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical",
+        sheet="LED ARRAY", lowering_requirement_id="shared",
+    ))
+    arch = Architecture(sheets=[Sheet(name="LED ARRAY", stem="LED_ARRAY", function="test")],
+                        power_nets=[], inter_sheet_nets=[],
+                        requirements=[CircuitRequirement(
+                            id="shared", sheet="LED ARRAY", role="connector", family="pin-header")])
+    before_bom, before_arch = bom.model_dump(), arch.model_dump()
+    with pytest.raises(ValueError, match="cannot split requirement"):
+        isolate_array_sheets(bom, arch)
+    assert bom.model_dump() == before_bom
+    assert arch.model_dump() == before_arch
+
+
+def test_opposite_edge_split_moves_requirement_with_owned_connector() -> None:
+    parts = [
+        BomPart(ref=f"J{i}", value="header", symbol="Connector:Conn_01x02",
+                footprint="Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical",
+                sheet="MAIN", lowering_requirement_id="header" if i == 1 else None)
+        for i in (1, 2)
+    ]
+    bom = BOM(parts=parts, component_zones={"J1": {"edge": "top"}, "J2": {"edge": "bottom"}})
+    arch = Architecture(sheets=[Sheet(name="MAIN", stem="MAIN", function="test")],
+                        power_nets=[], inter_sheet_nets=[],
+                        requirements=[CircuitRequirement(
+                            id="header", sheet="MAIN", role="connector", family="pin-header")])
+    assert isolate_opposite_edge_connectors(bom, arch, verbose=False) == ["J1"]
+    assert arch.requirements[0].sheet == bom.parts[0].sheet != "MAIN"
+
+
+def test_opposite_edge_split_refuses_shared_recipe_without_mutation() -> None:
+    parts = [
+        BomPart(ref=f"J{i}", value="header", symbol="Connector:Conn_01x02",
+                footprint="Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical",
+                sheet="MAIN")
+        for i in (1, 2)
+    ]
+    bom = BOM(
+        parts=parts,
+        component_zones={"J1": {"edge": "top"}, "J2": {"edge": "bottom"}},
+        recipe_ownership=[RecipeOwnershipManifest(
+            recipe="header@1", instance="headers", refs=["J1", "J2"])],
+    )
+    arch = Architecture(
+        sheets=[Sheet(name="MAIN", stem="MAIN", function="test")],
+        power_nets=[], inter_sheet_nets=[],
+        recipe_selections=[RecipeSelection(recipe="header@1", instance="headers",
+                                           sheets={"interface": "MAIN"})],
+    )
+    before_bom, before_arch = bom.model_dump(), arch.model_dump()
+    with pytest.raises(ValueError, match="cannot split recipe"):
+        isolate_opposite_edge_connectors(bom, arch, verbose=False)
+    assert bom.model_dump() == before_bom
+    assert arch.model_dump() == before_arch

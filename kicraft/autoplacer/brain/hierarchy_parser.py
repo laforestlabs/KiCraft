@@ -357,15 +357,29 @@ def _extract_sheet_pins(sheet_node: list) -> list[SheetPinMetadata]:
     return pins
 
 
-def _extract_symbol_refs(sheet_tree: list) -> list[str]:
+def _extract_symbol_refs(
+    sheet_tree: list, instance_path: str, root_uuid: str
+) -> list[str]:
     """Extract placed component references from a schematic file.
 
     Filters out:
     - power symbols (`power:*`)
     - pseudo references beginning with `#`
     - malformed references
+    Native KiCad paths start with the root schematic UUID followed by the
+    sheet-instance UUID chain. KiCraft-generated singleton sheets instead
+    record the leaf schematic UUID as their symbol path.
     """
     refs: list[str] = []
+    root_prefix = f"/{root_uuid}" if root_uuid else ""
+    native_path = root_prefix + ("" if instance_path == "/" else instance_path)
+    native_path = native_path or "/"
+    sheet_uuid_node = _find_node(sheet_tree, "uuid")
+    generated_path = (
+        f"/{sheet_uuid_node[1]}"
+        if sheet_uuid_node and len(sheet_uuid_node) >= 2
+        else None
+    )
 
     for sym in _find_nodes(sheet_tree, "symbol"):
         lib_id_node = _find_node(sym, "lib_id")
@@ -380,6 +394,8 @@ def _extract_symbol_refs(sheet_tree: list) -> list[str]:
 
         for project_node in _find_nodes(instances, "project"):
             for path_node in _find_nodes(project_node, "path"):
+                if len(path_node) < 2 or path_node[1] not in (native_path, generated_path):
+                    continue
                 ref_node = _find_node(path_node, "reference")
                 if not ref_node or len(ref_node) < 2:
                     continue
@@ -477,6 +493,7 @@ def _extract_child_sheet_metadata(
 def _build_node(
     project_dir: Path,
     sheet_meta: SheetNodeMetadata,
+    root_uuid: str,
 ) -> HierarchyNode:
     schematic_path = (project_dir / sheet_meta.sheet_file).resolve()
     tree = _parse_file(schematic_path)
@@ -486,7 +503,7 @@ def _build_node(
         parent_instance_path=sheet_meta.instance_path,
         source_schematic_path=str(schematic_path),
     )
-    child_nodes = [_build_node(project_dir, child) for child in child_sheet_meta]
+    child_nodes = [_build_node(project_dir, child, root_uuid) for child in child_sheet_meta]
 
     definition = SubCircuitDefinition(
         id=SubCircuitId(
@@ -496,7 +513,7 @@ def _build_node(
             parent_instance_path=sheet_meta.parent_instance_path,
         ),
         schematic_path=str(schematic_path),
-        component_refs=_extract_symbol_refs(tree),
+        component_refs=_extract_symbol_refs(tree, sheet_meta.instance_path, root_uuid),
         ports=[_normalize_sheet_pin(pin) for pin in sheet_meta.pins],
         child_ids=[child.definition.id for child in child_nodes],
         parent_id=SubCircuitId(
@@ -521,13 +538,15 @@ def _build_node(
 def _build_root_node(project_dir: Path, root_schematic_path: Path) -> HierarchyNode:
     root_tree = _parse_file(root_schematic_path)
     root_name = _root_project_name(root_tree, root_schematic_path.stem)
+    root_uuid_node = _find_node(root_tree, "uuid")
+    root_uuid = str(root_uuid_node[1]) if root_uuid_node and len(root_uuid_node) >= 2 else ""
 
     top_children_meta = _extract_child_sheet_metadata(
         root_tree,
         parent_instance_path="/",
         source_schematic_path=str(root_schematic_path),
     )
-    child_nodes = [_build_node(project_dir, child) for child in top_children_meta]
+    child_nodes = [_build_node(project_dir, child, root_uuid) for child in top_children_meta]
 
     root_definition = SubCircuitDefinition(
         id=SubCircuitId(
@@ -537,7 +556,7 @@ def _build_root_node(project_dir: Path, root_schematic_path: Path) -> HierarchyN
             parent_instance_path=None,
         ),
         schematic_path=str(root_schematic_path),
-        component_refs=_extract_symbol_refs(root_tree),
+        component_refs=_extract_symbol_refs(root_tree, "/", root_uuid),
         ports=[],
         child_ids=[child.definition.id for child in child_nodes],
         parent_id=None,

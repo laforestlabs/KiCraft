@@ -79,3 +79,12 @@ def test_symmetric_connector_unchanged():
                      w=10.0, h=8.0, opening=0.0)
     _pin(comp, "right")
     assert abs((comp.pos.x + 5.0) - 59.0) < 0.2
+
+
+def test_edge_rotation_rotates_pad_copper_bounds():
+    comp = _bnc_like("J5", pos=Point(30, 20), body_center=Point(30, 20),
+                     w=4.0, h=2.0, opening=0.0)
+    comp.pads[0].size_mm = Point(4.0, 1.0)
+    _pin(comp, "top")
+    assert comp.rotation == 90.0
+    assert comp.pads[0].size_mm == Point(1.0, 4.0)

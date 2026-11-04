@@ -53,8 +53,14 @@ _MANIFEST = {
 
 
 @pytest.fixture(autouse=True)
-def _fresh_research_memo():
-    """The loop memoises per class per process; each test starts from no research."""
+def _fresh_research_memo(monkeypatch):
+    """Start with no reviewed identities, independent of the shipped inventory."""
+    inventory = part_identity.reviewed_inventory
+    existing = {record.identity for record in inventory()}
+    monkeypatch.setattr(
+        part_identity, "reviewed_inventory",
+        lambda: tuple(record for record in inventory() if record.identity not in existing),
+    )
     part_research._RESEARCHED_THIS_PROCESS.clear()
     yield
     part_research._RESEARCHED_THIS_PROCESS.clear()
@@ -158,12 +164,49 @@ def test_the_dry_and_dual_rows_are_rejected(catalog, record_file) -> None:
     assert chosen is None and "out of stock" in reason
 
 
-def test_a_catalogue_row_whose_class_word_is_truncated_still_counts(catalog, record_file) -> None:
-    """The catalog hands back a truncated description; the phrase that found the row is evidence."""
-    row = {"lcsc": "C9", "model": "X1", "package": "0603", "stock": 5000, "price": 0.01,
-           "description": "", "_matched_phrase": "inductor"}
-    chosen, _reason = part_research.choose_candidate("inductor", [row])
+@pytest.mark.parametrize("component_class", ["varistor", "schottky-diode"])
+def test_strict_catalog_match_can_prove_class_beyond_description_truncation(
+    catalog, component_class,
+) -> None:
+    description = "x" * 210 + " " + component_class.replace("-", " ")
+    with sqlite3.connect(catalog) as con:
+        con.execute(
+            "INSERT INTO jlc_components "
+            "(lcsc, mfr, package, manufacturer, library_type, stock, price, description) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (9, "X1", "0603", "Vendor", "expand", 5000, "1-:0.01", description),
+        )
+    rows = part_research.search_candidates(component_class)
+    row = next(row for row in rows if row["lcsc"] == "C9")
+    assert component_class.split("-")[0] not in row["description"].casefold()
+    chosen, reason = part_research.choose_candidate(component_class, [row])
     assert chosen is not None
+    assert "full catalog search match" in reason
+
+
+def test_partial_class_match_cannot_qualify_a_part() -> None:
+    row = {
+        "lcsc": "C123", "model": "1N4148", "description": "switching diode",
+        "stock": 1000, "price": 0.1,
+    }
+    chosen, _reason = part_research.choose_candidate("schottky-diode", [row])
+    assert chosen is None
+
+    row["description"] = "Schottky diode"
+    chosen, _reason = part_research.choose_candidate("schottky-diode", [row])
+    assert chosen is not None
+
+
+def test_untrusted_search_phrase_cannot_qualify_a_truncated_or_widened_row() -> None:
+    row = {
+        "lcsc": "C123", "model": "VARIST-IC", "description": "logic controller",
+        "stock": 1000, "price": 0.1, "_matched_phrase": "varistor",
+    }
+    direct, _reason = part_research.choose_candidate("varistor", [row])
+    assert direct is None
+    rows = part_research.search_candidates("varistor", searcher=lambda _query, _limit: [row])
+    chosen, _reason = part_research.choose_candidate("varistor", rows)
+    assert chosen is None
 
 
 def test_a_failed_fetch_records_nothing(catalog, record_file) -> None:
@@ -198,40 +241,6 @@ def test_the_batch_cap_bounds_one_pass(catalog, record_file) -> None:
     assert len(calls) == 1
 
 
-def test_the_stage_completion_answers_a_demanded_class_before_diagnosis(monkeypatch, record_file) -> None:
-    """The pipeline hook: a demand no reviewed part answers is researched, and said so plainly."""
-    from kicraft.design.stage_semantics import complete_unavailable_part_classes
-
-    result = part_research.ResearchResult(
-        component_class="varistor",
-        identity="10d471k",
-        lcsc="C8760",
-        symbol="varistor-c8760:10D471K-C8760",
-        footprint="varistor-c8760:RES-TH_L12.5-W6.7-P7.50-D1.2",
-        fetched=True,
-        reason="picked from the catalog",
-    )
-    monkeypatch.setattr(part_research, "research_part_for_class", lambda *a, **k: result)
-
-    completed = complete_unavailable_part_classes(
-        "architecture",
-        {"assumptions": ["something already noted (defaulted)"]},
-        {"intent": {"obligations": [{"kind": "physical", "component_class": "varistor"}]}},
-    )
-
-    notes = completed["assumptions"]
-    assert notes[0] == "something already noted (defaulted)"
-    assert "varistor" in notes[1] and "10d471k" in notes[1] and "defaulted" in notes[1]
-
-    # A class that is already answered is left alone, and so is a stage that does not own parts.
-    assert complete_unavailable_part_classes(
-        "architecture", {"assumptions": []}, {"intent": {"obligations": [
-            {"kind": "physical", "component_class": "led-0603"}]}}
-    ) == {"assumptions": []}
-    assert complete_unavailable_part_classes(
-        "intent", {"assumptions": []}, {"intent": {"obligations": [
-            {"kind": "physical", "component_class": "varistor"}]}}
-    ) == {"assumptions": []}
 
 
 def test_records_round_trip_and_replace_by_part(record_file, tmp_path) -> None:
@@ -375,6 +384,13 @@ def test_a_range_end_that_drops_its_unit_takes_the_other_ends() -> None:
     assert (ratings["temperature_min_c"], ratings["temperature_max_c"]) == (-55.0, 85.0)
     # Two bare numbers are not a range in any unit, so no supply is claimed from them.
     assert "supply_max_v" not in ratings
+
+
+@pytest.mark.parametrize("value", ["2~6mV", "2mV~6"])
+def test_range_endpoint_inherits_the_other_end_si_prefix(value) -> None:
+    ratings, _sources, unrated = part_research.catalog_ratings({"Voltage - Supply": value})
+    assert ratings == {"supply_min_v": 0.002, "supply_max_v": 0.006}
+    assert not unrated
 
 
 def test_a_record_with_no_ratings_says_unverified_rather_than_leaving_it_blank() -> None:

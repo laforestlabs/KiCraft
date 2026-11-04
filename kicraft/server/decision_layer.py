@@ -26,6 +26,7 @@ costs a fraction of a cent.
 from __future__ import annotations
 
 import json
+import math
 import os
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Literal, Mapping, Sequence
@@ -38,6 +39,9 @@ QuestionKind = Literal["noul", "choice", "score"]
 #: directly), and rejected on /chat/completions, so the id is pinned here deliberately.
 DEFAULT_MODEL = "typesafe/jev-1.13"
 DEFAULT_TIMEOUT_S = 60.0
+# The pinned Jev 1.13 endpoint is documented above as input-only at $0.042/M.
+# An unrecognized model has no reviewed bounded-price contract.
+_INPUT_PRICE_PER_MILLION = {DEFAULT_MODEL: 0.042}
 DECISIONS_PATH = "/api/alpha/decisions"
 
 
@@ -167,7 +171,9 @@ def parse_answers(payload: Mapping[str, Any], questions: Sequence[Question]) -> 
         if question.kind == "noul":
             try:
                 probability = float(row.get("noul"))
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if not math.isfinite(probability):
                 continue
             probability = max(0.0, min(1.0, probability))
             distribution = {"yes": probability, "no": 1.0 - probability}
@@ -183,15 +189,25 @@ def parse_answers(payload: Mapping[str, Any], questions: Sequence[Question]) -> 
             )
             continue
         raw_probabilities = row.get("probabilities")
-        probabilities = {
-            str(option): float(value)
-            for option, value in (raw_probabilities or {}).items()
-            if isinstance(value, (int, float))
-        }
+        if raw_probabilities is not None and not isinstance(raw_probabilities, Mapping):
+            continue
+        raw_probabilities = raw_probabilities or {}
+        try:
+            if any(not isinstance(value, (int, float)) for value in raw_probabilities.values()):
+                continue
+            probabilities = {str(option): float(value) for option, value in raw_probabilities.items()}
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if any(not math.isfinite(value) for value in probabilities.values()):
+            continue
         try:
             confidence = float(row.get("confidence"))
         except (TypeError, ValueError):
             confidence = _normalized_confidence(probabilities)
+        except OverflowError:
+            continue
+        if not math.isfinite(confidence):
+            continue
         confidence = max(0.0, min(1.0, confidence))
         if question.kind == "choice":
             choice = row.get("choice")
@@ -209,7 +225,9 @@ def parse_answers(payload: Mapping[str, Any], questions: Sequence[Question]) -> 
             continue
         try:
             score = float(row.get("score"))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if not math.isfinite(score):
             continue
         answers.append(
             Answer(
@@ -229,6 +247,9 @@ def decide(
     *,
     model: str = DEFAULT_MODEL,
     timeout: float = DEFAULT_TIMEOUT_S,
+    guard=None,
+    run_id: str | None = None,
+    stage: str | None = None,
     recorder=None,
     session: requests.Session | None = None,
 ) -> list[Answer]:
@@ -248,6 +269,17 @@ def decide(
         "state": state if isinstance(state, (str, list, dict)) else str(state),
         "questions": {question.key: question.payload() for question in questions},
     }
+    if guard is None or not all(callable(getattr(guard, name, None)) for name in (
+        "reserve", "settle_reservation", "mark_uncertain",
+    )):
+        raise DecisionUnavailable("a reservation-capable spend guard is required for decision calls")
+    price = _INPUT_PRICE_PER_MILLION.get(model)
+    if price is None:
+        raise DecisionUnavailable(f"no bounded decision pricing is configured for {model!r}")
+    # One UTF-8 byte per input token is a conservative tokenizer-independent
+    # bound; this endpoint's documented Jev 1.13 pricing is input-only.
+    input_bytes = len(json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+    reservation = guard.reserve(max(1, input_bytes) * price / 1_000_000, run_id)
     http = session or requests
     try:
         response = http.post(
@@ -259,9 +291,13 @@ def decide(
             json=body,
             timeout=timeout,
         )
-    except requests.RequestException as exc:
-        raise DecisionUnavailable(f"the decisions endpoint could not be reached: {exc}") from exc
+    except BaseException as exc:
+        guard.mark_uncertain(reservation)
+        if isinstance(exc, requests.RequestException):
+            raise DecisionUnavailable(f"the decisions endpoint could not be reached: {exc}") from exc
+        raise
     if response.status_code >= 400:
+        guard.mark_uncertain(reservation)
         detail = ""
         try:
             detail = str((response.json() or {}).get("error", {}).get("message") or "")
@@ -273,13 +309,29 @@ def decide(
     try:
         payload = response.json()
     except ValueError as exc:
+        guard.mark_uncertain(reservation)
         raise DecisionUnavailable(f"the decisions endpoint returned no JSON: {exc}") from exc
     if not isinstance(payload, Mapping):
+        guard.mark_uncertain(reservation)
         raise DecisionUnavailable("the decisions payload is not an object")
-    if recorder is not None:
-        usage = payload.get("usage")
-        if isinstance(usage, Mapping):
-            recorder(usage)
+    usage = payload.get("usage")
+    usage = usage if isinstance(usage, Mapping) else {}
+    try:
+        cost = float(usage.get("cost") or 0.0)
+    except (TypeError, ValueError, OverflowError):
+        cost = 0.0
+    if math.isfinite(cost) and cost > 0:
+        in_tok, out_tok = usage.get("input_tokens"), usage.get("output_tokens")
+        in_tok = in_tok if isinstance(in_tok, int) and in_tok >= 0 else 0
+        out_tok = out_tok if isinstance(out_tok, int) and out_tok >= 0 else 0
+        guard.settle_reservation(
+            reservation, model, in_tok, out_tok, cost,
+            meta={"run_id": run_id, "stage": stage, "phase": "decision"},
+        )
+    else:
+        guard.mark_uncertain(reservation)
+    if recorder is not None and usage:
+        recorder(usage)
     return parse_answers(payload, questions)
 
 

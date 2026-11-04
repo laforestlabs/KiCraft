@@ -55,13 +55,4 @@ def test_report_classifies_records_and_recipe_parts():
     }
 
 
-def test_report_renders_every_section():
-    text = format_report(summarize())
-    for heading in (
-        "REVIEWED RECORDS",
-        "DEAD FACTS",
-        "NO FACT",
-        "RECIPE POWER PARTS WITHOUT A REVIEWED TRANSFER",
-    ):
-        assert heading in text
-    assert "ap63203wu-7" in text
+

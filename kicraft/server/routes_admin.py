@@ -408,6 +408,14 @@ def _admin_card_style() -> str:
     return "background:var(--kc-surface);border:1px solid var(--kc-border);min-width:380px"
 
 
+def _admin_action_allowed() -> bool:
+    """Recheck role and session when an already-open page submits an action."""
+    if not is_admin(_current_user()):
+        ui.notify("Admin access required.", color="warning")
+        return False
+    return True
+
+
 # --------------------------------------------------------------------------- #
 # Admin: design model. Persists the active DESIGN_PROFILES entry plus
 # four behavior knobs in the routing config (~/.kicraft/routing.json; override
@@ -1919,6 +1927,8 @@ def admin_self_eval_page():
                     rows[idx] = {"status": st_l, "grade": gr_l, "build": bd_l, "btn": btn}
 
     def start():
+        if not _admin_action_allowed():
+            return
         if _self_eval_running():
             ui.notify("A self-eval batch is already running.", color="warning")
             return
@@ -2391,11 +2401,13 @@ def admin_loadtest_page():
             build_cb = ui.checkbox("build", value=cfg["do_build"]).props("dark")
             launch_btn = ui.button("Launch", icon="play_arrow")
             ui.button("ABORT", icon="stop", color="red").props("outline").on(
-                "click", lambda: (_loadtest_abort(), _refresh())
+                "click", lambda: _admin_action_allowed() and (_loadtest_abort(), _refresh())
             )
         status = ui.label("").classes("text-xs font-mono").style("color:#94a3b8")
 
         def _launch():
+            if not _admin_action_allowed():
+                return
             log = _loadtest_launch(
                 scen.value,
                 n=n_in.value,
@@ -2548,7 +2560,7 @@ def admin_security_page():
 
         run_btn.on(
             "click",
-            lambda: (
+            lambda: _admin_action_allowed() and (
                 ui.notify(
                     "scanning…" if _security_launch() else "a scan is already running",
                     type="positive" if not _security_running() else "info",
@@ -2612,7 +2624,7 @@ def admin_security_page():
                         if f["status"] == "open":
                             ui.button(
                                 "ack",
-                                on_click=lambda _e=None, fid=f["id"]: (
+                                on_click=lambda _e=None, fid=f["id"]: _admin_action_allowed() and (
                                     store.set_status(fid, "acknowledged"),
                                     _refresh(),
                                 ),
@@ -2620,7 +2632,7 @@ def admin_security_page():
                         else:
                             ui.button(
                                 "reopen",
-                                on_click=lambda _e=None, fid=f["id"]: (
+                                on_click=lambda _e=None, fid=f["id"]: _admin_action_allowed() and (
                                     store.set_status(fid, "open"),
                                     _refresh(),
                                 ),
@@ -3160,14 +3172,21 @@ def admin_users_page():
                 if not guard():
                     dlg.close()
                     return
-                # A deleted account must never be charged again: cancel any
-                # live Stripe subscription first (best-effort; deletion
-                # proceeds either way and the orphaned sub stays visible in
-                # the Stripe dashboard).
                 target = store.get_user(row["id"])
-                if target is not None:
-                    billing.cancel_subscription_for_user(Settings.from_env(), target)
-                store.delete_user(row["id"])
+                if target is None:
+                    ui.notify("Account no longer exists.", color="warning")
+                    return
+                if not billing.prepare_account_deletion(
+                        store, target, settings=Settings.from_env()):
+                    ui.notify("Subscription or checkout cancellation could not be confirmed; "
+                              "account was not deleted.", color="negative")
+                    return
+                try:
+                    store.delete_user(row["id"], require_billing_safe=True)
+                except (ValueError, OSError) as exc:
+                    store.end_billing_deletion(row["id"])
+                    ui.notify(f"Account deletion failed: {exc}", color="negative")
+                    return
                 dlg.close()
                 ui.notify(f"Deleted {row['email']}.", color="positive")
                 build_users()

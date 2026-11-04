@@ -81,6 +81,26 @@ def _label_position_free(
     return True
 
 
+def _free_label_anchor(
+    net_name: str,
+    preferred: tuple[float, float],
+    segments: list[WireSegment],
+    routed: RoutedSheet,
+) -> tuple[float, float]:
+    """Choose an unoccupied anchor on this net's wire, never beside it."""
+    candidates = [preferred]
+    for seg in segments:
+        for fraction in (0.1, 0.25, 0.5, 0.75, 0.9, 0.0, 1.0):
+            candidates.append((
+                seg.x1_mm + (seg.x2_mm - seg.x1_mm) * fraction,
+                seg.y1_mm + (seg.y2_mm - seg.y1_mm) * fraction,
+            ))
+    for x, y in candidates:
+        if _label_position_free(x, y, net_name, routed.labels, routed.hier_labels):
+            return x, y
+    raise ValueError(f"no electrically connected label position for net {net_name!r}")
+
+
 @dataclass(frozen=True)
 class WireSegment:
     x1_mm: float
@@ -308,14 +328,9 @@ def route_sheet(
             segs = _safe_link(eps[0], eps[1], all_pins, routed.wires)
             if segs is not None:
                 routed.wires.extend(segs)
-                lx, ly = _label_anchor(segs)
-                if not _label_position_free(lx, ly, conn.net_name,
-                                            routed.labels, routed.hier_labels):
-                    # Offset to avoid label-slide net merge
-                    lx = lx + 0.2
-                    if not _label_position_free(lx, ly, conn.net_name,
-                                                routed.labels, routed.hier_labels):
-                        lx = lx - 0.4  # try the other direction
+                lx, ly = _free_label_anchor(
+                    conn.net_name, _label_anchor(segs), segs, routed
+                )
                 routed.labels.append(NetLabel(
                     text=conn.net_name, x_mm=lx, y_mm=ly, angle_deg=0))
                 continue
@@ -327,28 +342,32 @@ def route_sheet(
         # apart otherwise meet head-on at the midpoint (run_06's
         # OUT1A≡SENSE1 short).
         for e in eps:
+            def stub_clear(ex: float, ey: float) -> bool:
+                return (
+                    not _seg_touches_any_wire(e.x, e.y, ex, ey, routed.wires)
+                    and not any(
+                        (ref, pin) != (e.ref, e.pin)
+                        and _pt_on_axis_seg(px, py, e.x, e.y, ex, ey)
+                        for px, py, ref, pin in all_pins
+                    )
+                )
+
             ex, ey = step(e.x, e.y, e.exit, GRID_MM)
-            if _seg_touches_any_wire(e.x, e.y, ex, ey, routed.wires):
+            if not stub_clear(ex, ey):
                 ex, ey = step(e.x, e.y, e.exit, GRID_MM / 2)
-                if _seg_touches_any_wire(e.x, e.y, ex, ey, routed.wires):
+                if not stub_clear(ex, ey):
                     ex, ey = e.x, e.y
+            segments = []
             if (ex, ey) != (e.x, e.y):
-                routed.wires.append(WireSegment(e.x, e.y, ex, ey))
+                segments.append(WireSegment(e.x, e.y, ex, ey))
+                routed.wires.extend(segments)
             angle = _LABEL_ANGLE[e.exit]
-            lx, ly = ex, ey
-            # Prevent label-slide net merge: if another net's label already
-            # sits at this position, offset to avoid KiCad merging the nets.
+            lx, ly = _free_label_anchor(conn.net_name, (ex, ey), segments, routed)
             if is_inter:
-                if not _label_position_free(lx, ly, conn.net_name,
-                                            routed.labels, routed.hier_labels):
-                    lx = lx + 0.2
                 routed.hier_labels.append(HierLabelPlacement(
                     name=conn.net_name, direction=hier_dir,
                     x_mm=lx, y_mm=ly, angle_deg=angle))
             else:
-                if not _label_position_free(lx, ly, conn.net_name,
-                                            routed.labels, routed.hier_labels):
-                    lx = lx + 0.2
                 routed.labels.append(NetLabel(
                     text=conn.net_name, x_mm=lx, y_mm=ly, angle_deg=angle))
 
@@ -423,10 +442,9 @@ def route_sheet(
     # by the SIGNAL pass as hier/local labels -- an intermediate power bus like
     # V20_BUS/PD_20V whose name misses the power patterns but whose pins are
     # power_in (so the emitter put it in flag_nets via _power_nets_by_pins).
-    # Drop one PWR_FLAG on the wire endpoint where each such net's label sits,
-    # so its pin (at the symbol origin) coincides with the net's copper -- the
-    # same connectivity contract _route_power's own flag relies on. This does
-    # NOT change how the net is rendered, only marks it driven.
+    # Drop one PWR_FLAG on a wire endpoint of the label's own connected
+    # component, or at the label itself if it is attached directly to a pin.
+    # This does not change how the net is rendered, only marks it driven.
     unflagged = flag_nets - flagged_nets
     if unflagged:
         anchors: dict[str, tuple[float, float]] = {}
@@ -436,23 +454,18 @@ def route_sheet(
             anchors.setdefault(lab.text, (lab.x_mm, lab.y_mm))
         for g in routed.global_labels:
             anchors.setdefault(g.text, (g.x_mm, g.y_mm))
-        wire_ends = [(w.x1_mm, w.y1_mm) for w in routed.wires] + \
-                    [(w.x2_mm, w.y2_mm) for w in routed.wires]
         for net in unflagged:
             pt = anchors.get(net)
             if pt is None:
                 continue  # no copper for this net on this sheet; nothing to flag
             ax, ay = pt
-            # Snap to the nearest wire endpoint: recovers the true stub end when
-            # the label was nudged +0.2mm to dodge a slide-merge, guaranteeing
-            # the flag pin lands on the net's wire rather than just beside it.
-            best, best_d = None, 0.6
-            for ex, ey in wire_ends:
-                d = abs(ex - ax) + abs(ey - ay)
-                if d <= best_d:
-                    best_d, best = d, (ex, ey)
-            if best is not None:
-                ax, ay = best
+            own_wires = _wire_component(ax, ay, routed.wires)
+            if own_wires:
+                endpoints = [
+                    pt for wire in own_wires
+                    for pt in ((wire.x1_mm, wire.y1_mm), (wire.x2_mm, wire.y2_mm))
+                ]
+                ax, ay = min(endpoints, key=lambda pt: abs(pt[0] - ax) + abs(pt[1] - ay))
             routed.power_symbols.append(PowerSymbol(
                 lib_id="power:PWR_FLAG", x_mm=ax, y_mm=ay, angle_deg=0))
             flagged_nets.add(net)

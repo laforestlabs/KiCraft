@@ -10,15 +10,12 @@ per leaf plus ``index.html`` embedding them all with their metrics. Default
 corpus: yesterday's self-eval batch; default designs: a dense + a sparse one.
 """
 from __future__ import annotations
+import argparse
+from html import escape
 
 import json
 import os
-import sys
 
-from kicraft.autoplacer.brain.leaf_group_rigid import (
-    build_rigid_groups,
-    sync_rigid_groups,
-)
 from kicraft.autoplacer.brain.leaf_layout_svg import render_leaf_svg
 from kicraft.autoplacer.brain.leaf_tidiness import leaf_tidiness, parts_from_components
 from kicraft.autoplacer.brain.subcircuit_instances import _component_from_dict
@@ -51,20 +48,14 @@ def _design_of(path):
 
 
 def main() -> int:
-    pos = [a for a in sys.argv[1:] if not a.startswith("--")]
-    corpus = pos[0] if pos else DEFAULT_CORPUS
-    designs = DEFAULT_DESIGNS
-    out_dir = os.path.join(
-        os.environ.get("SCRATCH", "/tmp"), "leaf_viz"
-    )
-    rigid = False
-    for a in sys.argv[1:]:
-        if a.startswith("--designs="):
-            designs = set(a.split("=", 1)[1].split(","))
-        elif a.startswith("--out="):
-            out_dir = a.split("=", 1)[1]
-        elif a == "--rigid":
-            rigid = True
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("corpus", nargs="?", default=DEFAULT_CORPUS)
+    parser.add_argument("--designs", default=",".join(sorted(DEFAULT_DESIGNS)))
+    parser.add_argument("--out", default=os.path.join(os.environ.get("SCRATCH", "/tmp"), "leaf_viz"))
+    args = parser.parse_args()
+    corpus = args.corpus
+    designs = set(args.designs.split(","))
+    out_dir = args.out
     os.makedirs(out_dir, exist_ok=True)
 
     layouts = []
@@ -86,12 +77,7 @@ def main() -> int:
         design = _design_of(path)
         sheet = layout.get("sheet_name") or "?"
         bound = _board_bound(comps)
-        if rigid:
-            # Apply the rigid-group representation in place (tidy by construction)
-            # so we can see it vs the raw SA baseline. No re-optimization here —
-            # this shows the *tidiness* of the primitive, not routability.
-            sync_rigid_groups(comps, build_rigid_groups(comps))
-        title = f"{design} / {sheet}" + (" [rigid]" if rigid else "")
+        title = f"{design} / {sheet}"
         svg = render_leaf_svg(comps, bound, title=title)
         m = leaf_tidiness(parts_from_components(comps), label=title)
         fname = f"{design}__{sheet}".replace("/", "_").replace(" ", "_") + ".svg"
@@ -104,11 +90,11 @@ def main() -> int:
     # combined gallery
     body = [
         "<h1>Leaf layout diagnostics</h1>",
-        f"<p class='sub'>{len(cards)} leaves from {os.path.basename(corpus)}</p>",
+        f"<p class='sub'>{len(cards)} leaves from {escape(os.path.basename(corpus))}</p>",
     ]
     for title, m, svg in cards:
         body.append(
-            f"<section><h2>{title}</h2><div class='svg'>{svg}</div></section>"
+            f"<section><h2>{escape(title)}</h2><div class='svg'>{svg}</div></section>"
         )
     html = (
         "<!doctype html><meta charset='utf-8'><title>Leaf diagnostics</title>"

@@ -82,6 +82,26 @@ _RESET_COOLDOWN_SECONDS = 60
 _VERIFY_TTL_SECONDS = 86400        # 24h
 _VERIFY_COOLDOWN_SECONDS = 60      # anti-spam, same as reset
 
+# Reserve login attempts before password verification so concurrent workers
+# cannot all bypass the rolling credential-stuffing limit.
+_LOGIN_WINDOW_SECONDS = 900
+_LOGIN_ACCOUNT_LIMIT = 5
+_LOGIN_IP_LIMIT = 30
+
+# Stripe retains idempotency results for at least 24 hours; leave one hour of
+# margin and refuse an unresolved retry rather than risk a second chargeable object.
+_BILLING_IDEMPOTENCY_SAFE_SECONDS = 23 * 3600
+
+
+def billing_key_is_fresh(created_at: str | None) -> bool:
+    if not created_at:
+        return False
+    try:
+        age = (_utcnow() - dt.datetime.fromisoformat(created_at)).total_seconds()
+    except (TypeError, ValueError):
+        return False
+    return 0 <= age < _BILLING_IDEMPOTENCY_SAFE_SECONDS
+
 # Board IDs: short, human-quotable codes (KC-7G4K2M) stamped on every project so
 # a user can read one off the workspace and quote it in a support report. The
 # alphabet drops 0/1/I/L/O so a code survives being read aloud or retyped.
@@ -218,6 +238,7 @@ class User:
     # Defaults True so in-memory Users (admin-CLI builds, tests) are treated as
     # verified; create_user flips it False to match the DB row's DEFAULT 0.
     email_verified: bool = True
+    billing_deleting: bool = False
 
 
 @dataclass
@@ -246,6 +267,7 @@ class BuildJob:
     # to 'build' (deploy-skew safety: an old worker must not run the
     # wrong command on a new job).
     kind: str = "build"
+    attempt_generation: int | None = None
 
 
 @dataclass
@@ -275,6 +297,8 @@ class Project:
     # reference this exact board in a support report. See new_board_code().
     board_code: str | None = None
     auto_default_questions: bool = True
+    attempt_generation: int = 0
+    attempt_started_at: str | None = None
 
 
 @dataclass
@@ -403,6 +427,23 @@ class AccountStore:
                 "type TEXT NOT NULL,"
                 "created_at TEXT NOT NULL)"
             )
+            event_cols = {r["name"] for r in conn.execute("PRAGMA table_info(billing_events)")}
+            if "completed" not in event_cols:
+                # Old rows were claimed before work, so none proves success.
+                # A Stripe retry must reprocess them rather than lose payment state.
+                conn.execute("ALTER TABLE billing_events ADD COLUMN completed "
+                             "INTEGER NOT NULL DEFAULT 0")
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS pending_checkouts ("
+                "user_id INTEGER PRIMARY KEY, tier TEXT NOT NULL, "
+                "idempotency_key TEXT NOT NULL, created_at TEXT NOT NULL, "
+                "session_id TEXT, session_url TEXT, owner_pid INTEGER, owner_token TEXT, "
+                "dispatched INTEGER NOT NULL DEFAULT 0)")
+            checkout_cols = {r["name"] for r in conn.execute("PRAGMA table_info(pending_checkouts)")}
+            for name, kind in (("owner_pid", "INTEGER"), ("owner_token", "TEXT"),
+                               ("dispatched", "INTEGER NOT NULL DEFAULT 0")):
+                if name not in checkout_cols:
+                    conn.execute(f"ALTER TABLE pending_checkouts ADD COLUMN {name} {kind}")
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS invite_codes ("
                 "id INTEGER PRIMARY KEY AUTOINCREMENT,"
@@ -465,6 +506,16 @@ class AccountStore:
                 "CREATE INDEX IF NOT EXISTS idx_signup_attempts_ip_created "
                 "ON signup_attempts(ip, created_at)"
             )
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS login_attempts ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                "email TEXT NOT NULL, ip TEXT NOT NULL, created_at TEXT NOT NULL)")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_login_email_created "
+                "ON login_attempts(email, created_at)")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_login_ip_created "
+                "ON login_attempts(ip, created_at)")
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS projects ("
                 "id INTEGER PRIMARY KEY AUTOINCREMENT,"
@@ -569,6 +620,22 @@ class AccountStore:
             if "kind" not in bj_cols:
                 conn.execute("ALTER TABLE build_jobs ADD COLUMN kind TEXT "
                              "NOT NULL DEFAULT 'build'")
+            if "attempt_generation" not in bj_cols:
+                conn.execute("ALTER TABLE build_jobs ADD COLUMN attempt_generation INTEGER")
+                # Only a live legacy job can be safely associated with a
+                # running project. A terminal job may belong to an older run.
+                conn.execute(
+                    "UPDATE build_jobs SET attempt_generation=0 WHERE id IN ("
+                    "SELECT (SELECT b.id FROM build_jobs b WHERE b.project_id=p.id "
+                    "AND b.status IN ('queued','running') "
+                    "ORDER BY CASE b.status WHEN 'running' THEN 0 ELSE 1 END, "
+                    "b.id DESC LIMIT 1) FROM projects p WHERE p.status='running')")
+                # Unassociated legacy queued work cannot be attributed safely;
+                # close it rather than leaving an unclaimable permanent blocker.
+                conn.execute(
+                    "UPDATE build_jobs SET status='failed', finished_at=? "
+                    "WHERE project_id IS NOT NULL AND status='queued' "
+                    "AND attempt_generation IS NULL", (_utcnow_iso(),))
             # Per-user dedup of likes; the count is denormalized onto
             # projects.like_count and kept in sync inside toggle_like's txn.
             conn.execute(
@@ -660,6 +727,15 @@ class AccountStore:
                 "ALTER TABLE users ADD COLUMN notify_email INTEGER NOT NULL DEFAULT 1")
         if "stripe_customer_id" not in cols:
             conn.execute("ALTER TABLE users ADD COLUMN stripe_customer_id TEXT")
+        if "stripe_customer_create_key" not in cols:
+            conn.execute("ALTER TABLE users ADD COLUMN stripe_customer_create_key TEXT")
+        if "stripe_customer_create_started_at" not in cols:
+            conn.execute("ALTER TABLE users ADD COLUMN stripe_customer_create_started_at TEXT")
+        if "billing_deleting" not in cols:
+            conn.execute("ALTER TABLE users ADD COLUMN billing_deleting "
+                         "INTEGER NOT NULL DEFAULT 0")
+        if "billing_deleting_pid" not in cols:
+            conn.execute("ALTER TABLE users ADD COLUMN billing_deleting_pid INTEGER")
         if "stripe_subscription_id" not in cols:
             conn.execute("ALTER TABLE users ADD COLUMN stripe_subscription_id TEXT")
         if "subscription_status" not in cols:
@@ -697,6 +773,12 @@ class AccountStore:
         Idempotent: a re-open finds the column present and skips the whole block.
         """
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(projects)")}
+        if "attempt_generation" not in cols:
+            conn.execute("ALTER TABLE projects ADD COLUMN attempt_generation "
+                         "INTEGER NOT NULL DEFAULT 0")
+        if "attempt_started_at" not in cols:
+            conn.execute("ALTER TABLE projects ADD COLUMN attempt_started_at TEXT")
+            conn.execute("UPDATE projects SET attempt_started_at=created_at")
         if "auto_default_questions" not in cols:
             conn.execute(
                 "ALTER TABLE projects ADD COLUMN auto_default_questions INTEGER NOT NULL DEFAULT 1")
@@ -778,7 +860,8 @@ class AccountStore:
                     stripe_customer_id=row["stripe_customer_id"],
                     stripe_subscription_id=row["stripe_subscription_id"],
                     subscription_status=row["subscription_status"],
-                    email_verified=bool(row["email_verified"]))
+                    email_verified=bool(row["email_verified"]),
+                    billing_deleting=bool(row["billing_deleting"]))
 
     def _downgrade_if_expired(self, conn: sqlite3.Connection,
                               row: sqlite3.Row | None) -> sqlite3.Row | None:
@@ -808,7 +891,8 @@ class AccountStore:
     def create_user(self, email: str, password: str, tier: str = DEFAULT_TIER, *,
                     accepted_terms_version: str | None = None,
                     allow_training: bool = True,
-                    tier_expires_at: str | None = None) -> User:
+                    tier_expires_at: str | None = None,
+                    invite_code: str | None = None) -> User:
         em = self._norm_email(email)
         if not em or "@" not in em:
             raise ValueError("a valid email is required")
@@ -819,18 +903,33 @@ class AccountStore:
             raise ValueError("a password is required")
         if tier not in TIERS:
             raise ValueError(f"unknown tier {tier!r}")
-        now = _utcnow_iso()
-        accepted_at = now if accepted_terms_version else None
+        password_hash = hash_password(password)
         try:
             with self._conn() as conn:
+                if invite_code is not None:
+                    conn.execute("BEGIN IMMEDIATE")
+                    grant = conn.execute(
+                        "SELECT * FROM invite_codes WHERE code=? AND enabled=1 "
+                        "AND (max_uses IS NULL OR use_count < max_uses)",
+                        (invite_code.strip(),)).fetchone()
+                    if grant is None:
+                        raise ValueError("Invalid or disabled invite code.")
+                    tier = grant["tier"]
+                    tier_expires_at = grant_expiry(grant["duration_days"])
+                now = _utcnow_iso()
+                accepted_at = now if accepted_terms_version else None
                 cur = conn.execute(
                     "INSERT INTO users (email, password_hash, tier, created_at, "
                     "accepted_terms_version, accepted_terms_at, allow_training, "
                     "tier_expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (em, hash_password(password), tier, now,
+                    (em, password_hash, tier, now,
                      accepted_terms_version, accepted_at, 1 if allow_training else 0,
                      tier_expires_at))
                 uid = cur.lastrowid
+                if invite_code is not None:
+                    conn.execute(
+                        "UPDATE invite_codes SET use_count=use_count+1, last_used_at=? "
+                        "WHERE id=?", (now, grant["id"]))
         except sqlite3.IntegrityError as e:
             raise ValueError(f"email {em!r} is already registered") from e
         return User(id=int(uid), email=em, tier=tier, created_at=now,
@@ -853,15 +952,39 @@ class AccountStore:
             row = self._downgrade_if_expired(conn, row)
         return self._row_to_user(row) if row else None
 
-    def authenticate(self, email: str, password: str) -> User | None:
+    def authenticate(self, email: str, password: str, *, client_ip: str = "") -> User | None:
+        em = self._norm_email(email)
+        ip = (client_ip or "").strip()
         with self._conn() as conn:
-            row = conn.execute("SELECT * FROM users WHERE email=?",
-                               (self._norm_email(email),)).fetchone()
-            if not row or not verify_password(password, row["password_hash"]):
+            conn.execute("BEGIN IMMEDIATE")
+            now = _utcnow()
+            cutoff = (now - dt.timedelta(seconds=_LOGIN_WINDOW_SECONDS)).isoformat()
+            conn.execute("DELETE FROM login_attempts WHERE created_at < ?", (cutoff,))
+            by_account = conn.execute(
+                "SELECT COUNT(*) FROM login_attempts WHERE email=? AND created_at>=?",
+                (em, cutoff)).fetchone()[0]
+            by_ip = conn.execute(
+                "SELECT COUNT(*) FROM login_attempts WHERE ip=? AND created_at>=?",
+                (ip, cutoff)).fetchone()[0] if ip else 0
+            if by_account >= _LOGIN_ACCOUNT_LIMIT or by_ip >= _LOGIN_IP_LIMIT:
+                return None
+            attempt = conn.execute(
+                "INSERT INTO login_attempts (email, ip, created_at) VALUES (?, ?, ?)",
+                (em, ip, now.isoformat())).lastrowid
+            row = conn.execute("SELECT * FROM users WHERE email=?", (em,)).fetchone()
+        if not row or not verify_password(password, row["password_hash"]):
+            return None
+        with self._conn() as conn:
+            # A password change during scrypt must not authenticate the old hash.
+            row = conn.execute("SELECT * FROM users WHERE id=? AND password_hash=?",
+                               (row["id"], row["password_hash"])).fetchone()
+            if row is None:
                 return None
             row = self._downgrade_if_expired(conn, row)
             conn.execute("UPDATE users SET last_login_at=? WHERE id=?",
                          (_utcnow_iso(), row["id"]))
+            conn.execute("DELETE FROM login_attempts WHERE email=? AND id<=?",
+                         (em, attempt))
         return self._row_to_user(row)
 
     def set_tier(self, email: str, tier: str) -> User:
@@ -913,9 +1036,145 @@ class AccountStore:
 
     # ---- billing (Stripe) ---------------------------------------------------
 
-    def set_stripe_customer(self, user_id: int, customer_id: str) -> None:
-        """Link a user to their Stripe customer (created on first checkout)."""
+    def stripe_customer_create_key(self, user_id: int) -> str:
+        """Persist one Stripe idempotency key before making the remote request."""
         with self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT stripe_customer_create_key, stripe_customer_create_started_at, "
+                "billing_deleting FROM users WHERE id=?", (user_id,)).fetchone()
+            if row is None or row["billing_deleting"]:
+                raise ValueError("account is unavailable for billing")
+            key = row["stripe_customer_create_key"]
+            if key:
+                if not billing_key_is_fresh(row["stripe_customer_create_started_at"]):
+                    raise ValueError("Unresolved customer creation requires billing support.")
+            else:
+                key = secrets.token_urlsafe(32)
+                conn.execute(
+                    "UPDATE users SET stripe_customer_create_key=?, "
+                    "stripe_customer_create_started_at=? WHERE id=?",
+                    (key, _utcnow_iso(), user_id))
+            return key
+
+    def begin_billing_deletion(self, user_id: int) -> None:
+        """Block checkout; recover only a deletion owned by a dead process."""
+        with self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT billing_deleting, billing_deleting_pid FROM users WHERE id=?",
+                (user_id,)).fetchone()
+            if row is None or (row["billing_deleting"] and _pid_alive(row["billing_deleting_pid"])):
+                raise ValueError("account is missing or deletion is already in progress")
+            conn.execute("UPDATE users SET billing_deleting=1, billing_deleting_pid=? WHERE id=?",
+                         (os.getpid(), user_id))
+
+    def end_billing_deletion(self, user_id: int) -> None:
+        with self._conn() as conn:
+            conn.execute("UPDATE users SET billing_deleting=0, billing_deleting_pid=NULL "
+                         "WHERE id=?", (user_id,))
+
+    def customer_creation_unresolved(self, user_id: int) -> bool:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT stripe_customer_id, stripe_customer_create_key FROM users WHERE id=?",
+                (user_id,)).fetchone()
+            return bool(row and row["stripe_customer_create_key"] and not row["stripe_customer_id"])
+
+    def get_pending_checkout(self, user_id: int) -> dict | None:
+        with self._conn() as conn:
+            row = conn.execute("SELECT * FROM pending_checkouts WHERE user_id=?",
+                               (user_id,)).fetchone()
+            return dict(row) if row else None
+
+    def reserve_checkout(self, user_id: int, tier: str) -> dict:
+        """One durable checkout intent per account; never switch its plan silently."""
+        with self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            user = conn.execute(
+                "SELECT billing_deleting, stripe_subscription_id, subscription_status "
+                "FROM users WHERE id=?", (user_id,)).fetchone()
+            if user is None or user["billing_deleting"]:
+                raise ValueError("account is unavailable for checkout")
+            if (user["stripe_subscription_id"]
+                    and user["subscription_status"] in ("active", "trialing", "past_due")):
+                raise ValueError("A subscription is already active; use the billing portal.")
+            row = conn.execute("SELECT * FROM pending_checkouts WHERE user_id=?",
+                               (user_id,)).fetchone()
+            if row is None:
+                conn.execute(
+                    "INSERT INTO pending_checkouts (user_id, tier, idempotency_key, created_at) "
+                    "VALUES (?, ?, ?, ?)", (user_id, tier, secrets.token_urlsafe(32), _utcnow_iso()))
+                row = conn.execute("SELECT * FROM pending_checkouts WHERE user_id=?",
+                                   (user_id,)).fetchone()
+            elif row["tier"] != tier:
+                raise ValueError("A checkout for another plan is already in progress.")
+            if row["session_id"] is None:
+                if row["owner_token"] and _pid_alive(row["owner_pid"]):
+                    raise ValueError("Checkout is already being prepared.")
+                owner = secrets.token_urlsafe(24)
+                conn.execute(
+                    "UPDATE pending_checkouts SET owner_pid=?, owner_token=? WHERE user_id=?",
+                    (os.getpid(), owner, user_id))
+                row = conn.execute("SELECT * FROM pending_checkouts WHERE user_id=?",
+                                   (user_id,)).fetchone()
+            return dict(row)
+
+    def mark_checkout_dispatched(self, user_id: int, key: str, owner: str) -> None:
+        with self._conn() as conn:
+            cur = conn.execute(
+                "UPDATE pending_checkouts SET dispatched=1 "
+                "WHERE user_id=? AND idempotency_key=? AND owner_token=?",
+                (user_id, key, owner))
+            if cur.rowcount != 1:
+                raise ValueError("checkout admission changed")
+
+    def release_checkout(self, user_id: int, key: str, owner: str) -> None:
+        with self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                "DELETE FROM pending_checkouts WHERE user_id=? AND idempotency_key=? "
+                "AND owner_token=? AND dispatched=0 AND session_id IS NULL",
+                (user_id, key, owner))
+            conn.execute(
+                "UPDATE pending_checkouts SET owner_pid=NULL, owner_token=NULL "
+                "WHERE user_id=? AND idempotency_key=? AND owner_token=?",
+                (user_id, key, owner))
+
+    def save_pending_checkout(self, user_id: int, key: str, session_id: str, url: str) -> None:
+        with self._conn() as conn:
+            cur = conn.execute(
+                "UPDATE pending_checkouts SET session_id=?, session_url=? "
+                "WHERE user_id=? AND idempotency_key=? "
+                "AND (session_id IS NULL OR session_id=?)",
+                (session_id, url, user_id, key, session_id))
+            if cur.rowcount != 1:
+                raise ValueError("checkout state changed")
+
+    def clear_pending_checkout(self, user_id: int, key: str) -> bool:
+        with self._conn() as conn:
+            cur = conn.execute(
+                "DELETE FROM pending_checkouts WHERE user_id=? AND idempotency_key=?",
+                (user_id, key))
+            return cur.rowcount == 1
+
+    def set_stripe_customer(self, user_id: int, customer_id: str) -> None:
+        """Link once; never silently replace or share a Stripe customer."""
+        if not customer_id:
+            raise ValueError("a Stripe customer id is required")
+        with self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT stripe_customer_id FROM users WHERE id=?",
+                               (user_id,)).fetchone()
+            if row is None:
+                raise ValueError(f"no user with id {user_id}")
+            if row["stripe_customer_id"] not in (None, customer_id):
+                raise ValueError("Stripe customer does not match existing account")
+            other = conn.execute(
+                "SELECT 1 FROM users WHERE stripe_customer_id=? AND id!=?",
+                (customer_id, user_id)).fetchone()
+            if other is not None:
+                raise ValueError("Stripe customer already belongs to another account")
             conn.execute("UPDATE users SET stripe_customer_id=? WHERE id=?",
                          (customer_id, user_id))
 
@@ -953,26 +1212,24 @@ class AccountStore:
                 "SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
         return self._row_to_user(row)
 
-    def record_billing_event(self, event_id: str, event_type: str) -> bool:
-        """Record a Stripe webhook event id; False when it was already seen.
+    def billing_event_processed(self, event_id: str) -> bool:
+        """Whether this delivery completed, not merely whether it was claimed."""
+        with self._conn() as conn:
+            return conn.execute(
+                "SELECT 1 FROM billing_events WHERE stripe_event_id=? AND completed=1",
+                (event_id,)).fetchone() is not None
 
-        The dedupe that makes webhook handling idempotent: Stripe retries
-        delivery until it receives a 2xx, so the same event can arrive twice."""
+    def record_billing_event(self, event_id: str, event_type: str) -> bool:
+        """Record successful processing; false if it was already recorded."""
         with self._conn() as conn:
             cur = conn.execute(
-                "INSERT OR IGNORE INTO billing_events (stripe_event_id, type, "
-                "created_at) VALUES (?, ?, ?)",
+                "INSERT INTO billing_events (stripe_event_id, type, created_at, completed) "
+                "VALUES (?, ?, ?, 1) ON CONFLICT(stripe_event_id) DO UPDATE SET "
+                "type=excluded.type, created_at=excluded.created_at, completed=1 "
+                "WHERE billing_events.completed=0",
                 (event_id, event_type, _utcnow_iso()))
             return cur.rowcount > 0
 
-    def forget_billing_event(self, event_id: str) -> None:
-        """Release a claimed event id after its processing FAILED, so Stripe's
-        retry of the same event is processed instead of acked as a duplicate.
-        (record first, process second, forget on failure: the claim is what
-        makes a concurrent duplicate delivery a no-op.)"""
-        with self._conn() as conn:
-            conn.execute("DELETE FROM billing_events WHERE stripe_event_id=?",
-                         (event_id,))
 
     def list_users(self) -> list[User]:
         self.expire_due_tiers()  # so a lapsed grant never shows as still-active
@@ -1017,8 +1274,10 @@ class AccountStore:
         user = self.get_user_by_email(email)
         if user is None:
             return None
-        now = _utcnow()
         with self._conn() as conn:
+            # Serialize the cooldown check with token rotation across workers.
+            conn.execute("BEGIN IMMEDIATE")
+            now = _utcnow()
             recent = conn.execute(
                 "SELECT created_at FROM password_resets WHERE user_id=? "
                 "AND used_at IS NULL ORDER BY id DESC LIMIT 1", (user.id,)).fetchone()
@@ -1064,8 +1323,11 @@ class AccountStore:
             raise ValueError("a password is required")
         if not token:
             return None
-        now = _utcnow().isoformat()
         with self._conn() as conn:
+            # SQLite otherwise begins its transaction only at the first write,
+            # allowing concurrent requests to read and spend the same token.
+            conn.execute("BEGIN IMMEDIATE")
+            now = _utcnow().isoformat()
             row = conn.execute(
                 "SELECT id, user_id FROM password_resets WHERE token_hash=? "
                 "AND used_at IS NULL AND expires_at >= ?",
@@ -1093,8 +1355,10 @@ class AccountStore:
         the cooldown window so the resend button can't be turned into an email
         relay. Minting a token invalidates the user's prior unused tokens.
         """
-        now = _utcnow()
         with self._conn() as conn:
+            # Serialize the cooldown check with token rotation across workers.
+            conn.execute("BEGIN IMMEDIATE")
+            now = _utcnow()
             recent = conn.execute(
                 "SELECT created_at FROM email_verifications WHERE user_id=? "
                 "AND used_at IS NULL ORDER BY id DESC LIMIT 1",
@@ -1188,13 +1452,29 @@ class AccountStore:
             "projects_dir": str(self.projects_dir / str(user_id)),
         }
 
-    def delete_user(self, user_id: int) -> str | None:
+    def delete_user(self, user_id: int, *, require_billing_safe: bool = False) -> str | None:
         """Delete the user, their project rows, and their on-disk project tree.
 
         Honors the deletion right the Privacy Policy promises. Returns the
         filesystem path that was purged (for logging), or None if there was none.
         """
         with self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if require_billing_safe:
+                row = conn.execute(
+                    "SELECT billing_deleting, billing_deleting_pid, stripe_subscription_id, "
+                    "subscription_status, stripe_customer_id, stripe_customer_create_key "
+                    "FROM users WHERE id=?", (user_id,)).fetchone()
+                pending = conn.execute(
+                    "SELECT 1 FROM pending_checkouts WHERE user_id=?", (user_id,)).fetchone()
+                if (row is None or not row["billing_deleting"]
+                        or row["billing_deleting_pid"] != os.getpid() or pending is not None
+                        or (row["stripe_customer_create_key"] and not row["stripe_customer_id"])
+                        or (row["stripe_subscription_id"]
+                            and row["subscription_status"] != "canceled")):
+                    raise ValueError("billing state changed; account was not deleted")
+            report_ids = [r["id"] for r in conn.execute(
+                "SELECT id FROM support_reports WHERE user_id=?", (user_id,))]
             pids = [r["id"] for r in conn.execute(
                 "SELECT id FROM projects WHERE user_id=?", (user_id,))]
             # Drop likes this user gave, plus likes + FTS rows on their projects,
@@ -1204,6 +1484,11 @@ class AccountStore:
                 conn.execute("DELETE FROM project_likes WHERE project_id=?", (pid,))
                 if self._fts_enabled:
                     conn.execute("DELETE FROM projects_fts WHERE project_id=?", (pid,))
+            # Investigations may contain the report's private diagnostics and
+            # must not outlive the account's support reports.
+            conn.execute(
+                "DELETE FROM support_investigations WHERE report_id IN "
+                "(SELECT id FROM support_reports WHERE user_id=?)", (user_id,))
             conn.execute("DELETE FROM support_reports WHERE user_id=?", (user_id,))
             # build_jobs rows are never otherwise deleted, and reset/verification
             # token rows carry the user's id -- the promised deletion must not
@@ -1215,12 +1500,32 @@ class AccountStore:
             conn.execute("DELETE FROM email_verifications WHERE user_id=?",
                          (user_id,))
             conn.execute("DELETE FROM projects WHERE user_id=?", (user_id,))
+            conn.execute("DELETE FROM login_attempts WHERE email IN "
+                         "(SELECT email FROM users WHERE id=?)", (user_id,))
+            conn.execute("DELETE FROM pending_checkouts WHERE user_id=?", (user_id,))
             conn.execute("DELETE FROM users WHERE id=?", (user_id,))
         tree = self.projects_dir / str(user_id)
-        if tree.exists():
+        purged = str(tree) if tree.exists() else None
+        if purged is not None:
             shutil.rmtree(tree, ignore_errors=True)
-            return str(tree)
-        return None
+        if report_ids:
+            log_dir = self.projects_dir.parent / "support_investigations"
+            try:
+                # Anchor unlink to the canonical directory without following a
+                # substituted directory symlink or any DB-supplied path.
+                log_fd = os.open(log_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            except FileNotFoundError:
+                pass
+            else:
+                try:
+                    for report_id in report_ids:
+                        try:
+                            os.unlink(f"investigate_report_{report_id}.log", dir_fd=log_fd)
+                        except FileNotFoundError:
+                            pass
+                finally:
+                    os.close(log_fd)
+        return purged
 
     # ---- projects ---------------------------------------------------------
 
@@ -1236,35 +1541,74 @@ class AccountStore:
                        cloned_from_id=row["cloned_from_id"],
                        view_count=row["view_count"], clone_count=row["clone_count"],
                        like_count=row["like_count"], quality=row["quality"],
-                       board_code=row["board_code"])
+                       board_code=row["board_code"],
+                       attempt_generation=row["attempt_generation"],
+                       attempt_started_at=row["attempt_started_at"])
 
     def create_project(self, user_id: int, brief: str, *,
                        is_public: bool | None = None,
-                       auto_default_questions: bool = True) -> int:
-        """Reserve a project row at status 'running' (consumes a quota slot).
-
-        Visibility follows the owner's tier when not given explicitly: free users'
-        projects are public (the community-browser rule), paid (pro/max) users'
-        projects default private (they can publish later via set_visibility). Pass
-        is_public to override -- the clone path sets it directly for either tier."""
-        if is_public is None:
-            u = self.get_user(user_id)
-            is_public = (u is None) or (u.tier not in ("pro", "max"))
+                       auto_default_questions: bool = True) -> int | None:
+        """Check current verification/quota and reserve the design atomically."""
         with self._conn() as conn:
-            # Retried on IntegrityError: with no enforced FKs the only unique
-            # constraint in play is idx_projects_board_code, so a failure means
-            # the freshly drawn code collided; draw again.
-            for _ in range(5):
-                try:
-                    cur = conn.execute(
-                        "INSERT INTO projects (user_id, brief, status, created_at, "
-                        "is_public, board_code, auto_default_questions) VALUES (?, ?, 'running', ?, ?, ?, ?)",
-                        (user_id, brief, _utcnow_iso(), 1 if is_public else 0,
-                         new_board_code(), int(auto_default_questions)))
-                    return int(cur.lastrowid)
-                except sqlite3.IntegrityError:
-                    continue
-            raise RuntimeError("could not draw a unique board code")
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+            row = self._downgrade_if_expired(conn, row)
+            if row is None:
+                return None
+            user = self._row_to_user(row)
+            if not is_admin(user):
+                if not user.email_verified:
+                    return None
+                tier = TIERS.get(user.tier, TIERS[DEFAULT_TIER])
+                cutoff = (_utcnow() - dt.timedelta(days=tier["window_days"])).isoformat()
+                used = conn.execute(
+                    "SELECT COUNT(*) FROM projects WHERE user_id=? AND "
+                    "status IN ('running','ok','awaiting_input') AND created_at>=?",
+                    (user_id, cutoff)).fetchone()[0]
+                if used >= tier["limit"]:
+                    return None
+            if is_public is False and user.tier not in ("pro", "max"):
+                # Never silently publish a clone the caller requested private.
+                return None
+            if is_public is None:
+                is_public = user.tier not in ("pro", "max")
+            return self._insert_project(conn, user_id, brief, is_public,
+                                        auto_default_questions)
+
+    @staticmethod
+    def _insert_project(conn: sqlite3.Connection, user_id: int, brief: str,
+                        is_public: bool, auto_default_questions: bool) -> int:
+        # The only expected integrity error is a board-code collision.
+        for _ in range(5):
+            try:
+                now = _utcnow_iso()
+                cur = conn.execute(
+                    "INSERT INTO projects (user_id, brief, status, created_at, "
+                    "attempt_started_at, is_public, board_code, auto_default_questions) "
+                    "VALUES (?, ?, 'running', ?, ?, ?, ?, ?)",
+                    (user_id, brief, now, now, 1 if is_public else 0,
+                     new_board_code(), int(auto_default_questions)))
+                return int(cur.lastrowid)
+            except sqlite3.IntegrityError:
+                continue
+        raise RuntimeError("could not draw a unique board code")
+
+    def begin_project_attempt(self, project_id: int) -> int:
+        """Start a new attempt unless a run or build already owns the project."""
+        with self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            cur = conn.execute(
+                "UPDATE projects SET status='running', viewed_at=NULL, "
+                "attempt_generation=attempt_generation+1, attempt_started_at=? "
+                "WHERE id=? AND status!='running' AND NOT EXISTS ("
+                "SELECT 1 FROM build_jobs WHERE project_id=projects.id "
+                "AND status IN ('queued','running'))",
+                (_utcnow_iso(), project_id))
+            if cur.rowcount != 1:
+                raise ValueError("project is missing or already has an active run")
+            return int(conn.execute(
+                "SELECT attempt_generation FROM projects WHERE id=?",
+                (project_id,)).fetchone()[0])
 
     def finish_project(self, project_id: int, status: str, stem: str | None = None,
                        cost_usd: float | None = None, dir_path: str | None = None,
@@ -1280,34 +1624,50 @@ class AccountStore:
                                   stem: str | None = None,
                                   cost_usd: float | None = None,
                                   dir_path: str | None = None,
-                                  zip_path: str | None = None) -> bool:
+                                  zip_path: str | None = None, *,
+                                  expected_attempt_generation: int | None = None,
+                                  expected_job_id: int | None = None,
+                                  require_no_attempt_job: bool = False) -> bool:
         """`finish_project`, but only while the row is still 'running'.
 
         Returns whether the terminal write landed. A janitor (the orphan reaper)
         may decide to close a row and then lose the race to the run's own worker,
         which writes the REAL outcome; an unconditional UPDATE would let the
         janitor's guess overwrite a finished result."""
+        conditions = ["id=?", "status='running'"]
+        params: list = [status, stem, cost_usd, dir_path, zip_path,
+                        _utcnow_iso(), project_id]
+        if expected_attempt_generation is not None:
+            conditions.append("attempt_generation=?")
+            params.append(expected_attempt_generation)
+        if expected_job_id is not None:
+            conditions.append(
+                "EXISTS (SELECT 1 FROM build_jobs b WHERE b.id=? "
+                "AND b.project_id=projects.id "
+                "AND b.attempt_generation=projects.attempt_generation "
+                "AND b.status IN ('done','failed') AND NOT EXISTS ("
+                "SELECT 1 FROM build_jobs newer WHERE newer.project_id=projects.id "
+                "AND newer.attempt_generation=projects.attempt_generation "
+                "AND newer.id>b.id))")
+            params.append(expected_job_id)
+        if require_no_attempt_job:
+            conditions.append(
+                "NOT EXISTS (SELECT 1 FROM build_jobs b WHERE b.project_id=projects.id "
+                "AND b.attempt_generation=projects.attempt_generation)")
         with self._conn() as conn:
             cur = conn.execute(
                 "UPDATE projects SET status=?, project_stem=?, cost_usd=?, "
-                "dir_path=?, zip_path=?, finished_at=? "
-                "WHERE id=? AND status='running'",
-                (status, stem, cost_usd, dir_path, zip_path,
-                 _utcnow_iso(), project_id))
+                "dir_path=?, zip_path=?, finished_at=? WHERE " + " AND ".join(conditions),
+                params)
             return cur.rowcount > 0
 
     def update_project_status(self, project_id: int, status: str) -> None:
-        """Set just the status (e.g. 'awaiting_input' when a run parks on a
-        question, or back to 'running' when it resumes). Leaves artifacts intact.
-        Moving back to 'running' means a new result is in the making, so the
-        seen-marker resets and the workspace will auto-open the eventual result."""
+        """Set a non-running status without changing saved artifacts."""
+        if status == "running":
+            raise ValueError("start runs with begin_project_attempt")
         with self._conn() as conn:
-            if status == "running":
-                conn.execute("UPDATE projects SET status=?, viewed_at=NULL WHERE id=?",
-                             (status, project_id))
-            else:
-                conn.execute("UPDATE projects SET status=? WHERE id=?",
-                             (status, project_id))
+            conn.execute("UPDATE projects SET status=? WHERE id=?",
+                         (status, project_id))
 
     def mark_viewed(self, project_id: int) -> None:
         """Stamp that the owner has the project open in the workspace; the index
@@ -1356,9 +1716,10 @@ class AccountStore:
                   - dt.timedelta(seconds=older_than_s)).isoformat()
         with self._conn() as conn:
             rows = conn.execute(
-                "SELECT * FROM projects WHERE status='running' AND created_at < ? "
-                "AND id NOT IN (SELECT project_id FROM build_jobs "
-                "WHERE project_id IS NOT NULL) ORDER BY id",
+                "SELECT * FROM projects p WHERE p.status='running' "
+                "AND p.attempt_started_at < ? AND NOT EXISTS ("
+                "SELECT 1 FROM build_jobs b WHERE b.project_id=p.id "
+                "AND b.attempt_generation=p.attempt_generation) ORDER BY p.id",
                 (cutoff,)).fetchall()
         return [self._row_to_project(r) for r in rows]
 
@@ -1448,6 +1809,10 @@ class AccountStore:
                              log_path: str | None = None) -> int:
         """Queue an investigation row and return its id (status='queued')."""
         with self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if report_id is not None and conn.execute(
+                    "SELECT 1 FROM support_reports WHERE id=?", (report_id,)).fetchone() is None:
+                raise ValueError("support report no longer exists")
             cur = conn.execute(
                 "INSERT INTO support_investigations (report_id, board_code, "
                 "status, created_at, log_path) VALUES (?, ?, 'queued', ?, ?)",
@@ -1964,11 +2329,7 @@ class AccountStore:
                 raise ValueError(f"no invite code with id {code_id!r}")
 
     def check_invite_code(self, code: str) -> dict | None:
-        """The grant a code confers (tier, duration_days, ...), or None when the
-        code is unknown, disabled, or used up. Read-only: the signup flow checks
-        first, creates the user, then calls record_invite_use -- so a failed
-        signup (duplicate email) never burns a use. Two signups racing the last
-        use can both pass; at this scale one extra redemption is fine."""
+        """Read-only preview; create_user rechecks and redeems atomically."""
         c = (code or "").strip()
         if not c:
             return None
@@ -1978,12 +2339,6 @@ class AccountStore:
                 "AND (max_uses IS NULL OR use_count < max_uses)", (c,)).fetchone()
         return self._row_to_code(row) if row else None
 
-    def record_invite_use(self, code_id: int) -> None:
-        """Count a successful signup against a code (call after create_user)."""
-        with self._conn() as conn:
-            conn.execute(
-                "UPDATE invite_codes SET use_count=use_count+1, last_used_at=? "
-                "WHERE id=?", (_utcnow_iso(), code_id))
 
     # ---- build queue ---------------------------------------------------------
     # Cross-process FIFO of deterministic builds. The web app enqueues one row per
@@ -2002,11 +2357,13 @@ class AccountStore:
                         created_at=row["created_at"], started_at=row["started_at"],
                         finished_at=row["finished_at"], attempts=row["attempts"],
                         claimed_by=row["claimed_by"], log_path=row["log_path"],
-                        kind=(row["kind"] if "kind" in row.keys() else "build"))
+                        kind=(row["kind"] if "kind" in row.keys() else "build"),
+                        attempt_generation=row["attempt_generation"])
 
     def enqueue_build(self, *, workspace: str, project_id: int | None = None,
                       user_id: int | None = None, log_path: str | None = None,
-                      kind: str = "build") -> int:
+                      kind: str = "build",
+                      attempt_generation: int | None = None) -> int:
         """Queue one job. Idempotent per (workspace, kind): when a job of this
         kind is already queued/running for the workspace, return that job's id
         instead of inserting -- two Rebuild clicks from two tabs must never
@@ -2015,16 +2372,34 @@ class AccountStore:
         simply tails the job already in flight."""
         with self._conn() as conn:
             conn.execute("BEGIN IMMEDIATE")  # serialize the check-then-insert
+            if project_id is not None:
+                project = conn.execute(
+                    "SELECT status, attempt_generation FROM projects WHERE id=?",
+                    (project_id,)).fetchone()
+                if project is None or project["status"] != "running":
+                    raise ValueError("project is missing or not running")
+                current = int(project["attempt_generation"])
+                if attempt_generation is not None and attempt_generation != current:
+                    raise ValueError("project attempt has changed")
+                attempt_generation = current
+            elif attempt_generation is not None:
+                raise ValueError("attempt generation requires a project")
             row = conn.execute(
-                "SELECT id FROM build_jobs WHERE workspace=? AND kind=? "
+                "SELECT id, project_id, attempt_generation FROM build_jobs "
+                "WHERE workspace=? AND kind=? "
                 "AND status IN ('queued', 'running') ORDER BY id LIMIT 1",
                 (workspace, kind)).fetchone()
             if row is not None:
+                if (row["project_id"] != project_id
+                        or row["attempt_generation"] != attempt_generation):
+                    raise ValueError("workspace already has an active build")
                 return int(row["id"])
             cur = conn.execute(
                 "INSERT INTO build_jobs (project_id, user_id, workspace, status, "
-                "created_at, log_path, kind) VALUES (?, ?, ?, 'queued', ?, ?, ?)",
-                (project_id, user_id, workspace, _utcnow_iso(), log_path, kind))
+                "created_at, log_path, kind, attempt_generation) "
+                "VALUES (?, ?, ?, 'queued', ?, ?, ?, ?)",
+                (project_id, user_id, workspace, _utcnow_iso(), log_path, kind,
+                 attempt_generation))
             return int(cur.lastrowid)
 
     def get_build_job(self, job_id: int) -> BuildJob | None:
@@ -2033,6 +2408,12 @@ class AccountStore:
                                (job_id,)).fetchone()
         return self._row_to_build_job(row) if row else None
 
+    _CLAIMABLE_JOB = (
+        "(build_jobs.project_id IS NULL OR EXISTS (SELECT 1 FROM projects p "
+        "WHERE p.id=build_jobs.project_id AND p.status='running' "
+        "AND p.attempt_generation=build_jobs.attempt_generation))"
+    )
+
     def claim_build(self, job_id: int, claimed_by: str) -> bool:
         """Atomically move one specific queued job to running. The status guard in
         the WHERE makes concurrent claimants (worker vs web fallback) safe: exactly
@@ -2040,7 +2421,8 @@ class AccountStore:
         with self._conn() as conn:
             cur = conn.execute(
                 "UPDATE build_jobs SET status='running', started_at=?, "
-                "claimed_by=?, attempts=attempts+1 WHERE id=? AND status='queued'",
+                "claimed_by=?, attempts=attempts+1 WHERE id=? AND status='queued' AND "
+                + self._CLAIMABLE_JOB,
                 (_utcnow_iso(), claimed_by, job_id))
             return cur.rowcount == 1
 
@@ -2048,8 +2430,9 @@ class AccountStore:
         """Claim the oldest queued job (FIFO), or None when the queue is empty."""
         while True:
             with self._conn() as conn:
-                row = conn.execute("SELECT id FROM build_jobs WHERE status='queued' "
-                                   "ORDER BY id LIMIT 1").fetchone()
+                row = conn.execute(
+                    "SELECT id FROM build_jobs WHERE status='queued' AND "
+                    + self._CLAIMABLE_JOB + " ORDER BY id LIMIT 1").fetchone()
             if row is None:
                 return None
             if self.claim_build(int(row["id"]), claimed_by):
@@ -2087,10 +2470,11 @@ class AccountStore:
         """(jobs queued ahead of `job_id`, total queued, running) for the UI."""
         with self._conn() as conn:
             ahead = conn.execute(
-                "SELECT COUNT(*) FROM build_jobs WHERE status='queued' AND id<?",
-                (job_id,)).fetchone()[0]
+                "SELECT COUNT(*) FROM build_jobs WHERE status='queued' AND id<? AND "
+                + self._CLAIMABLE_JOB, (job_id,)).fetchone()[0]
             depth = conn.execute(
-                "SELECT COUNT(*) FROM build_jobs WHERE status='queued'").fetchone()[0]
+                "SELECT COUNT(*) FROM build_jobs WHERE status='queued' AND "
+                + self._CLAIMABLE_JOB).fetchone()[0]
             running = conn.execute(
                 "SELECT COUNT(*) FROM build_jobs WHERE status='running'").fetchone()[0]
         return int(ahead), int(depth), int(running)
@@ -2123,7 +2507,10 @@ class AccountStore:
         with self._conn() as conn:
             rows = conn.execute(
                 "SELECT b.* FROM build_jobs b JOIN projects p ON p.id=b.project_id "
-                "WHERE p.status='running' AND b.status IN ('done','failed','queued') "
+                "WHERE p.status='running' AND b.attempt_generation=p.attempt_generation "
+                "AND b.status IN ('done','failed','queued') AND NOT EXISTS ("
+                "SELECT 1 FROM build_jobs newer WHERE newer.project_id=b.project_id "
+                "AND newer.attempt_generation=b.attempt_generation AND newer.id>b.id) "
                 "ORDER BY b.id").fetchall()
         return [self._row_to_build_job(r) for r in rows]
 
@@ -2150,12 +2537,13 @@ class AccountStore:
         Returns how many rows changed."""
         changed = 0
         with self._conn() as conn:
-            rows = conn.execute("SELECT id, attempts, claimed_by FROM build_jobs "
-                                "WHERE status='running'").fetchall()
+            rows = conn.execute(
+                "SELECT id, attempts, claimed_by, " + self._CLAIMABLE_JOB
+                + " AS claimable FROM build_jobs WHERE status='running'").fetchall()
         for r in rows:
             if _pid_alive(_claimant_pid(r["claimed_by"])):
                 continue
-            if int(r["attempts"]) >= max_attempts:
+            if not r["claimable"] or int(r["attempts"]) >= max_attempts:
                 self.finish_build(int(r["id"]), rc=None, status="failed")
             else:
                 self.requeue_build(int(r["id"]))

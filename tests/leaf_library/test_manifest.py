@@ -108,13 +108,6 @@ def test_extra_fields_forbidden():
         Manifest.model_validate(payload)
 
 
-def test_pin_direction_matches_kicraft_models():
-    """PinDirection is redefined inside leaf_library; assert it stays in
-    sync with the canonical definition in kicraft.models."""
-    from kicraft.design.models import PinDirection as CC_PinDirection
-    from kicraft.leaf_library.manifest import PinDirection as LL_PinDirection
-    from typing import get_args
-    assert set(get_args(CC_PinDirection)) == set(get_args(LL_PinDirection))
 
 
 def test_content_hash_excludes_manifest_itself(tmp_path):

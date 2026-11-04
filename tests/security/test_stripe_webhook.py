@@ -1,9 +1,8 @@
 """Stripe webhook hardening: signature verification + idempotent replay.
 
 The /billing/webhook endpoint mutates billing tier, so it must reject unsigned /
-mis-signed payloads and process each event id exactly once (a replayed event is a
-no-op). billing.verify_event re-raises a bad signature as ValueError;
-AccountStore.record_billing_event dedupes on a UNIQUE event id.
+mis-signed payloads and safely replay events until processing completes.
+billing.verify_event re-raises a bad signature as ValueError.
 """
 from __future__ import annotations
 
@@ -32,10 +31,11 @@ def test_event_dedupe_is_idempotent(store):
     assert store.record_billing_event("evt_456", "checkout.session.completed") is True
 
 
-def test_failed_handler_can_release_the_claim_for_retry(store):
-    """If processing fails after the dedupe claim, forget_billing_event releases it
-    so Stripe's retry is processed rather than silently dropped."""
-    assert store.record_billing_event("evt_retry", "x") is True
-    store.forget_billing_event("evt_retry")
-    # released -> the retry is treated as new again
-    assert store.record_billing_event("evt_retry", "x") is True
+def test_legacy_uncompleted_claim_does_not_suppress_retry(store):
+    with store._conn() as conn:
+        conn.execute(
+            "INSERT INTO billing_events (stripe_event_id, type, created_at, completed) "
+            "VALUES ('evt_retry', 'x', '2026-01-01', 0)")
+    assert not store.billing_event_processed("evt_retry")
+    assert store.record_billing_event("evt_retry", "x")
+    assert store.billing_event_processed("evt_retry")

@@ -33,6 +33,32 @@ _POINT_RE = re.compile(
     r'|(?:\(xy\s+([-\d.eE+]+)\s+([-\d.eE+]+)\))'
 )
 
+def _arc_extrema(points: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    """Cardinal extrema on the circular arc through start, mid and end."""
+    (x0, y0), (xm, ym), (x1, y1) = points[:3]
+    ax, ay = xm - x0, ym - y0
+    bx, by = x1 - x0, y1 - y0
+    det = 2 * (ax * by - ay * bx)
+    if abs(det) < 1e-12:
+        return []
+    a2, b2 = ax * ax + ay * ay, bx * bx + by * by
+    cx = x0 + (a2 * by - b2 * ay) / det
+    cy = y0 + (ax * b2 - bx * a2) / det
+    radius = math.hypot(x0 - cx, y0 - cy)
+    start = math.atan2(y0 - cy, x0 - cx)
+    mid = (math.atan2(ym - cy, xm - cx) - start) % math.tau
+    end = (math.atan2(y1 - cy, x1 - cx) - start) % math.tau
+    ccw = mid <= end
+    extrema = []
+    for angle in (0.0, math.pi / 2, math.pi, 3 * math.pi / 2):
+        offset = (angle - start) % math.tau
+        if (offset <= end if ccw else offset >= end):
+            extrema.append((cx + radius * math.cos(angle),
+                            cy + radius * math.sin(angle)))
+    return extrema
+
+
+
 
 def parse_edge_cuts_aabb(
     pcb_path: Path,
@@ -59,13 +85,24 @@ def parse_edge_cuts_aabb(
         blk = m.group(0)
         if 'Edge.Cuts' not in blk:
             continue
-        for pm in _POINT_RE.finditer(blk):
-            if pm.group(1) is not None:
-                xs.append(float(pm.group(1)))
-                ys.append(float(pm.group(2)))
-            else:
-                xs.append(float(pm.group(3)))
-                ys.append(float(pm.group(4)))
+        points = [
+            (float(pm.group(1)), float(pm.group(2)))
+            if pm.group(1) is not None
+            else (float(pm.group(3)), float(pm.group(4)))
+            for pm in _POINT_RE.finditer(blk)
+        ]
+        if m.group(1) == "circle" and len(points) >= 2:
+            (cx, cy), (ex, ey) = points[:2]
+            radius = math.hypot(ex - cx, ey - cy)
+            xs.extend((cx - radius, cx + radius))
+            ys.extend((cy - radius, cy + radius))
+        elif m.group(1) == "arc" and len(points) >= 3:
+            points.extend(_arc_extrema(points))
+            xs.extend(x for x, _ in points)
+            ys.extend(y for _, y in points)
+        else:
+            xs.extend(x for x, _ in points)
+            ys.extend(y for _, y in points)
     if not xs:
         return None
     return (min(xs), min(ys), max(xs), max(ys))

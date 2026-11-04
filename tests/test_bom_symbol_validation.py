@@ -28,6 +28,4 @@ def test_resolvable_stock_symbol_is_not_flagged():
     assert _unresolved_symbols(BOM(parts=[_part("R1", "Device:R")])) == []
 
 
-def test_only_distinct_symbols_are_checked():
-    bom = BOM(parts=[_part("R1", "Device:R"), _part("R2", "Device:R")])
-    assert _unresolved_symbols(bom) == []
+

@@ -713,3 +713,49 @@ class TestLeafSolveDeadline:
 
         with pytest.raises(RuntimeError, match="leaf_solve_deadline"):
             _run_ladder(monkeypatch, cfg, plan, rounds=5)
+
+
+def test_small_size_reduction_routes_and_validates_candidate(tmp_path, monkeypatch):
+    from kicraft.autoplacer.brain import leaf_size_reduction as reduction
+
+    leaf, state = _leaf_and_state()
+    extraction = extract_leaf_board_state(leaf, state, margin_mm=10.0)
+    width, height = extraction.local_state.board_width, extraction.local_state.board_height
+    board = tmp_path / "winner.kicad_pcb"
+    board.write_text(str(width))
+    best = SolveRoundResult(
+        round_index=1, seed=0, score=1.0, placement=PlacementScore(),
+        components=dict(extraction.local_state.components),
+        routing={"failed": False, "validation": {"accepted": True}, "routed_board_path": str(board)},
+        routed=True,
+    )
+    monkeypatch.setattr(reduction, "tight_leaf_geometry_bounds", lambda *a, **k: {
+        "width_mm": 1, "height_mm": 1,
+    })
+    monkeypatch.setattr(reduction, "leaf_size_reduction_candidates", lambda *a: [{
+        "axis": "width", "step_mm": 0.5, "width_mm": width - 0.5, "height_mm": height,
+    }])
+
+    class LegalSolver:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def legality_diagnostics(self, components):
+            return {"pad_outside_count": 0, "overlap_count": 0}
+
+    monkeypatch.setattr(reduction, "PlacementSolver", LegalSolver)
+    calls = []
+
+    def route(candidate, components, cfg, **kwargs):
+        calls.append(candidate.local_state.board_width)
+        board.write_text(str(candidate.local_state.board_width))
+        return {"failed": False, "validation": {"accepted": True}, "routed_board_path": str(board)}, {}
+
+    monkeypatch.setattr(reduction, "route_local_subcircuit", route)
+    reduced, winning_round, summary = reduction.attempt_leaf_size_reduction(
+        extraction, best, {"leaf_size_reduction_max_attempts": 1},
+    )
+    assert summary["accepted"]
+    assert calls == [width - 0.5]
+    assert float(board.read_text()) == reduced.local_state.board_width
+    assert winning_round.routing["routed_board_path"] == str(board)

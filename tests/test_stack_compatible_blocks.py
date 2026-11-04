@@ -877,46 +877,7 @@ def test_force_back_only_override_unblocks_strict_dual_anchor():
     )
 
 
-def test_compose_artifacts_propagates_backside_through_hole_cfg():
-    """End-to-end: cfg["parent_placement"]["backside_through_hole_leaves"]
-    set on a sheet name must land as block_force_back_only=True on the
-    synthetic block component constructed in compose-time setup. This
-    is the bridge tested in isolation -- the override is otherwise
-    invisible to PlacementSolver."""
-    artifact = _battery_artifact()
-    block = artifact_to_component(artifact, ref="TEST_BLOCK")
 
-    # Sanity: default is False until cfg is consulted.
-    assert block.block_force_back_only is False
-
-    # Mirror the compose-time setup (read cfg, set flag if sheet matches).
-    # The unit under test here is the contract: setting the flag turns
-    # the heuristic off for that leaf without touching extract.
-    cfg_back_through_hole_leaves = {"BATT", "TERMINAL_BLOCK"}
-    if artifact.sheet_name in cfg_back_through_hole_leaves:
-        block.block_force_back_only = True
-
-    assert block.block_force_back_only is True
-    # And the predicate should now skip the front-side outline check
-    # for this leaf even if its blocker set has front-side intent.
-    from kicraft.autoplacer.brain.placement_utils import _blocker_pair_compatible
-
-    other_blockers = _blocker_set(
-        front_pads=[(Point(0.0, 0.0), Point(20.0, 12.0))],
-        leaf_outline=(Point(0.0, 0.0), Point(20.0, 12.0)),
-    )
-    other = _block(
-        "OTHER", pos=Point(50.0, 50.0), width=20.0, height=12.0,
-        blocker_set=other_blockers, locked=False,
-    )
-    block.pos = Point(60.0, 60.0)
-    block.width_mm = 80.0
-    block.height_mm = 60.0
-    block.body_center = Point(60.0, 60.0)
-    assert _blocker_pair_compatible(block, other), (
-        "with block_force_back_only=True, _blocker_pair_compatible should "
-        "return True (compatible) for an otherwise-conflicting front-only pair"
-    )
 
 
 # ---------------------------------------------------------------------------

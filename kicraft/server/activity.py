@@ -396,6 +396,7 @@ def reduce_activity(previous: dict | None, event: dict) -> dict:
                               if event.get("retry_action") is None
                               else event.get("retry_action")),
                 message=message,
+                exception_type=event.get("exception_type") or prior.get("exception_type"),
             )
         act["last_activity"] = {
             "ok": "Run finished",
@@ -856,7 +857,7 @@ def _tool_result(act: dict, event: dict) -> str | None:
             "call_id": call_id,
             "name": name or "tool",
             "args": {},
-            "status": "returned",
+            "status": "failed" if ok is False else "returned",
             "started_at": None,
             "duration_ms": event.get("duration_ms"),
             "cached": bool(event.get("cached")),

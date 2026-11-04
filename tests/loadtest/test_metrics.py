@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import threading
 import time
 from pathlib import Path
 
@@ -35,7 +36,7 @@ def test_rss_mb_for_current_process_is_positive():
 def test_find_pids_locates_this_process():
     # the pytest process cmdline contains 'python' or 'pytest'; match the exe dir
     found = metrics.find_pids(Path(os.sys.executable).name)
-    assert os.getpid() in found or found  # at least finds some matching interpreter
+    assert os.getpid() in found
 
 
 def test_wal_bytes_sums_existing_files(tmp_path):
@@ -71,13 +72,31 @@ def test_sampler_writes_rows_with_injected_probes(tmp_path):
     assert rows[-1]["web_rss_mb"] > 0
 
 
-def test_sampler_survives_a_failing_store(tmp_path):
-    class _BadStore:
-        def add_sample(self, *a, **k):
-            raise RuntimeError("disk full")
+def test_sampler_recovers_from_transient_store_failure(tmp_path, monkeypatch):
+    store = LoadResultStore(tmp_path / "loadtest.db")
+    store.start_run("recover", "test")
+    save_sample = store.add_sample
+    persisted = threading.Event()
+    attempts = 0
 
-    sampler = metrics.MetricsSampler(_BadStore(), "r", interval_s=0.05, disk_path=tmp_path)
-    with sampler:
-        time.sleep(0.15)
-    # a sampling hiccup must not kill the thread mid-run; it exits cleanly on stop
-    assert not sampler.is_alive()
+    def fail_once_then_persist(run_id, sample):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise sqlite3.OperationalError("temporary lock")
+        save_sample(run_id, sample)
+        persisted.set()
+
+    monkeypatch.setattr(store, "add_sample", fail_once_then_persist)
+    with metrics.MetricsSampler(
+        store, "recover", interval_s=0.01, disk_path=tmp_path,
+        queue_probe=lambda: (7, 1),
+    ):
+        assert persisted.wait(timeout=3)
+    rows = store.samples_for("recover")
+    assert attempts >= 2
+    assert rows[0]["queue_depth"] == 7
+    assert rows[0]["queue_running"] == 1
+
+
+

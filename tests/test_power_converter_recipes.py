@@ -103,11 +103,11 @@ def test_tps54331_3v3_composition_respects_load_boundary(load_a, blocked):
     result = resolve_architecture_recipes(architecture)
     assert any(d.code == "recipe_output_current_exceeded" for d in result.blocking) is blocked
     if not blocked:
-        assert any(s.recipe == "tps54331-adjustable@1" for s in result.selections)
+        assert any(s.recipe == "tps54331-adjustable@2" for s in result.selections)
 
 
 def test_tps54331_3v3_feedback_tolerance_stays_within_c3_supply_range():
-    definition = get_recipe("tps54331-adjustable@1")
+    definition = get_recipe("tps54331-adjustable@2")
     parts = {part.role: part for part in definition.parts}
     top = float(parts["feedback_top"].value.split("k", 1)[0])
     bottom = float(parts["feedback_bottom"].value.split("k", 1)[0])
@@ -140,7 +140,7 @@ def _assert_tps54331_buck_topology(definition) -> None:
     assert pins[("enable_jumper", 0, "2")] == "gnd"
 
 
-@pytest.mark.parametrize("recipe", ("tps54331-adjustable@1", "tps54331-12v-1a@1"))
+@pytest.mark.parametrize("recipe", ("tps54331-adjustable@2", "tps54331-12v-1a@2"))
 def test_tps54331_recipes_have_complete_buck_and_safe_enable_topology(recipe):
     definition = get_recipe(recipe)
     _assert_tps54331_buck_topology(definition)
@@ -178,7 +178,7 @@ def test_tps54331_recipes_have_complete_buck_and_safe_enable_topology(recipe):
 
 
 def test_tps54331_12v_feedback_math_is_connected_and_exact_nominally():
-    definition = get_recipe("tps54331-12v-1a@1")
+    definition = get_recipe("tps54331-12v-1a@2")
     parts = {part.role: part for part in definition.parts}
     r_top = float(parts["feedback_top"].value.split("k", 1)[0]) * 1_000
     r_bottom = float(parts["feedback_bottom"].value.split("k", 1)[0]) * 1_000
@@ -191,8 +191,8 @@ def test_enable_control_voltage_limits_are_part_specific():
     # AP6320x documents EN as a high-voltage input; TPS54331 does not.
     assert enable_control_max_voltage("ap63203-3v3@1") == 32.0
     assert enable_control_max_voltage("ap63205-5v@1") == 32.0
-    assert enable_control_max_voltage("tps54331-adjustable@1") == 6.0
-    assert enable_control_max_voltage("tps54331-12v-1a@1") == 6.0
+    assert enable_control_max_voltage("tps54331-adjustable@2") == 6.0
+    assert enable_control_max_voltage("tps54331-12v-1a@2") == 6.0
     assert enable_control_max_voltage("lm2577t-adj-12v-boost@1") == 18.0
 
     assert enable_control_max_voltage("tps61088-2s-12v-1a@1") == 18.0

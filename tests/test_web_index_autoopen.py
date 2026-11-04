@@ -14,6 +14,8 @@ the fresh app, and yields that module for the test to poke.
 """
 from __future__ import annotations
 
+from account_fixtures import seed_project
+
 import importlib
 import shutil
 import sys
@@ -35,6 +37,24 @@ STATE_FIXTURE = Path(__file__).parent / "fixtures" / "bmp280_reader_state.json"
 @pytest.fixture
 def anyio_backend():
     return "asyncio"
+
+
+async def test_signup_client_ip_uses_only_trusted_proxy_processing():
+    from starlette.requests import Request
+    from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
+    from kicraft.server import web
+
+    seen = []
+
+    async def app(scope, receive, send):
+        seen.append(web._client_ip(Request(scope)))
+
+    middleware = ProxyHeadersMiddleware(app, trusted_hosts="127.0.0.1")
+    for peer in ("203.0.113.5", "127.0.0.1"):
+        scope = {"type": "http", "client": (peer, 1234), "scheme": "http",
+                 "headers": [(b"x-forwarded-for", b"198.51.100.7")]}
+        await middleware(scope, None, None)
+    assert seen == ["203.0.113.5", "198.51.100.7"]
 
 
 @pytest.fixture
@@ -60,11 +80,44 @@ async def harness(tmp_path):
             web._LIVE_RUNS.clear()
 
 
+async def test_signup_rechecks_invite_before_creating_account(harness, monkeypatch):
+    u, _web, store, _acct = harness
+    store.create_invite_code("ONEUSE", "pro", duration_days=30, max_uses=1)
+    original_check = store.check_invite_code
+
+    def check_then_concurrent_signup(code):
+        grant = original_check(code)
+        store.create_user("winner@example.com", "password", invite_code=code)
+        return grant
+
+    monkeypatch.setattr(store, "check_invite_code", check_then_concurrent_signup)
+    await u.open("/signup")
+    u.find("Email").type("loser@example.com")
+    u.find("Password").type("password")
+    u.find("Invite code").type("ONEUSE")
+    u.find("I agree to the Terms of Service and Privacy Policy").click()
+    u.find("Create account").click()
+    await u.should_see("Invalid or disabled invite code.")
+    assert store.get_user_by_email("loser@example.com") is None
+    assert store.get_user_by_email("winner@example.com").tier == "pro"
+
+
+async def test_login_throttle_keeps_generic_error(harness):
+    u, _web, store, _acct = harness
+    for _ in range(5):
+        assert store.authenticate(EMAIL, "incorrect", client_ip="203.0.113.5") is None
+    await u.open("/login")
+    u.find("Email").type(EMAIL)
+    u.find("Password").type(PASSWORD).trigger("keydown.enter")
+    await u.should_see("Wrong email or password.")
+    await u.should_not_see("design a PCB from a sentence")
+
+
 def _persisted_project(store, user_id: int, brief: str, stem: str, *, auto_default_questions=True) -> int:
     """Lay a finished project on disk the way build-in-place does (brief +
     .kicraft/state.json + the fab package) and record its row, so open/clone flows
     run against the real artifact layout."""
-    pid = store.create_project(user_id, brief, auto_default_questions=auto_default_questions)
+    pid = seed_project(store, user_id, brief, auto_default_questions=auto_default_questions)
     base = store.projects_dir / str(user_id) / str(pid)
     (base / ".kicraft").mkdir(parents=True)
     (base / "brief.txt").write_text(brief, encoding="utf-8")
@@ -86,7 +139,7 @@ async def _login(u):
 
 async def test_returning_to_index_attaches_to_live_run(harness):
     u, web, store, acct = harness
-    pid = store.create_project(acct.id, "usb battery bank")
+    pid = seed_project(store, acct.id, "usb battery bank")
     live = web._fresh_run_state()
     live.update(running=True, user_id=acct.id, project_id=pid,
                 brief="usb battery bank")
@@ -99,12 +152,37 @@ async def test_returning_to_index_attaches_to_live_run(harness):
     await u.should_see("Running")
 
 
+async def test_attached_workspace_streams_a_new_attempt_without_reload(harness):
+    u, web, store, acct = harness
+    pid = seed_project(store, acct.id, "resume stream")
+    live = web._fresh_run_state()
+    live.update(running=True, user_id=acct.id, project_id=pid, brief="resume stream")
+    web._LIVE_RUNS[pid] = live
+    web._start_attempt(live, mode="design")
+    web._record_progress_event(live, {"kind": "stage_start", "stage": "intent"})
+    for _ in range(10):
+        web._record_progress_event(live, {"kind": "reasoning_delta", "text": "old "})
+
+    await _login(u)
+    await u.should_see("Intent started")
+    web._start_attempt(live, mode="continue")
+    web._record_progress_event(live, {"kind": "stage_start", "stage": "architecture"})
+    await u.should_see("Architecture started")
+
 async def test_blank_composer_when_nothing_needs_attention(harness):
     # The project list moved to /projects, so a fresh user lands on the blank
     # composer (first-run welcome), not an inline "No projects yet" list.
     u, web, store, acct = harness
     await _login(u)
     await u.should_see("Welcome to KiCraft")
+
+
+async def test_new_design_clears_previous_brief(harness):
+    u, _web, _store, _acct = harness
+    await _login(u)
+    u.find("Describe your board").type("A connector board")
+    u.find("New design").click()
+    assert next(iter(u.find("Describe your board").elements)).value == ""
 
 
 async def test_router_selector_is_absent_from_new_run(harness, monkeypatch):
@@ -147,6 +225,7 @@ async def test_cloned_project_opens_with_bom(harness):
     u, web, store, acct = harness
 
     owner = store.create_user("owner@example.com", "ownerpw12345")
+    owner = store.consume_verification_token(store.create_verification_token(owner.id))
     src_id = _persisted_project(store, owner.id, "bmp280 reader", "BMP280_READER",
                                 auto_default_questions=False)
 
@@ -172,6 +251,7 @@ async def test_clone_deep_link_outranks_parked_default(harness):
     store.update_project_status(parked, "awaiting_input")
 
     owner = store.create_user("owner2@example.com", "ownerpw12345")
+    owner = store.consume_verification_token(store.create_verification_token(owner.id))
     src = _persisted_project(store, owner.id, "bmp280 reader", "BMP280_READER")
     pid, err = web._clone_project(store.get_project(src), store.get_user(acct.id),
                                   make_private=False)
@@ -181,7 +261,8 @@ async def test_clone_deep_link_outranks_parked_default(harness):
     await u.should_see("Waiting for your answer")
 
     await u.open(f"/?project={pid}")  # what do_clone navigates to
-    await u.should_see("Design complete")
+    await u.should_not_see("Waiting for your answer")
+    await u.should_see(store.get_project(pid).brief)
 
 
 async def test_interactive_policy_reopens_and_requires_every_blocker(harness, monkeypatch):

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -60,6 +61,41 @@ def test_pin_leaf_copies_snapshot_and_writes_manifest(tmp_path):
     manifest = pins.read_pins(tmp_path)
     assert manifest["pinned_leaves"][LEAF_KEY]["round"] == 7
     assert pins.is_pinned(tmp_path, LEAF_KEY) == 7
+
+
+def test_pin_leaf_replaces_hardlink_and_refreshes_mtime(tmp_path):
+    leaf_dir = _seed_round_snapshot(tmp_path, LEAF_KEY, 7, "winner")
+    snapshot = leaf_dir / "round_0007_leaf_routed.kicad_pcb"
+    canonical = leaf_dir / "leaf_routed.kicad_pcb"
+    os.utime(snapshot, (1_000_000_000, 1_000_000_000))
+    os.link(snapshot, canonical)
+
+    pins.pin_leaf(tmp_path, LEAF_KEY, 7)
+
+    assert canonical.read_bytes() == snapshot.read_bytes()
+    assert canonical.stat().st_ino != snapshot.stat().st_ino
+    assert canonical.stat().st_mtime > snapshot.stat().st_mtime
+
+
+@pytest.mark.parametrize("operation", ["pin", "reapply"])
+def test_applying_pin_does_not_overwrite_other_hardlinked_snapshot(tmp_path, operation):
+    leaf_dir = _seed_round_snapshot(tmp_path, LEAF_KEY, 1, "old")
+    _seed_round_snapshot(tmp_path, LEAF_KEY, 2, "new")
+    old = leaf_dir / "round_0001_leaf_routed.kicad_pcb"
+    canonical = leaf_dir / "leaf_routed.kicad_pcb"
+    if operation == "reapply":
+        pins.pin_leaf(tmp_path, LEAF_KEY, 2)
+        canonical.unlink()
+    os.link(old, canonical)
+
+    if operation == "pin":
+        pins.pin_leaf(tmp_path, LEAF_KEY, 2)
+    else:
+        assert pins.ensure_applied(tmp_path)[LEAF_KEY] == "applied"
+
+    assert old.read_text() == "PCB-r1-old"
+    assert canonical.read_text() == "PCB-r2-new"
+    assert old.stat().st_ino != canonical.stat().st_ino
 
 
 def test_pin_leaf_raises_when_snapshot_incomplete(tmp_path):

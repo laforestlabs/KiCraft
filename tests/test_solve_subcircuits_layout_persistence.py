@@ -12,6 +12,7 @@ from kicraft.autoplacer.brain.types import (
     BoardState,
     Component,
     Layer,
+    InterfacePort,
     PlacementScore,
     Point,
     SolveRoundResult,
@@ -118,3 +119,24 @@ def test_best_round_to_layout_falls_back_without_routed_board():
     assert layout.components["J1"].body_center is not None
     assert layout.components["J1"].body_center.x == 10.0
     assert layout.bounding_box == (25.0, 20.0)
+
+
+
+
+
+def test_partial_persistence_summary_matches_by_instance_path():
+    from types import SimpleNamespace
+    from kicraft.cli.solve_subcircuits import _json_summary
+
+    failed = SimpleNamespace(
+        instance_path="/failed", to_dict=lambda: {"instance_path": "/failed"}
+    )
+    successful = SimpleNamespace(
+        instance_path="/success", to_dict=lambda: {"instance_path": "/success"}
+    )
+    metadata = {"instance_path": "/success"}
+    summary = _json_summary([failed, successful], [metadata])
+    assert summary["leaf_subcircuits"] == 1
+    assert summary["results"] == [{
+        "solved": {"instance_path": "/success"}, "artifact_metadata": metadata,
+    }]

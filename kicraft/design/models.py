@@ -15,7 +15,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, field_validator, model_validator
 
 
 REF_RE = re.compile(r"^[A-Z]+[0-9]+[A-Z0-9_-]*$")
@@ -140,7 +140,7 @@ class FormFactor(BaseModel):
     for a novel shape), mirroring the placement-rules leniency -- it degrades to
     a warning when the shapes module cannot resolve it at synthesis."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
     shape: str = "rect"
     corner_radius_mm: float | None = None  # rounded_rect
@@ -357,7 +357,7 @@ class InterSheetNet(BaseModel):
         return self
 
 
-JsonScalar = str | int | float | bool | None
+JsonScalar = str | int | FiniteFloat | bool | None
 
 CircuitRole = Literal[
     "mcu_core",
@@ -865,6 +865,8 @@ class ArchitectureAdvisory(BaseModel):
 
 
 class Architecture(BaseModel):
+    model_config = ConfigDict(allow_inf_nan=False)
+
     topologies: dict[str, str] = Field(default_factory=dict)
     rail_voltages: dict[str, float] = Field(default_factory=dict)
     comms_protocols: list[str] = Field(default_factory=list)
@@ -892,6 +894,16 @@ class Architecture(BaseModel):
     # provider claim: it marks a recorded claim, so review and BOM can flag it instead of assuming
     # the pin functions were verified.
     declared_interfaces: list[str] = Field(default_factory=list)
+
+    @field_validator("recipe_selections")
+    @classmethod
+    def _migrate_saved_recipe_versions(cls, selections: list[RecipeSelection]) -> list[RecipeSelection]:
+        if not selections:
+            return selections
+        from kicraft.design.recipes import migrate_recipe_selections
+
+        return migrate_recipe_selections(selections)
+
 
     @model_validator(mode="after")
     def _sheets_unique(self):
@@ -1146,7 +1158,7 @@ class ArraySpec(BaseModel):
       (0 = +x axis, clockwise-positive like KiCad).
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
     refs: list[str]
     pattern: Literal["grid", "ring"] = "grid"
@@ -1262,7 +1274,7 @@ class Substitution(BaseModel):
 class EdgeInterface(BaseModel):
     """Ordered fabrication interface constrained to one board edge."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
     name: str
     refs: list[str] = Field(min_length=1)
@@ -1455,7 +1467,7 @@ class PlacementBoard(BaseModel):
     autoplacer.json as board_width_mm/board_height_mm with the size
     search disabled, so the solver fits the user's chosen board."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
     width_mm: float | None = None
     height_mm: float | None = None
@@ -1631,8 +1643,11 @@ class ArtifactPaths(BaseModel):
     custom_footprint_dir: Path | None = None
     routed_pcb: Path | None = None  # set by `build`: promoted fully-routed board
     fab_zip: Path | None = None  # set by `build`: zipped Gerber/drill/CPL/BOM package
-    step_file: Path | None = None  # set by `build`: STEP export of the assembled board
+    step_file: Path | None = None  # STEP export; body-reference coverage may be partial
     board_3d_png: Path | None = None  # set by `build`: rendered 3D view of the board
+    # None = unmeasured/uninterpretable; [] = every expected assembly ref occurs.
+    # Occurrence presence alone does not qualify model geometry or placement.
+    step_model_missing_refs: list[str] | None = None
     status: str = "ok"  # "ok" if all §9 checks passed, else "failed"
     # Non-blocking fab-readiness warnings (e.g. a minor, fraction-of-a-mm
     # courtyard clip). The board IS fab-exported + 3D-rendered; these surface as
@@ -1808,6 +1823,9 @@ class ConversationState(BaseModel):
     functional_spec: FunctionalSpec | None = None
     architecture: Architecture | None = None
     bom: BOM | None = None
+    # Compiler-owned connections can exist before the wiring stage commits.
+    # None identifies saved projects predating this explicit completion marker.
+    wiring_complete: bool | None = None
     # User placement rules (deterministic; not a design stage). Edited
     # by the web rules panel via `stage-commit placement`; consumed by
     # write_autoplacer_json with the highest merge precedence.

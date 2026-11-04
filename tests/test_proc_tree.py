@@ -53,8 +53,10 @@ def test_kill_tree_reaps_session_detached_grandchild():
     proc = subprocess.Popen([sys.executable, "-c", _CHILD_SRC],
                             stdout=subprocess.PIPE, text=True,
                             start_new_session=True)
+    grandchild_fd = None
     try:
         grandchild = int(proc.stdout.readline())  # type: ignore[union-attr]
+        grandchild_fd = os.pidfd_open(grandchild)
         assert _alive(proc.pid) and _alive(grandchild)
         # The grandchild is in a DIFFERENT session/group: the pre-fix
         # killpg-only approach provably misses it.
@@ -69,11 +71,15 @@ def test_kill_tree_reaps_session_detached_grandchild():
         assert not _alive(proc.pid)
         assert not _alive(grandchild)
     finally:
-        kill_tree(proc.pid)
-        try:
-            os.kill(proc.pid, signal.SIGKILL)
-        except OSError:
-            pass
+        if grandchild_fd is not None:
+            try:
+                signal.pidfd_send_signal(grandchild_fd, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            finally:
+                os.close(grandchild_fd)
+        if proc.poll() is None:
+            proc.kill()
         _reap(proc)
 
 

@@ -94,7 +94,7 @@ def _ports(requirement: CircuitRequirement, channels: int, sensor: str, power_cy
     if set(requirement.ports) != required or any(not str(value).strip() for value in requirement.ports.values()):
         return None
     ports = {key: str(value) for key, value in requirement.ports.items()}
-    if ports["vminus"] != ports["analog_out_return"]:
+    if ports["vplus"] == ports["vminus"] or ports["vminus"] != ports["analog_out_return"]:
         return None
     if power_cycle_isolation and (
         ports["isolation_vdd"] in {ports["vplus"], ports["vminus"]}
@@ -112,6 +112,17 @@ def _ports(requirement: CircuitRequirement, channels: int, sensor: str, power_cy
     output_nets = {ports[f"conditioned_{index}"] for index in range(1, channels + 1)}
     if len(sensor_signals) != channels or len(output_nets) != channels:
         return None
+    rails = {ports["vplus"], ports["vminus"]}
+    if output_nets & (rails | sensor_signals):
+        return None
+    if power_cycle_isolation:
+        external_outputs = {ports[f"analog_out_{index}"] for index in range(1, channels + 1)}
+        if (
+            len(external_outputs) != channels
+            or external_outputs & (output_nets | sensor_signals | rails | {ports["isolation_vdd"], ports["isolation_enable"]})
+            or output_nets & {ports["isolation_vdd"], ports["isolation_enable"]}
+        ):
+            return None
     if sensor == "current-sense":
         current_inputs = []
         for index in range(1, channels + 1):

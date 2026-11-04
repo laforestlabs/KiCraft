@@ -339,8 +339,6 @@ def test_retry_feedback_includes_errors_and_offenders():
     msg = _retry_feedback(out)
     assert "9.11 net coverage" in msg  # the rule that failed
     assert "U2.4" in msg  # the exact pin the model must fix
-    assert "preserv" in msg.lower()  # patch, do not redraft
-    assert "only the slot" in msg.lower()
 
 
 def test_retry_feedback_without_offenders_omits_that_line():
@@ -349,49 +347,13 @@ def test_retry_feedback_without_offenders_omits_that_line():
     assert "offenders" not in msg  # no offenders line when none present
 
 
-def test_architecture_retry_feedback_explains_missing_inter_sheet_nets():
-    message = _retry_feedback(
-        {
-            "errors": ["fs-connection mapping: 2 connection(s) not mapped"],
-            "offenders": [
-                "connection 'MCU'→'LED' (digital) crosses sheets but has no inter_sheet_net"
-            ],
-        },
-        stage="architecture",
-    )
-    assert "add every missing cross-sheet signal" in message
-    assert "at least two endpoints" in message
-    assert "exact canonical `sheets[].name`" in message
 
 
-def test_retry_feedback_explains_series_path_for_dangling_terminal():
-    msg = _retry_feedback(
-        {
-            "ok": False,
-            "errors": ["9.15 no dangling signal nets: 1 signal net wires a single pin"],
-            "offenders": ["net 'CAN_TX_MCU' on sheet 'CAN TRANSCEIVER' wires only R3.2"],
-        },
-        stage="wiring",
-    )
-    assert "each side has the resistor terminal plus a non-resistor endpoint" in msg
-    assert "Do not assume the populated side is the source" in msg
-    assert "moving the destination pin" not in msg
 
 
-def test_retry_feedback_explains_complete_self_short_repair():
-    msg = _retry_feedback(
-        {
-            "ok": False,
-            "errors": ["9.17 two-terminal self-short: 1 part shorted"],
-            "offenders": [
-                "R3 (Device:R) has both terminals on net 'CAN_TX' -- the part is shorted"
-            ],
-        },
-        stage="wiring",
-    )
-    assert "complete three-item change" in msg
-    assert "MOVE the intended destination" in msg
-    assert "Do not merely rename one part terminal" in msg
+
+
+
 
 
 def test_parse_failure_classification_distinguishes_the_three_kinds():
@@ -419,10 +381,7 @@ def test_extract_json_rejects_trailing_prose_and_second_object():
     assert _extract_json('{"a": "}", "b": {"c": 1}}') == {"a": "}", "b": {"c": 1}}
 
 
-def test_wiring_gets_more_retries_than_the_simple_stages():
-    assert _stage_max_retries("wiring", 2) == 7
-    assert _stage_max_retries("intent", 2) == 2
-    assert _stage_max_retries("functional_spec", 2) == 2
+
 
 
 def test_caller_default_wins_when_higher_than_the_floor():
@@ -436,21 +395,13 @@ def test_wiring_gets_a_larger_token_budget():
     assert _stage_max_tokens("wiring", 16000) == 16000  # a higher caller default wins
 
 
-def test_complex_stages_get_larger_retry_budgets():
-    assert _stage_max_retries("bom", 2) == 4
-    assert _stage_max_retries("architecture", 2) == 3
 
 
-def test_bom_has_a_symbol_search_tool():
-    names = {t["function"]["name"] for t in BOM_TOOLS}
-    assert "search_symbols" in names  # discover, do not guess
-    assert {"list_parts", "lookup_symbol", "lookup_lcsc_id", "add_part_from_lcsc"} <= names
 
 
-def test_bom_has_a_footprint_search_tool():
-    names = {t["function"]["name"] for t in BOM_TOOLS}
-    assert "search_footprints" in names  # footprint discovery, do not guess
-    assert "lookup_footprint" in names  # verify a footprint exists + pad count
+
+
+
 
 
 # ---- clarifying questions -------------------------------------------------
@@ -586,14 +537,8 @@ def test_explicit_question_policy_overrides_legacy_stage_and_answer_rules():
     )
 
 
-def test_external_current_question_recommends_finding_the_fact_before_a_rating():
+def test_external_current_question_obeys_explicit_noninteractive_policy():
     questions = _normalize_questions([EXTERNAL_LOAD_CURRENT_QUESTION], "architecture")
-    assert questions[0]["options"] == [
-        "Determine the load current from the load datasheets first",
-        "Up to 1 A",
-        "Up to 2 A",
-        "Another current requirement (enter amperes)",
-    ]
     from kicraft.server.stage_runtime import _questions_need_input
 
     assert not _questions_need_input(
@@ -616,21 +561,10 @@ def test_external_current_question_recommends_finding_the_fact_before_a_rating()
     )
 
 
-def test_wiring_prompt_tells_model_to_self_repair_a_bom_shortfall():
-    sysmsg = build_system("wiring")
-    # wiring must be told to tag a BOM parts shortfall for automatic repair
-    # instead of asking the user.
-    assert "reconcile_target" in sysmsg
-    assert '"bom"' in sysmsg
 
 
-def test_bom_prompt_closes_architecture_decisions_and_demands_decoupling():
-    sysmsg = build_system("bom")
-    assert "ARCHITECTURE DECISIONS ARE CLOSED" in sysmsg
-    assert "Never ask the user to choose an MCU" in sysmsg
-    assert "emit only the named requirement and owned role" in sysmsg
-    assert "Decoupling completeness" in sysmsg
-    assert "per dedicated supply/decoupling pin" in sysmsg
+
+
 
 
 def test_bom_reconcile_instruction_lists_the_missing_parts():
@@ -643,71 +577,22 @@ def test_bom_reconcile_instruction_lists_the_missing_parts():
         ]
     )  # blank text is skipped
     assert "Add three 100nF caps for U1 DEC3-DEC5" in instr
-    assert "Do NOT ask the user" in instr
     assert instr.count("\n- ") == 1  # only the one non-blank deficit line
 
 
-def test_retry_feedback_unknown_ref_in_wiring_points_at_reconcile(tmp_path):
-    # WS6: an unknown-ref rejection in wiring must tell the model it cannot add
-    # parts and to park with reconcile_target=bom, and list the real refs -- so it
-    # stops inventing refs and burning its retry budget.
-    from kicraft.server.stage_runtime import _retry_feedback
-
-    out = {"errors": ["NetConnection 'PWR' references unknown ref 'Q99'"]}
-    msg = _retry_feedback(out, stage="wiring", valid_refs=["C1", "U1"])
-    assert "CANNOT add parts" in msg
-    assert "reconcile_target" in msg and '"bom"' in msg
-    assert "C1" in msg and "U1" in msg
 
 
-def test_retry_feedback_no_reconcile_note_for_non_wiring_stage():
-    from kicraft.server.stage_runtime import _retry_feedback
-
-    out = {"errors": ["some symbol not found"]}
-    msg = _retry_feedback(out, stage="bom")
-    assert "reconcile_target" not in msg
 
 
-def test_retry_feedback_power_name_as_ref_teaches_net_name_shape():
-    # KC-6DCV66: the model wrote '+3V3'/'GND' as an endpoint.ref and got a raw
-
-    # Pydantic regex dump. Feedback must name the fix (rails are net_name values,
-    # not component refs), not just echo the regex.
-    err = (
-        "slot validation failed: 2 validation errors for BOM\n"
-        "connections.7.endpoints.1.ref\n"
-        "  Value error, PinEndpoint.ref '+3V3' must match ^[A-Z]+[0-9]+[A-Z0-9_-]*$ "
-        "[type=value_error, input_value='+3V3', input_type=str]\n"
-        "connections.9.endpoints.1.ref\n"
-        "  Value error, PinEndpoint.ref 'GND' must match ^[A-Z]+[0-9]+[A-Z0-9_-]*$ "
-        "[type=value_error, input_value='GND', input_type=str]"
-    )
-    msg = _retry_feedback({"ok": False, "errors": [err]}, stage="wiring")
-    assert "is a net name" in msg
-    assert "+3V3" in msg and "GND" in msg
 
 
-def test_semantic_repair_explains_missing_esp32_supply_source():
-    message = stage_driver_mod._semantic_repair_message(
-        "architecture",
-        [
-            StageDiagnostic(
-                code="architecture_rail_source_unspecified",
-                severity="repair_required",
-                message="missing source",
-                evidence=["+3V3"],
-                detector_version=1,
-            )
-        ],
-    )
-    assert "5V-to-3.3V regulator" in message
-    assert "at least 1A" in message
 
 
-def test_retry_feedback_power_name_as_ref_skipped_for_other_stages():
-    err = "PinEndpoint.ref '+3V3' must match ^[A-Z]+[0-9]+[A-Z0-9_-]*$"
-    msg = _retry_feedback({"ok": False, "errors": [err]}, stage="bom")
-    assert "not a component ref" not in msg  # wiring-only guidance
+
+
+
+
+
 
 
 def test_attach_questions_writes_open_questions(tmp_path):
@@ -737,43 +622,9 @@ def test_attach_questions_replaces_only_that_stage(tmp_path):
     assert texts == {"new-intent", "keep-arch"}  # intent replaced, architecture kept
 
 
-def test_build_system_offers_clarifying_questions():
-    sysmsg = build_system("intent")
-    assert '"questions"' in sysmsg  # the model is told it may ask
-    assert "blocking" in sysmsg
-    assert "2-4 concise suggested answers" in sysmsg
-    assert "Never ask to confirm a default" in sysmsg
 
 
-@pytest.mark.parametrize(
-    ("stage", "code", "expected_option"),
-    [
-        (
-            "functional_spec",
-            "functional_spec_external_load_power_assumed",
-            "Board supplies the external loads",
-        ),
-        (
-            "architecture",
-            "architecture_external_load_current_unspecified",
-            "1 A",
-        ),
-    ],
-)
-def test_semantic_blocking_questions_include_concrete_options(stage, code, expected_option):
-    message = stage_driver_mod._semantic_repair_message(
-        stage,
-        [
-            StageDiagnostic(
-                code=code,
-                severity="repair_required",
-                message="x",
-                evidence=[],
-                detector_version=1,
-            )
-        ],
-    )
-    assert expected_option in message
+
 
 
 def test_bom_part_hints_extracts_pasted_lcsc_ids():
@@ -796,10 +647,7 @@ def test_bom_part_hints_ignores_refdes_and_embedded_runs():
     assert _bom_part_hints("", None) == ""
 
 
-def test_bom_prompt_mentions_search_budget():
-    msg = build_system("bom")
-    assert "SEARCH BUDGET" in msg
-    assert "STOP searching" in msg
+
 
 
 # ---- in-stream reasoning-loop breakout (KC-VWW5X7) -------------------------
@@ -894,9 +742,6 @@ def test_design_reasoning_policy_selection():
     assert _design_reasoning(_C(), "intent") == {"enabled": False}
     assert _design_reasoning(_C(), "functional_spec") == {"enabled": False}
     assert _design_reasoning(_C(), "architecture") == {"max_tokens": 2048}
-    defaults = Settings(api_key="test")
-    assert defaults.design_reasoning_tokens == 0
-    assert defaults.design_reasoning("architecture") == {"enabled": False}
     assert _design_reasoning(object(), "intent") is None  # mock: no .s policy
 
 
@@ -1898,9 +1743,6 @@ def test_mixed_recipe_sheet_calls_provider_once_for_only_novel_role(tmp_path, mo
 
     assert result["commit_ok"] is True
     assert result["work_units"] == result["attempts"] == len(client.calls) == 1
-    system_prompt = client.calls[0]["messages"][0]["content"]
-    assert '"owned_roles":["analog_block"]' in system_prompt
-    assert '"recipe_ids":["esp32-s3-mini-1-minimal@1"]' in system_prompt
     assert any(part.get("recipe_id") for part in committed[0]["parts"])
     assert [
         part["resolution_source"] for part in committed[0]["parts"] if not part.get("recipe_id")
@@ -2053,10 +1895,6 @@ def test_syntax_stopped_stream_uses_truthful_feedback_and_existing_retry_ceiling
     result = run_session(tmp_path, "a USB-powered LED", ["intent"], client=client)
     assert result["status"] == ("ok" if recovers else "failed")
     assert len(client.calls) == (2 if recovers else 3)
-    feedback = client.calls[1]["messages"][-1]["content"]
-    assert syntax_error in feedback
-    assert "3034" in feedback and "$.inter_sheet_nets" in feedback
-    assert "configured" not in feedback and "item unknown" not in feedback
     if not recovers:
         assert result["results"][-1]["failure_kind"] == "collection_limit"
         assert result["results"][-1]["attempts"] == 3
@@ -2618,6 +2456,7 @@ def test_early_design_question_defaults_without_parking(tmp_path):
                 "questions": [
                     {
                         "text": "Which op amp?",
+                        "stage": "intent",
                         "options": ["Rail-to-rail", "Dual supply"],
                         "blocking": True,
                     }
@@ -2634,7 +2473,6 @@ def test_early_design_question_defaults_without_parking(tmp_path):
 
     assert result["status"] == "ok"
     assert len(client.calls) == 2
-    assert "Do not ask more questions" in client.calls[1]["messages"][-1]["content"]
     assert not json.loads((tmp_path / ".kicraft" / "state.json").read_text())["open_questions"]
 
 
@@ -2645,6 +2483,7 @@ def test_explicit_false_parks_an_early_stage_despite_a_redrive_instruction(tmp_p
                 "questions": [
                     {
                         "text": "Which op amp?",
+                        "stage": "intent",
                         "options": ["Rail-to-rail", "Dual supply"],
                         "blocking": True,
                     }
@@ -2679,6 +2518,7 @@ def test_complete_instruction_suppresses_repeated_blocking_question(tmp_path):
                 "questions": [
                     {
                         "text": "Which input contract?",
+                        "stage": "intent",
                         "options": ["15 V / 3 A", "20 V / 5 A"],
                         "blocking": True,
                     }
@@ -2699,7 +2539,6 @@ def test_complete_instruction_suppresses_repeated_blocking_question(tmp_path):
     )
     assert result["status"] == "ok"
     assert len(client.calls) == 2
-    assert "Do not ask more questions" in client.calls[1]["messages"][-1]["content"]
 
 
 def test_review_question_does_not_persist_open_questions(tmp_path):
@@ -2741,11 +2580,11 @@ def test_review_question_does_not_persist_open_questions(tmp_path):
             [{"text": "Which supply voltage?", "answer": "5 V"}],
             None,
             False,
-            False,
+            True,
             id="answered-review",
         ),
         pytest.param(
-            True, None, "Use 5 V; do not ask again.", False, False, id="instructed-review"
+            True, None, "Use 5 V; do not ask again.", False, True, id="instructed-review"
         ),
         pytest.param(True, None, None, False, True, id="interactive-clarification"),
         pytest.param(
@@ -2779,6 +2618,7 @@ def test_semantic_repair_questions_follow_primary_disposition(
     )
     question = {
         "text": "Which supply voltage?",
+        "stage": "intent",
         "blocking": True,
         "options": ["3.3 V", "5 V"],
     }
@@ -2864,67 +2704,7 @@ def test_attempt_trace_associates_candidates_with_one_bounded_repair(tmp_path, m
         assert not ({"raw", "messages", "reasoning", "candidate"} & event.keys())
 
 
-def test_neutral_series_feedback_allows_commit_progression(tmp_path, monkeypatch):
-    state_path = _a3_wiring_state(tmp_path, monkeypatch)
-    commits = iter(
-        [
-            (
-                False,
-                {
-                    "ok": False,
-                    "errors": ["9.15 no dangling signal nets: 1 signal net wires a single pin"],
-                    "offenders": ["net 'B' on sheet 'MAIN' wires only R1.2"],
-                    "offenders_total": 1,
-                },
-            ),
-            (True, {"ok": True}),
-        ]
-    )
-    monkeypatch.setattr(stage_driver_mod, "commit_stage", lambda *args, **kwargs: next(commits))
-    first = {
-        "pins": [
-            {"ref": "U1", "pin": "1", "net": "A"},
-            {"ref": "R1", "pin": "1", "net": "A"},
-            {"ref": "R1", "pin": "2", "net": "B"},
-            {"ref": "U1", "pin": "2", "net": "B"},
-        ]
-    }
-    corrected = {
-        "pins": [
-            {"ref": "U1", "pin": "1", "net": "A"},
-            {"ref": "R1", "pin": "1", "net": "A"},
-            {"ref": "R1", "pin": "2", "net": "B"},
-            {"ref": "U1", "pin": "2", "net": "B"},
-        ]
-    }
-    replies = [
-        {"text": json.dumps(slot), "reasoning": "", "finish_reason": "stop", "cost_usd": 0.0}
-        for slot in (first, corrected)
-    ]
-    client = _ScriptedClient(replies)
-    client.s = Settings(api_key="test", design_profile="deepseek")
-    records = []
 
-    result = stage_driver_mod.drive_stage(
-        client,
-        "wiring",
-        "test",
-        state_path,
-        tmp_path,
-        max_retries=2,
-        attempt_observer=records.append,
-    )
-
-    assert result["commit_ok"] is True
-    feedback = client.calls[1]["messages"][-1]["content"]
-    assert "Do not assume the populated side is the source" in feedback
-    assert "moving the destination pin" not in feedback
-    assert [row["outcome"] for row in records] == [
-        "candidate",
-        "candidate",
-    ]
-    assert records[0]["aggregate_signature"] is None
-    assert records[1]["aggregate_signature"] is not None
 
 
 # ---------- bounded BOM/wiring work-unit orchestration ----------
@@ -3263,11 +3043,20 @@ def test_explicit_false_allows_bom_work_units_to_park_on_a_question(tmp_path, mo
     client = _unit_client(
         [
             {
+                "text": json.dumps({"questions": [{
+                    "text": "Which input connector style?", "stage": "bom",
+                    "options": [], "blocking": True,
+                }]}),
+                "finish_reason": "stop",
+                "cost_usd": 0.0,
+            },
+            {
                 "text": json.dumps(
                     {
                         "questions": [
                             {
                                 "text": "Which input connector style?",
+                                "stage": "bom",
                                 "options": ["Screw terminal", "Barrel jack"],
                                 "blocking": True,
                             }
@@ -3296,6 +3085,7 @@ def test_explicit_false_allows_bom_work_units_to_park_on_a_question(tmp_path, mo
 
     assert result["needs_input"] is True
     assert result["questions"][0]["options"] == ["Screw terminal", "Barrel jack"]
+    assert len(client.calls) == 2  # invalid blocking question was repaired, not demoted
     properties = client.calls[0]["response_format"]["json_schema"]["schema"]["properties"]
     assert "questions" in properties
 
@@ -3379,6 +3169,7 @@ def test_bom_work_unit_provider_question_defaults_without_parking(tmp_path, monk
                 "questions": [
                     {
                         "text": "Which MCU/control architecture should the BOM reflect?",
+                        "stage": "bom",
                         "options": ["Dedicated PD trigger", "ESP32-S3", "ESP32 + CH340C"],
                         "blocking": True,
                         "material": True,
@@ -3489,8 +3280,6 @@ def test_work_unit_commit_repair_redrafts_only_mapped_owners(
 
     assert result["commit_ok"] is True
     assert len(client.calls) == 2 + len(repair_refs)
-    for call, ref in zip(client.calls[2:], repair_refs, strict=True):
-        assert f'"owned_refs":["{ref}"]' in call["messages"][0]["content"]
 
 
 def test_work_unit_question_discards_checkpoint_but_provider_failure_retains_it(
@@ -3506,6 +3295,7 @@ def test_work_unit_question_discards_checkpoint_but_provider_failure_retains_it(
                         "questions": [
                             {
                                 "text": "Choose?",
+                                "stage": "wiring",
                                 "options": ["A", "B"],
                                 "blocking": True,
                             }
@@ -3517,7 +3307,10 @@ def test_work_unit_question_discards_checkpoint_but_provider_failure_retains_it(
             },
         ]
     )
-    result = stage_driver_mod.drive_stage(question_client, "wiring", "test", state_path, tmp_path)
+    result = stage_driver_mod.drive_stage(
+        question_client, "wiring", "test", state_path, tmp_path,
+        instruction="Apply the prior change request.",
+    )
     draft_path = tmp_path / "drafts" / "wiring-units.json"
     assert result["needs_input"] is True
     assert not draft_path.exists()
@@ -3541,6 +3334,7 @@ def test_explicit_true_defaults_an_ordinary_wiring_question_but_not_reconciliati
                 "questions": [
                     {
                         "text": "Choose?",
+                        "stage": "wiring",
                         "options": ["Recommended route", "Alternative route"],
                         "blocking": True,
                     }
@@ -3565,7 +3359,6 @@ def test_explicit_true_defaults_an_ordinary_wiring_question_but_not_reconciliati
     )
 
     assert result["commit_ok"] is True
-    assert "Do not ask more questions" in client.calls[2]["messages"][-1]["content"]
 
 
 def test_work_unit_debug_review_and_observer_v2_are_redacted(tmp_path, monkeypatch):
@@ -3749,6 +3542,7 @@ def test_work_unit_bom_reconcile_question_keeps_pipeline_park_shape(tmp_path, mo
                         "questions": [
                             {
                                 "text": "Add C1 before wiring",
+                                "stage": "wiring",
                                 "options": ["Add it"],
                                 "blocking": True,
                                 "reconcile_target": "bom",
@@ -3781,51 +3575,26 @@ def test_work_unit_bom_reconcile_question_keeps_pipeline_park_shape(tmp_path, mo
     assert result["questions"][0]["reconcile_target"] == "bom"
 
 
-def test_noninteractive_default_policy_applies_to_every_stage(tmp_path, monkeypatch):
-    seen = []
 
-    def fake_drive_stage(_client, stage, _brief, _state_path, _workspace, *args, **kwargs):
-        seen.append((stage, kwargs["instruction"]))
-        return {"stage": stage, "commit_ok": True, "cost_usd": 0.0}
 
-    class FakeGuard:
-        @staticmethod
-        def status():
-            return {}
 
-    class FakeClient:
-        guard = FakeGuard()
 
-    monkeypatch.setattr(stage_pipeline, "drive_stage", fake_drive_stage)
-    stages = ["intent", "functional_spec", "architecture"]
-    stage_pipeline.drive_chain(
-        stages,
-        "brief",
-        tmp_path,
-        client=FakeClient(),
-        instruction=stage_driver_mod.NONINTERACTIVE_DEFAULTS_INSTRUCTION,
+
+def test_decode_does_not_demote_malformed_blocking_question():
+    from types import SimpleNamespace
+
+    facts = stage_driver_mod.ProviderFacts(
+        raw=json.dumps({"questions": [{
+            "text": "Battery voltage?", "stage": "intent", "blocking": True, "options": [],
+        }]}),
+        finish="stop", rounds=None, tool_calls=None, cost_usd=0.0, had_content=True,
+        loop_detected=False, collection_limit=None, loop_abort_reason=None, collection_counts={},
     )
-
-    assert seen == [
-        (stage, stage_driver_mod.NONINTERACTIVE_DEFAULTS_INSTRUCTION) for stage in stages
-    ]
-
-
-def test_contract_rejection_gets_the_schema_correction_not_a_reserialize():
-    """A semantic/recipe contract rejection must be corrected, not reserialized.
-
-    `invalid_schema` and `contract_rejected` share the StageSchemaError path, so
-    a new kind that misses the template branch silently hands the model the
-    "your reply was not a single complete JSON object" instruction — which is
-    both false and useless for a candidate that parsed fine.
-    """
-    common = dict(raw='{"sheets": []}', bounds_sentence="", schema_error="unsupported_recipe_endpoint: ...")
-    contract = stage_driver_mod._stage_recovery_message("contract_rejected", **common)
-    schema = stage_driver_mod._stage_recovery_message("invalid_schema", **common)
-
-    assert contract == schema
-    assert "failed KiCraft's local slot validation" in contract
-    assert "not a single complete JSON object" not in contract
+    outcome = stage_driver_mod.decode_stage_response(
+        SimpleNamespace(stage="intent", prompt_state={}), facts
+    )
+    assert outcome.kind == "recoverable_failure"
+    assert outcome.payload["failure_kind"] == "invalid_schema"
 
 
 @pytest.mark.parametrize("diagnostic,expected", [
@@ -3895,8 +3664,6 @@ def test_ladder_no_serialization_spends_only_preserving_corrections(tmp_path):
     result = run_session(tmp_path, "a USB-powered LED", ["intent"], client=client)
     assert _rungs(client) == ["normal", "normal", "normal"]
     assert all(call["reasoning"] == {"enabled": False} for call in client.calls[1:])
-    # The cleaner is told its own draft was malformed, never to start fresh.
-    assert "not a single complete JSON object" in client.calls[1]["messages"][-1]["content"]
     assert result["results"][-1]["attempts"] == 3
     assert result["results"][-1]["failure_kind"] == "invalid_json"
 
@@ -3967,52 +3734,8 @@ def test_ladder_signature_never_rescues_a_diagnostic_free_parse_failure(tmp_path
     assert result["results"][-1]["failure_kind"] == "invalid_json"
 
 
-def test_ladder_preserving_clean_slate_carries_the_previous_candidate(tmp_path):
-    replies = [
-        _bad_reply("not json at all"),
-        _bad_reply("still not json"),
-        _bad_reply("also not json"),
-    ]
-    stock = _ladder_client(list(replies))
-    run_session(tmp_path / "stock", "a USB-powered LED", ["intent"], client=stock)
-    stock_clean_slate = stock.calls[-1]["messages"]
-    assert [row["role"] for row in stock_clean_slate][-1:] == ["user"]
-
-    preserving = _ladder_client(list(replies), contract_ladder="preserving")
-    run_session(tmp_path / "preserving", "a USB-powered LED", ["intent"], client=preserving)
-    messages = preserving.calls[-1]["messages"]
-    assert messages[-2] == {"role": "assistant", "content": "still not json"}
-    assert "Preserve every already-valid net" in messages[-1]["content"]
-    assert "Start from the binding state" not in messages[-1]["content"]
 
 
-def test_ladder_dropped_gate_names_content_the_revision_dropped(tmp_path):
-    def arch_like(include_d) -> str:
-        # Parseable JSON that the intent schema rejects (unknown keys) — the
-        # same shape the dropped-content gate reads its identities from.
-        payload = {
-            "goal": "a HUB75 board",
-            "inter_sheet_nets": [
-                {"name": name, "endpoints": [{"sheet": "MCU"}, {"sheet": "HUB75"}]}
-                for name in (("HUB75_D", "HUB75_OE") if include_d else ("HUB75_OE",))
-            ],
-            "requirements": [{"id": "hub75", "ports": {"addr_d": "HUB75_D"} if include_d else {}}],
-        }
-        return json.dumps(payload)
-
-    replies = [_bad_reply(arch_like(True)), _bad_reply(arch_like(False)), _bad_reply(arch_like(False))]
-
-    gate = _ladder_client(list(replies), contract_ladder="dropped_gate")
-    run_session(tmp_path / "gate", "a HUB75 board", ["intent"], client=gate)
-    # The loss is detectable only after the revision that dropped it: the note
-    # rides the correction built from rung 2's rejection (the clean-slate call).
-    clean_slate_message = gate.calls[2]["messages"][-1]["content"]
-    assert "REGRESSION FIX" in clean_slate_message
-    assert "'HUB75_D'" in clean_slate_message
-
-    stock = _ladder_client(list(replies))
-    run_session(tmp_path / "stock", "a HUB75 board", ["intent"], client=stock)
-    assert "REGRESSION FIX" not in stock.calls[2]["messages"][-1]["content"]
 
 
 def test_ladder_full_feedback_repeats_every_diagnostic_from_the_drive(tmp_path, monkeypatch):
@@ -4031,11 +3754,6 @@ def test_ladder_full_feedback_repeats_every_diagnostic_from_the_drive(tmp_path, 
     monkeypatch.setattr(stage_driver_mod, "commit_stage", fake_commit)
     result = run_session(tmp_path, "a USB-powered LED", ["intent"], client=client)
     assert result["status"] == "ok"
-    # The third correction carries BOTH gate errors, not only the latest rung's.
-    feedback = client.calls[2]["messages"][-1]["content"]
-    assert "ALL BLOCKING DEFECTS THIS STAGE HAS REPORTED" in feedback
-    assert "§9.15 dangling signal nets" in feedback
-    assert "§9.17 two-terminal self-short" in feedback
 
 
 

@@ -881,7 +881,22 @@ def cmd_stages(args) -> int:
 
 
 def collect_erc(run: Path) -> dict:
-    rpt = next(run.rglob("*_erc.rpt"), None)
+    check = _jdict(next(run.rglob("synthesis_check.json"), None))
+    erc = next(
+        (row for row in (check.get("checks") or [])
+         if isinstance(row, dict) and row.get("name") == "9.12 ERC"),
+        None,
+    )
+    if erc is not None and "report_path" in erc:
+        # The producer records the unique report for this invocation, or null
+        # when none was produced. Never substitute a stale canonical report.
+        name = erc["report_path"]
+        if not isinstance(name, str) or not name or Path(name).name != name:
+            return {"present": False}
+        rpt = next((p for p in run.rglob("*_erc.rpt") if p.name == name), None)
+    else:
+        # Legacy synthesis checks did not carry report provenance.
+        rpt = next(run.rglob("*_erc.rpt"), None)
     if rpt is None:
         return {"present": False}
     d = _jdict(rpt)

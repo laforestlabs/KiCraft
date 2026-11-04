@@ -12,7 +12,8 @@ the only place. Everything else (the GUI monitor, the manual layout
 canvas, the score-time visual check, the DRC overlay, the parent
 compose stamper, the subcircuit diagnostics bundle) flows through
 `render_pcb` / `render_views`, so the rendered pixels cannot drift
-between consumers.
+between consumers. Circular outlines and three-point graphic arcs include
+their curved extrema in the Edge.Cuts bounds, not just the defining points.
 
 ## Modules
 

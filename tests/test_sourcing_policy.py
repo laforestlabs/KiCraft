@@ -24,10 +24,11 @@ class _Inventory:
         self.rows = rows
 
 
-def _record(identity, family, footprint, contacts=("1", "2"), lcsc="C1"):
+def _record(identity, family, footprint, contacts=("1", "2"), lcsc="C1", equivalent_to=None):
     return SimpleNamespace(
         identity=identity, family=family, footprint=footprint, contacts=tuple(contacts),
         lcsc=lcsc, is_portable_candidate=True, bundle=identity, package=footprint,
+        operating_limits={"same_device_package_grade_as": equivalent_to} if equivalent_to else {},
     )
 
 
@@ -81,9 +82,11 @@ def test_a_family_name_is_not_the_part_number(monkeypatch):
 
 
 def test_an_unnamed_part_is_swapped_for_an_in_stock_carrier_of_the_same_package(monkeypatch):
-    """Same family keeps the device, same package keeps every pin the design already binds."""
+    """Only a reviewed equivalent in the same package can replace the selected device."""
     current = _record("led-a", "led-0603", "vendor-a:LED_0603_1608Metric", lcsc="C1")
-    sibling = _record("led-b", "led-0603", "vendor-b:LED_0603_1608Metric", lcsc="C2")
+    sibling = _record(
+        "led-b", "led-0603", "vendor-b:LED_0603_1608Metric", lcsc="C2", equivalent_to="led-a",
+    )
     decision = _decide(
         monkeypatch,
         identity="led-a",
@@ -121,13 +124,30 @@ def test_the_real_led_carriers_are_not_swappable_across_packages():
     assert sourcing_policy.same_package(small, small) is True
 
 
+def test_same_package_does_not_prove_electrical_equivalence():
+    for family, current, incompatible in (
+        ("relay", "srd-05vdc-sl-c", "srd-24vdc-sl-c"),
+        ("capacitor-0603", "grm188r71c104ka01d", "grm188r61a106ke69d"),
+        ("resistor-0603", "ac0603fr-071kl", "frc0603f1002ts"),
+    ):
+        candidates = sourcing_policy.swap_candidates(family, current, in_stock=lambda _: True)
+        assert incompatible not in {candidate.identity for candidate in candidates}
+
+
+def test_reviewed_same_device_package_grade_allows_carrier_swap():
+    candidates = sourcing_policy.swap_candidates(
+        "attiny402", "attiny402-ssn", in_stock=lambda _: True,
+    )
+    assert "attiny402-ssnr" in {candidate.identity for candidate in candidates}
+
+
 def test_the_question_keeps_the_part_first_and_names_what_is_in_stock(monkeypatch):
     """The ask: build with the part you named, or take an in-stock variation."""
     monkeypatch.setattr(
         "kicraft.design.part_identity.reviewed_inventory",
         lambda: (
             _record("led-a", "led-0603", "a:LED_0603_1608Metric", lcsc="C1"),
-            _record("led-b", "led-0603", "b:LED_0603_1608Metric", lcsc="C2"),
+            _record("led-b", "led-0603", "b:LED_0603_1608Metric", lcsc="C2", equivalent_to="led-a"),
             _record("mcu-b", "led-0603", "c:SOIC-16", contacts=("1", "2", "3"), lcsc="C3"),
         ),
     )

@@ -18,6 +18,19 @@ from kicraft.design.synthesis.kicad_pcb_stub import (
     PadBindingError,
     write_empty_pcb,
 )
+from kicraft.design.synthesis.footprint_library import (
+    FootprintNotFoundError,
+    lookup_footprint,
+)
+
+
+@pytest.fixture(autouse=True)
+def _stock_footprints():
+    for name in ("Resistor_SMD:R_0805_2012Metric", "Capacitor_SMD:C_0805_2012Metric"):
+        try:
+            lookup_footprint(name)
+        except FootprintNotFoundError as exc:
+            pytest.skip(f"stock footprint prerequisite unavailable: {exc}")
 
 
 def _bom(pin_for_r1: str) -> BOM:
@@ -37,13 +50,8 @@ def _bom(pin_for_r1: str) -> BOM:
 
 def test_unbindable_endpoint_raises_pad_binding_error(tmp_path):
     # Pin "B" on a resistor footprint (pads 1/2) is the Q_NPN-class miss.
-    try:
-        with pytest.raises(PadBindingError) as exc:
-            write_empty_pcb(tmp_path, "BAD", _bom(pin_for_r1="B"))
-    except pytest.skip.Exception:  # pragma: no cover
-        raise
-    except Exception as e:  # missing stock footprint libs on this host
-        pytest.skip(f"stock footprints unavailable: {e}")
+    with pytest.raises(PadBindingError) as exc:
+        write_empty_pcb(tmp_path, "BAD", _bom(pin_for_r1="B"))
     msg = str(exc.value)
     assert "R1.B" in msg
     assert "N1" in msg
@@ -51,10 +59,7 @@ def test_unbindable_endpoint_raises_pad_binding_error(tmp_path):
 
 
 def test_bindable_endpoints_still_net_the_pads(tmp_path):
-    try:
-        out = write_empty_pcb(tmp_path, "GOOD", _bom(pin_for_r1="1"))
-    except Exception as e:  # missing stock footprint libs on this host
-        pytest.skip(f"stock footprints unavailable: {e}")
+    out = write_empty_pcb(tmp_path, "GOOD", _bom(pin_for_r1="1"))
     board = pcbnew.LoadBoard(str(out))
     nets_by_ref = {}
     for fp in board.GetFootprints():

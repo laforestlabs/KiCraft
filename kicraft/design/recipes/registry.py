@@ -15,6 +15,7 @@ from kicraft.design.models import (
     RecipeOwnershipManifest,
     RecipeSelection,
 )
+from kicraft.design.recipe_versions import legacy_recipe_replacement
 
 from .models import (
     RecipeDefinition,
@@ -139,6 +140,102 @@ def protected_identity_matches(*values: object) -> tuple[str, ...]:
         if any(protected == value or protected in value for value in observed)
     }
     return tuple(sorted(matches))
+
+
+
+def migrate_recipe_selection(value: object) -> RecipeSelection:
+    """Upgrade persisted recipe selections without changing their source object.
+
+    RP2040 version 2 was published with two incompatible parameter contracts.
+    Distinctive fields identify the contract; empty/shared-only parameter sets
+    cannot establish which contract produced them and require user repair.
+    """
+    selection = RecipeSelection.model_validate(value)
+    replacement = legacy_recipe_replacement(selection.recipe)
+    if replacement is not None and not selection.recipe.startswith("rp2040-minimal@"):
+        definition = get_recipe(replacement)
+        unknown = selection.parameters.keys() - definition.parameter_defaults.keys()
+        if unknown:
+            raise ValueError(f"saved {selection.recipe} has unknown parameters: {sorted(unknown)}")
+        for name, choices in definition.allowed_parameters.items():
+            if name in selection.parameters and selection.parameters[name] not in choices:
+                raise ValueError(f"saved {selection.recipe} has unsupported {name!r}")
+        return selection.model_copy(update={"recipe": replacement})
+    if selection.recipe not in {"rp2040-minimal@1", "rp2040-minimal@2"}:
+        return selection
+    parameters = dict(selection.parameters)
+    if selection.recipe.endswith("@2"):
+        known = {
+            "usb", "gpio_exposed", "native_usb", "programming", "flash_mbit",
+            "logic_voltage_v", "consumer_input_max_v",
+        }
+        unknown = parameters.keys() - known
+        if unknown:
+            raise ValueError(f"saved {selection.recipe} has unknown parameters: {sorted(unknown)}")
+    legacy = selection.recipe.endswith("@1") or bool(
+        {"usb", "gpio_exposed"} & parameters.keys()
+    ) or parameters.get("programming") == "bootsel"
+    current = "native_usb" in parameters or parameters.get("programming") in {"native_usb", "swd"}
+    if selection.recipe.endswith("@2") and not legacy and not current:
+        raise ValueError(
+            "ambiguous saved rp2040-minimal@2: parameters do not identify the "
+            "legacy BOOTSEL or native_usb/SWD contract; repair the saved selection explicitly"
+        )
+    bindings = dict(selection.port_bindings)
+    if legacy:
+        allowed = {"usb", "programming", "flash_mbit", "gpio_exposed"}
+        unknown = parameters.keys() - allowed
+        if unknown:
+            raise ValueError(f"legacy {selection.recipe} has incompatible parameters: {sorted(unknown)}")
+        usb = parameters.get("usb", True)
+        programming = parameters.get("programming", "bootsel")
+        flash = parameters.get("flash_mbit", 16)
+        exposed = parameters.get("gpio_exposed", 30)
+        if usb is not True or programming != "bootsel":
+            raise ValueError(f"legacy {selection.recipe} only supports USB BOOTSEL programming")
+        if type(flash) is not int or flash != 16:
+            raise ValueError(f"legacy {selection.recipe} only supports 16 Mbit flash")
+        if type(exposed) is not int or not 0 <= exposed <= 30:
+            raise ValueError(f"legacy {selection.recipe} gpio_exposed must be an integer from 0 to 30")
+        parameters = {
+            "native_usb": True, "programming": "native_usb",
+            "flash_mbit": flash, "gpio_exposed": exposed,
+        }
+    else:
+        allowed = {"native_usb", "programming", "flash_mbit", "logic_voltage_v", "consumer_input_max_v"}
+        unknown = parameters.keys() - allowed
+        if unknown:
+            raise ValueError(f"saved {selection.recipe} has unknown parameters: {sorted(unknown)}")
+        native_usb = parameters.get("native_usb", True)
+        programming = parameters.get("programming", "native_usb")
+        if type(native_usb) is not bool or (native_usb, programming) not in {
+            (True, "native_usb"), (False, "swd"),
+        }:
+            raise ValueError(f"saved {selection.recipe} has contradictory USB/programming parameters")
+        if parameters.get("flash_mbit", 16) != 16:
+            raise ValueError(f"saved {selection.recipe} only supports 16 Mbit flash")
+        if any(parameters.get(key, 3.3) != 3.3 for key in ("logic_voltage_v", "consumer_input_max_v")):
+            raise ValueError(f"saved {selection.recipe} only supports 3.3 V logic")
+    if selection.recipe.endswith("@1"):
+        if bindings:
+            raise ValueError("legacy rp2040-minimal@1 cannot have port bindings")
+        bindings = {
+            "vdd": "3V3", "gnd": "GND", "usb_dm": "USB_DM", "usb_dp": "USB_DP",
+            **{f"gpio{i}": f"GPIO{i}" for i in range(parameters["gpio_exposed"])},
+        }
+    usb_nets = [bindings[name] for name in ("usb_dm", "usb_dp") if name in bindings]
+    if len(usb_nets) == 2 and (
+        usb_nets[0] == usb_nets[1]
+        or any(net in {bindings.get("vdd"), bindings.get("gnd")} for net in usb_nets)
+    ):
+        raise ValueError(f"saved {selection.recipe} has shorted USB data or supply nets")
+    return selection.model_copy(update={
+        "recipe": "rp2040-minimal@3", "parameters": parameters, "port_bindings": bindings,
+    })
+
+
+def migrate_recipe_selections(values: Iterable[object]) -> list[RecipeSelection]:
+    return [migrate_recipe_selection(value) for value in values]
 
 
 def _validated_parameters(definition: RecipeDefinition, selection: RecipeSelection) -> dict:
@@ -408,6 +505,7 @@ def expand_recipe(
     *,
     next_reference: dict[str, int] | None = None,
 ) -> RecipeExpansion:
+    selection = migrate_recipe_selection(selection)
     registered = get_registered_recipe(selection.recipe)
     parameters = _validated_parameters(registered.definition, selection)
     resolved = ResolvedRecipeSelection(

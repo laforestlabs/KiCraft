@@ -99,10 +99,16 @@ class _BudgetGuard:
     def __init__(self, base: SpendGuard, budget_usd: float):
         self._base = base
         self._budget = float(budget_usd)
-        self._start = base.spent_total()
+        active_exposure = getattr(base, "active_exposure", None)
+        self._start = base.spent_total() + (active_exposure() if callable(active_exposure) else 0.0)
 
     def _delta(self) -> float:
-        return self._base.spent_total() - self._start
+        active_exposure = getattr(self._base, "active_exposure", None)
+        return (
+            self._base.spent_total()
+            + (active_exposure() if callable(active_exposure) else 0.0)
+            - self._start
+        )
 
     def preflight(
         self,
@@ -116,6 +122,11 @@ class _BudgetGuard:
                 f"run remaining budget cannot cover next call ceiling ${reserve:.4f} "
                 f"(spent ${self._delta():.4f} of ${self._budget:.2f})"
             )
+
+    def reserve(self, call_ceiling_usd: float, run_id: str | None = None) -> str:
+        return self._base.reserve(
+            call_ceiling_usd, run_id, additional_total_limit=self._start + self._budget
+        )
 
     def __getattr__(self, name):
         return getattr(self._base, name)

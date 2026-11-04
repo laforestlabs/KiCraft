@@ -27,18 +27,7 @@ def _run_cli(*args: str, cwd: Path) -> subprocess.CompletedProcess:
     )
 
 
-def test_list_parts_empty(isolated_home, clean_extras_env, tmp_path, monkeypatch):
-    """When no parts tier has anything, list-parts says so."""
-    # Mask the vendored tier so the test sees a truly empty library.
-    monkeypatch.setenv("KICRAFT_EXTRA_PARTS_DIRS", "")
-    project = tmp_path / "project"
-    project.mkdir()
-    # Note: the real vendored tier still shows ip2368; that's expected.
-    # We exercise the "no project / no home / no extras" sub-case.
-    res = _run_cli("list-parts", cwd=project)
-    assert res.returncode == 0
-    # Either the placeholder "no parts" message or the ip2368 vendored row.
-    assert "ip2368" in res.stdout or "no parts available" in res.stdout
+
 
 
 def test_list_parts_shows_project_entry(

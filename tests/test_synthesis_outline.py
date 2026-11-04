@@ -16,6 +16,19 @@ pcbnew = pytest.importorskip("pcbnew")
 
 from kicraft.design.models import BOM, BomPart, NetConnection, PinEndpoint
 from kicraft.design.synthesis.kicad_pcb_stub import write_empty_pcb
+from kicraft.design.synthesis.footprint_library import (
+    FootprintNotFoundError,
+    lookup_footprint,
+)
+
+
+@pytest.fixture
+def stock_footprints():
+    for name in ("Resistor_SMD:R_0805_2012Metric", "Capacitor_SMD:C_0805_2012Metric"):
+        try:
+            lookup_footprint(name)
+        except FootprintNotFoundError as exc:
+            pytest.skip(f"stock footprint prerequisite unavailable: {exc}")
 
 
 def _demo_bom() -> BOM:
@@ -38,11 +51,8 @@ def _demo_bom() -> BOM:
     return BOM(parts=parts, connections=conns)
 
 
-def test_synthesis_emits_outline_enclosing_all_footprints(tmp_path):
-    try:
-        out = write_empty_pcb(tmp_path, "TEST", _demo_bom())
-    except Exception as exc:  # missing stock footprint libs on this host
-        pytest.skip(f"stock footprints unavailable: {exc}")
+def test_synthesis_emits_outline_enclosing_all_footprints(tmp_path, stock_footprints):
+    out = write_empty_pcb(tmp_path, "TEST", _demo_bom())
 
     board = pcbnew.LoadBoard(str(out))
     edge = board.GetBoardEdgesBoundingBox()

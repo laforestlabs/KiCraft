@@ -220,7 +220,10 @@ def _new_bundle_rows(list_parts_stdout: str, lcsc_id: str, name: str | None) -> 
         ln
         for ln in lines[sep + 1 :]
         if ln.lstrip().startswith("|")
-        and ((cnum and cnum in ln.upper()) or (slug and f"`{slug}`" in ln.lower()))
+        and (
+            (cnum and cnum in (m.group(0).upper() for m in _LCSC_ID_RE.finditer(ln)))
+            or (slug and f"`{slug}`" in ln.lower())
+        )
     ]
     header = "\n".join(lines[: sep + 1])
     if not rows:  # couldn't pin the new row; give the model the header + a hint
@@ -247,7 +250,9 @@ def _bundle_identity_from_rows(rows_text: str, lcsc_id: str) -> tuple[str, str] 
     for columns in table_rows[2:]:
         if (
             len(columns) > max(sourcing_index, symbol_index, footprint_index)
-            and lcsc_id.upper() in columns[sourcing_index].upper()
+            and lcsc_id.upper() in (
+                match.group(0).upper() for match in _LCSC_ID_RE.finditer(columns[sourcing_index])
+            )
         ):
             return columns[symbol_index], columns[footprint_index]
     return None

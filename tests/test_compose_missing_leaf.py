@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from kicraft.cli import compose_subcircuits
 from kicraft.cli.compose_subcircuits import _missing_child_artifacts
 
 
@@ -43,3 +44,21 @@ def test_dropped_leaf_is_reported() -> None:
 
 def test_no_parent_definition_requires_nothing() -> None:
     assert _missing_child_artifacts(None, []) == []
+
+
+def test_compose_rejects_missing_pinned_snapshot_before_loading(tmp_path, monkeypatch, capsys):
+    experiments = tmp_path / ".experiments"
+    experiments.mkdir()
+    (experiments / "pins.json").write_text(
+        '{"pinned_leaves": {"leaf": {"round": 1}}}'
+    )
+    monkeypatch.setattr(
+        compose_subcircuits, "_resolve_artifact_dirs", lambda *_: [tmp_path]
+    )
+
+    def unexpected_load(_paths):
+        raise AssertionError("must not load stale canonical artifacts")
+
+    monkeypatch.setattr(compose_subcircuits, "load_solved_artifacts", unexpected_load)
+    assert compose_subcircuits.main(["--project", str(tmp_path)]) == 1
+    assert "leaf" in capsys.readouterr().err

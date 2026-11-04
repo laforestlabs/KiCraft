@@ -96,6 +96,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-build", action="store_true")
     args = ap.parse_args(argv)
 
+    corpus_briefs = []
     if args.seeds:
         seeds = [int(s) for s in args.seeds.split(",") if s.strip()]
     elif args.corpus:
@@ -116,7 +117,7 @@ def main(argv: list[str] | None = None) -> int:
         Path.home() / ".kicraft" / "debug" / f"routing-surprise-{stamp}"
     )
     out_root.mkdir(parents=True, exist_ok=True)
-    print(f"routing surprise cohort: {len(seeds)} briefs -> {out_root}", flush=True)
+    print(f"routing surprise cohort: {len(corpus_briefs) if args.corpus and not args.seeds else len(seeds)} briefs -> {out_root}", flush=True)
 
     from kicraft.server.client import make_client
     from kicraft.server.config import Settings

@@ -40,10 +40,8 @@ from starlette.responses import PlainTextResponse, RedirectResponse
 from .accounts import (
     _RESET_TTL_SECONDS,
     _VERIFY_TTL_SECONDS,
-    DEFAULT_TIER,
     TIERS,
     AccountStore,
-    grant_expiry,
     is_admin,
 )
 from .config import LEGAL_VERSION, Settings, default_legal_dir
@@ -92,7 +90,7 @@ from kicraft.fsutil import atomic_write_text
 
 from . import activity as _activity
 from . import billing, notify
-from .build_worker import JOB_KIND_COMMANDS, _kill_build
+from .build_worker import JOB_KIND_COMMANDS, _kill_build, job_command
 from .stage_driver import DESIGN_STAGES
 from .stagetabs import (
     StageTabs,
@@ -189,6 +187,17 @@ def _store() -> AccountStore:
 # reaper leaves these alone. set add/discard are atomic under the GIL.
 _ACTIVE_JOBS: set[int] = set()
 
+# Serialize attempt start with orphan recovery's workspace side effects.
+# SQLite generation guards remain authoritative across processes.
+_ATTEMPT_LOCK = threading.RLock()
+
+
+def _begin_project_attempt(state: dict) -> None:
+    pid = state.get("project_id")
+    if pid:
+        with _ATTEMPT_LOCK:
+            state["attempt_generation"] = _store().begin_project_attempt(pid)
+
 
 def _drain_build_log(path: Path, offset: int, remainder: str, progress) -> tuple[int, str]:
     """Incrementally stream a worker-written build log into the event feed.
@@ -216,6 +225,11 @@ def _iso_age_s(iso: str) -> float:
 
 
 def _finalize_orphan(job) -> None:
+    with _ATTEMPT_LOCK:
+        _finalize_orphan_locked(job)
+
+
+def _finalize_orphan_locked(job) -> None:
     """Finalize a project whose driving web thread died (a restart): persist
     whatever the build produced, close the project row, and email the owner.
     The LLM-stage transcript is gone with the old process; the artifacts and the
@@ -226,18 +240,24 @@ def _finalize_orphan(job) -> None:
     finished-but-failed run showing "(building...)" on every surface."""
     store = _store()
     p = store.get_project(job.project_id)
-    if p is None or p.status != "running":
+    if (p is None or p.status != "running"
+            or job.attempt_generation is None
+            or p.attempt_generation != job.attempt_generation
+            or not any(candidate.id == job.id for candidate in store.list_unfinalized_builds())):
         return
     ws = Path(job.workspace) if job.workspace else None
     st: dict = {"project_id": job.project_id, "user_id": job.user_id,
                 "brief": p.brief or "", "events": [], "status": None,
                 "ok": (job.status == "done" and job.rc == 0),
                 "spend": _project_spend_usd(job.project_id), "notify_force": True,
-                "dir_path": str(ws) if ws is not None else p.dir_path}
+                "dir_path": str(ws) if ws is not None else p.dir_path,
+                "attempt_generation": job.attempt_generation,
+                "orphan_job_id": job.id}
     if ws is not None and ws.is_dir():
         st["stem"] = _read_project_stem(ws) or p.project_stem
         if st["ok"]:
-            st["zip"] = _zip_generated(ws)
+            st["zip"] = _zip_generated(
+                ws, _current_attempt_project_dir(ws, job.attempt_generation, job.kind))
             st["ok"] = bool(st["zip"])
     else:
         st["stem"] = p.project_stem
@@ -300,6 +320,11 @@ def _build_target(state: dict, ws: Path) -> Path | None:
 
 
 def _reconcile_orphan_projects() -> None:
+    with _ATTEMPT_LOCK:
+        _reconcile_orphan_projects_locked()
+
+
+def _reconcile_orphan_projects_locked() -> None:
     """Close runs lost to a web restart BEFORE they reached the build queue.
 
     A run is an in-process thread tracked in _LIVE_RUNS; the project row's
@@ -332,7 +357,8 @@ def _reconcile_orphan_projects() -> None:
         # a terminal result with its own guess.
         landed = store.finish_project_if_running(
             p.id, "interrupted", cost_usd=_project_spend_usd(p.id), stem=stem,
-            dir_path=dir_path)
+            dir_path=dir_path, expected_attempt_generation=p.attempt_generation,
+            require_no_attempt_job=True)
         if not landed:
             continue
         # Only journal the reconciliation for a row this sweep actually closed:
@@ -411,15 +437,13 @@ def _signup_code() -> str:
 
 
 def _client_ip(request) -> str:
-    """Best-effort client IP for the per-IP signup throttle. Honors
-    X-Forwarded-For (the box runs behind a proxy) and falls back to the direct
-    peer address. Empty string when no request/peer is available."""
+    """Client address from the ASGI server's trusted-proxy processing.
+
+    Never read X-Forwarded-For here: a direct caller can forge it. Uvicorn
+    rewrites the ASGI peer only for its configured trusted proxies.
+    """
     if request is None:
         return ""
-    fwd = request.headers.get("x-forwarded-for") if hasattr(request, "headers") else None
-    if fwd:
-        # leftmost is the originating client; subsequent hops are proxies
-        return fwd.split(",")[0].strip()
     peer = getattr(request, "client", None)
     return peer.host if peer else ""
 
@@ -480,9 +504,9 @@ async def stripe_webhook(request: Request):
     """Stripe webhook: the authoritative sync path for paid tiers.
 
     Raw Starlette endpoint (signature verification needs the exact body bytes).
-    Flow: verify signature -> claim the event id (duplicate deliveries ack with
-    200 and do nothing) -> sync from re-fetched subscription state. A handler
-    failure releases the claim and 500s so Stripe retries the event later.
+    Verify the signature, skip completed events, then sync from re-fetched
+    subscription state. Mark completion only after the handler succeeds so a
+    crash during processing cannot suppress Stripe's retry.
     """
     settings = Settings.from_env()
     if not settings.billing_enabled:
@@ -499,34 +523,45 @@ async def stripe_webhook(request: Request):
     event_type = str(event.get("type") or "")
     if not event_id:
         return PlainTextResponse("no event id", status_code=400)
-    if not store.record_billing_event(event_id, event_type):
+    if store.billing_event_processed(event_id):
         return PlainTextResponse("duplicate", status_code=200)
     try:
         outcome = await asyncio.to_thread(
             billing.handle_event, store, settings, event,
             billing.gateway(settings))
+        store.record_billing_event(event_id, event_type)
     except Exception as e:
-        store.forget_billing_event(event_id)
         print(f"[billing] {event_type} {event_id} failed: {e}", flush=True)
         return PlainTextResponse("handler error", status_code=500)
     print(f"[billing] {event_type} {event_id}: {outcome}", flush=True)
     return PlainTextResponse("ok", status_code=200)
 
 
-def _zip_generated(ws: Path) -> str | None:
-    """Zip the user-facing KiCad project. Skips the internal .experiments/ tree
-    (per-round search state, renders): it dwarfs the actual project files and
-    is useless to the person opening the download in KiCad."""
-    gen = ws / "generated"
-    if not gen.is_dir():
+def _current_attempt_project_dir(ws: Path, generation: int, kind: str) -> Path | None:
+    """Resolve the artifact pointer only if it belongs to this build attempt."""
+    project_dir = _discover_generated_dir(ws)
+    if project_dir is None:
+        return None
+    if kind == "manual_route":
+        return project_dir
+    stem = _read_project_stem(ws)
+    if not stem:
+        return None
+    expected = ws / "generated" / f"attempt-{generation}" / stem
+    return project_dir if project_dir.resolve() == expected.resolve() else None
+
+
+def _zip_generated(ws: Path, project_dir: Path | None) -> str | None:
+    """Archive exactly one current KiCad project, excluding internal experiments."""
+    if project_dir is None or not project_dir.is_dir():
         return None
     out = ws / "kicraft_project.zip"
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
-        for p in sorted(gen.rglob("*")):
-            rel = p.relative_to(gen)
+        for p in sorted(project_dir.rglob("*")):
+            rel = p.relative_to(project_dir)
             if ".experiments" in rel.parts or p.is_dir():
                 continue
-            zf.write(p, str(rel))
+            zf.write(p, str(Path(project_dir.name) / rel))
     return str(out)
 
 
@@ -971,7 +1006,7 @@ class _SourceUnavailable(Exception):
 # KC-4AZ7PE: JLC dump said millions, storefront had 0); OOS rows can no longer
 # win kw/mpn picks and id keys never price a substitute part — drop v5 caches
 # so old picks re-resolve and pick up the retail reading.
-_PRICE_SCHEMA = 6
+_PRICE_SCHEMA = 7
 
 # easyeda.com product endpoint: serves the same data KiCraft fetches symbols and
 # footprints from, and -- unlike jlcpcb.com's keyword-search API -- is NOT behind
@@ -1032,11 +1067,13 @@ def _easyeda_lcsc_price(cid: str) -> dict | None:
             continue
         if price <= 0:
             continue
+        jlc_stock = (result.get("lcsc") or {}).get("stock")
         cand = {"unit_price": price, "lcsc": str(d.get("number") or cid).upper(),
-                "stock": int(d.get("stock") or 0)}
-        if best is None or (cand["stock"] > 0 and best["stock"] == 0):
-            best = cand
-    return best
+                "stock": int(jlc_stock) if jlc_stock is not None else None}
+        in_stock = int(d.get("stock") or 0) > 0
+        if best is None or (in_stock and not best[1]):
+            best = (cand, in_stock)
+    return best[0] if best is not None else None
 
 
 def _attach_retail(pick: dict) -> dict:
@@ -1382,6 +1419,17 @@ def _bom_position_mismatch_refs(parts: list, project_dir: Path | None) -> set[st
         return set()
 
 
+def _step_model_summary(artifacts: dict) -> str:
+    if not artifacts.get("step_file"):
+        return "not exported"
+    missing = artifacts.get("step_model_missing_refs")
+    if not isinstance(missing, list) or not all(isinstance(ref, str) for ref in missing):
+        return "exported; body-reference coverage unmeasured"
+    if missing:
+        return "exported; missing bodies: " + ", ".join(missing)
+    return "exported; all expected assembly references present"
+
+
 def _inspector_spec(stage: str, sj: dict, run_status: dict, project_dir: Path | None,
                     build_lines: list[str], *, prices: dict | None = None,
                     assurance: dict | None = None) -> list[dict]:
@@ -1635,7 +1683,7 @@ def _inspector_spec(stage: str, sj: dict, run_status: dict, project_dir: Path | 
             secs.append({"type": "kv", "title": "Artifacts", "rows": [
                 ("status", arts.get("status", "")),
                 ("fab package", "ready" if arts.get("fab_zip") else "pending"),
-                ("STEP model", "ready" if arts.get("step_file") else "pending"),
+                ("STEP model", _step_model_summary(arts)),
                 ("3D render", "ready" if arts.get("board_3d_png") else "pending")]})
             secs.extend(_silk_sections(sj, arts))
         log = _build_lines_for("fab", build_lines)
@@ -1835,6 +1883,11 @@ def _project_dir(state: dict) -> Path | None:
 
 
 def _persist_project(state: dict) -> None:
+    with _ATTEMPT_LOCK:
+        _persist_project_locked(state)
+
+
+def _persist_project_locked(state: dict) -> None:
     """Finalize a build-in-place run: write brief.txt + events.jsonl into the project
     dir (the build already wrote .kicraft/, generated/ and the zip there), point the
     row at the zip, and record the projects-table row. Best-effort: a persistence
@@ -1844,6 +1897,15 @@ def _persist_project(state: dict) -> None:
     if not pid or not uid:
         return
     store = _store()
+    generation = state.get("attempt_generation")
+    if generation is None:
+        print(f"[persist] project {pid} has no attempt identity; refusing finalization",
+              flush=True)
+        return
+    current = store.get_project(pid)
+    if (current is None or current.status != "running"
+            or current.attempt_generation != generation):
+        return
     # An explicit status (e.g. "awaiting_input" when a run parks on a question)
     # wins; otherwise derive ok/failed from the run outcome.
     status = state.get("status") or ("ok" if state.get("ok") else "failed")
@@ -1883,15 +1945,19 @@ def _persist_project(state: dict) -> None:
     finally:
         _close_journal(state)
         try:
-            store.finish_project(
+            landed = store.finish_project_if_running(
                 pid, status, stem=stem, cost_usd=state.get("spend"),
                 dir_path=dir_path, zip_path=zip_path,
-            )
+                expected_attempt_generation=generation,
+                expected_job_id=state.get("orphan_job_id"))
+            if not landed:
+                return
         except Exception as e:
             # This write flips the durable row to its terminal status; losing it
             # silently leaves a phantom 'running' project with no diagnostics.
             print(f"[persist] finish_project({pid}, {status}) failed: {e}",
                   flush=True)
+            return
         # Catalog: stamp the quality badge and (re)index for the community browser.
         # reindex_search indexes only public, completed projects and removes anything
         # else, so a failed/awaiting/private run is correctly kept out. Best-effort:
@@ -2542,10 +2608,11 @@ def _project_signals(root: Path | None) -> dict:
     """The durable facts a presentation needs for one project root.
 
     Cached by (state.json, generated/, zip, board, transcript, build verdict,
-    synthesis summary, recorded verification) mtimes, so a poll that changed
-    nothing does no file reading -- including no re-hashing of a verified export.
-    A mid-write state.json keeps the previous reading rather than blanking the
-    row."""
+    synthesis summary, recorded verification) mtimes. Recorded fulfilment is
+    rechecked on cache hits because its referenced artifacts and selection can
+    change independently of those mtimes. A mid-write state.json keeps the
+    previous reading rather than blanking the row.
+    """
     if root is None:
         return dict(_EMPTY_SIGNALS)
     key = str(root)
@@ -2565,19 +2632,14 @@ def _project_signals(root: Path | None) -> dict:
            _mtime(build_gate_path), _mtime(synth_check_path),
            _mtime(audit_path), _mtime(evidence_path), _mtime(brief_path))
     if prior is not None and prior[0] == sig:
+        if audit_path.is_file() or evidence_path.is_file():
+            prior[1]["fulfillment"] = _verified_fulfillment(root, prior[1]["brief"])
         return prior[1]
     sj = _read_state_json(root)
     if not sj and prior is not None:
         return prior[1]  # caught mid-write: keep the last good reading
     stem = sj.get("project_stem") or _read_project_stem(root)
-    generated: Path | None = None
-    if stem and (gen_root / stem).is_dir():
-        candidate = gen_root / stem
-        if (candidate / f"{stem}.kicad_pcb").is_file() \
-                or any(candidate.glob("*.kicad_sch")):
-            generated = candidate
-    if generated is None:
-        generated = _discover_generated_dir(root)
+    generated = _discover_generated_dir(root)
     artifacts = sj.get("artifacts") or {}
     brief = None
     try:
@@ -2762,11 +2824,9 @@ def _acceptance_evidence_current(payload: dict, root: Path,
 def _verified_fulfillment(root: Path, brief: str | None) -> dict:
     """Independent fulfilment verification recorded FOR THIS RUN and still current.
 
-    Two existing carriers are read: an independent product-acceptance audit
-    (``eval/product_acceptance.json``, whose artifact hashes bind the recorded
-    success to the delivered files) and filled acceptance evidence
-    (``eval/acceptance_evidence.json``). A recording whose artifacts, delivered
-    selection or brief no longer match is reported as STALE, never counted.
+    The product-acceptance audit binds its result to artifact hashes. Filled
+    acceptance evidence does not bind artifact contents, so it cannot certify
+    that the current export is the one independently reviewed.
     """
     stale = ""
     audit = _json_dict(root / _FULFILLMENT_AUDIT_REL)
@@ -2780,8 +2840,8 @@ def _verified_fulfillment(root: Path, brief: str | None) -> dict:
     if evidence:
         ok, why = _acceptance_evidence_current(evidence, root, brief)
         if ok:
-            return {"verified": True, "carrier": "the recorded acceptance evidence",
-                    "stale": None}
+            return {"verified": False, "carrier": None,
+                    "stale": stale or "the recorded acceptance evidence does not bind artifact contents"}
         stale = stale or why
     return {"verified": False, "carrier": None, "stale": stale or None}
 
@@ -2804,22 +2864,27 @@ def _user_required_tokens(intent: dict, arch: dict) -> list[str]:
 def _deviation_consent(questions, wanted: str, got: str) -> str | None:
     """The recorded user answer that approves substituting `wanted`, or None.
 
-    A substitution LEDGER entry records that a change happened; it is never the
-    user's consent. Only an answer the user actually gave (persisted on the
-    question row) counts as consent, and it must name the part being changed --
-    so an absent match reports "no recorded approval" rather than assuming one.
+    A ledger entry or a default is not consent. Require an affirmative answer to
+    a question that identifies both parts and asks about the substitution; a
+    denial or an unrelated answer must never promote an export's assurance.
     """
-    tokens = [token for token in (_normalized_token(wanted), _normalized_token(got)) if token]
-    if not tokens:
+    tokens = [_normalized_token(wanted), _normalized_token(got)]
+    if not all(tokens):
         return None
     for question in questions or []:
         if not isinstance(question, dict):
             continue
         answer = str(question.get("answer") or "").strip()
-        if not answer:
+        text = str(question.get("text") or "")
+        if not re.match(r"^(?:yes|approve|approved|agree|agreed)\b", answer, re.I):
             continue
-        haystack = _normalized_token(f"{question.get('text') or ''} {answer}")
-        if any(token in haystack for token in tokens):
+        if re.search(r"\b(?:no|not|never|don't|do not|reject)\b", answer, re.I):
+            continue
+        if not re.search(r"\b(?:use|replace|substitut\w*|alternative|instead|swap)\b",
+                         text, re.I):
+            continue
+        haystack = _normalized_token(f"{text} {answer}")
+        if all(token in haystack for token in tokens):
             return answer
     return None
 
@@ -2959,6 +3024,9 @@ def _project_assurance(*, status: str, derived: dict, signals: dict) -> dict:
             reasons = ", ".join(str(r) for r in (gate.get("reasons") or [])[:4])
             limit("The routed board is not fabrication-acceptable"
                   + (f": {reasons}" if reasons else ""), blocking=True)
+    elif design_complete and signals.get("zip_ok"):
+        limit("No routed-board fabrication gate is recorded for this export",
+              blocking=True)
     for warning in gate.get("warnings") or []:
         limit(f"Fabrication caution: {warning}")
     synth_check = signals.get("synth_check") or {}
@@ -2969,9 +3037,8 @@ def _project_assurance(*, status: str, derived: dict, signals: dict) -> dict:
             failures = ", ".join(str(name) for name in (synth_check.get("failed_checks") or []))
             limit("Synthesis checks did not pass"
                   + (f": {failures}" if failures else ""), blocking=True)
-    if design_complete and not signals.get("checks_failed") and not synth_check \
-            and signals.get("generated"):
-        limit("No synthesis-check summary is recorded for this export")
+    if design_complete and signals.get("zip_ok") and not synth_check:
+        limit("No synthesis-check summary is recorded for this export", blocking=True)
 
     findings = [f for f in (signals.get("review_findings") or []) if isinstance(f, dict)]
     blockers = [f for f in findings if str(f.get("severity")) == "blocker"]
@@ -3563,6 +3630,18 @@ def _project_presentation(p, *, live=None, job=None, activity=None,
     # _project_assurance). Derived, never stored: a reopen reads the same files
     # and reaches the same answer, and no surface may claim more than this.
     assurance = _project_assurance(status=status, derived=derived, signals=sig)
+    # A previous generation remains inspectable while a new build starts, but
+    # it is not evidence for the current attempt or a current download.
+    generation = _project_field(p, "attempt_generation")
+    artifact_dir = sig.get("generated")
+    manual_route = ((getattr(job, "kind", None) == "manual_route"
+                     and getattr(job, "attempt_generation", None) == generation)
+                    or (live is not None and act.get("mode") == "manual_route"))
+    if (root is not None and artifact_dir and isinstance(generation, int)
+            and generation > 0 and not manual_route
+            and Path(artifact_dir).parent != root / "generated" / f"attempt-{generation}"):
+        assurance["stale_preview"] = True
+        assurance["summary"] += " The displayed board is from an earlier attempt."
 
     if status in ("complete", "complete_with_warnings"):
         # A download is offered only for the CURRENT validated package: the
@@ -3722,7 +3801,9 @@ def _execute_claimed_job_local(ws: Path, state: dict, job_id: int, progress,
     clock restarts at the slot-acquired marker so time spent queued for a host
     build slot is not billed against the job."""
     timeout_s = 1800.0
-    cmd = list(JOB_KIND_COMMANDS[kind])
+    cmd = job_command(kind, JOB_KIND_COMMANDS[kind], ws,
+                      project_id=state.get("project_id"),
+                      attempt_generation=state.get("attempt_generation"))
     if kind == "build":
         quality = _store().build_quality_for_user(state.get("user_id"))
         if quality:  # tier override (free tier -> draft); None = default
@@ -3789,7 +3870,8 @@ def _drive_build_queue(ws: Path, state: dict, progress, *,
         offset = 0
     job_id = store.enqueue_build(
         workspace=str(ws), project_id=state.get("project_id"),
-        user_id=state.get("user_id"), log_path=str(log_path), kind=kind)
+        user_id=state.get("user_id"), log_path=str(log_path), kind=kind,
+        attempt_generation=state.get("attempt_generation"))
     # Announce the build WITH its job identity and log origin, so a reopened page
     # can tail the right job and never attribute an earlier build's log lines to
     # this attempt.
@@ -3845,12 +3927,7 @@ def _rerun_build_worker(state: dict, kind: str) -> None:
     ws = Path(state["ws"])
     pid = state.get("project_id")
     if pid:
-        # Reset the durable row to 'running' BEFORE going live: a rebuild can
-        # target a project whose durable status is still 'interrupted'/'failed'/
-        # 'ok' (from a prior reap or build), and once _LIVE_RUNS holds this run
-        # the projects page would otherwise paint that stale status with the
-        # live-green colour. Mirrors the answer/continue resume paths.
-        _store().update_project_status(pid, "running")
+        # The UI reserves the generation before starting this thread.
         _LIVE_RUNS[pid] = state
 
     try:
@@ -3906,14 +3983,14 @@ def _rerun_build_worker(state: dict, kind: str) -> None:
         # Surface whatever board the build left behind -- on a failed verify
         # the promote tail keeps the failed candidate, and inspecting it is
         # the whole point of showing failures.
-        pd = _discover_generated_dir(ws)
+        pd = _current_attempt_project_dir(ws, state["attempt_generation"], kind)
         if pd is not None:
             state["pcb_ready"] = (pd / f"{pd.name}.kicad_pcb").is_file()
         if rc != 0:
             state["ok"] = False
             return
         state["failed"] = False  # a rescued project is failed no longer
-        state["zip"] = _zip_generated(ws)
+        state["zip"] = _zip_generated(ws, pd)
         state["ok"] = bool(state["zip"])
     except Exception as e:  # surface, never crash the UI thread
         _record_run_error(state, e)
@@ -4164,7 +4241,7 @@ def _run_design(state: dict, stages, answers=None, *, mode: str = "design") -> N
         # as that step writes the sheets.
         stem = _read_project_stem(ws)
         if stem:
-            project_dir = ws / "generated" / stem
+            project_dir = ws / "generated" / f"attempt-{state['attempt_generation']}" / stem
             state["stem"] = stem
             state["project_dir"] = str(project_dir)
             state["token"] = _register_project_dir(project_dir)
@@ -4208,7 +4285,7 @@ def _run_design(state: dict, stages, answers=None, *, mode: str = "design") -> N
         rc = recovery.get("rc")
         # Surface whatever board the build left behind: on a failed verify the
         # promote tail keeps the failed candidate so it can be inspected.
-        pd = _discover_generated_dir(ws)
+        pd = _current_attempt_project_dir(ws, state["attempt_generation"], "build")
         if pd is not None:
             state["pcb_ready"] = (pd / f"{pd.name}.kicad_pcb").is_file()
         if rc != 0:
@@ -4216,7 +4293,7 @@ def _run_design(state: dict, stages, answers=None, *, mode: str = "design") -> N
             state["ok"] = False
             return
 
-        state["zip"] = _zip_generated(ws)
+        state["zip"] = _zip_generated(ws, pd)
         state["ok"] = bool(state["zip"])
     except Exception as e:  # surface, never crash the UI thread
         _record_run_error(state, e)
@@ -4454,6 +4531,11 @@ def privacy_page():
 def login_page(prompt: str = ""):
     ui.dark_mode().enable()
     ui.query("body").style("background:var(--kc-bg)")
+    # The request peer is available at page load, not in the websocket callback.
+    try:
+        login_ip = _client_ip(app.get_request())
+    except Exception:
+        login_ip = ""
     with ui.card().classes("absolute-center w-96") \
             .style("background:var(--kc-surface);border:1px solid var(--kc-border)"):
         ui.label("KiCraft").classes("text-2xl font-bold text-white")
@@ -4462,7 +4544,8 @@ def login_page(prompt: str = ""):
         pw = ui.input("Password", password=True, password_toggle_button=True).classes("w-full")
 
         def submit():
-            user = _store().authenticate(email.value or "", pw.value or "")
+            user = _store().authenticate(email.value or "", pw.value or "",
+                                         client_ip=login_ip)
             if user:
                 app.storage.user["user_id"] = user.id
                 app.storage.user["email"] = user.email
@@ -4558,16 +4641,12 @@ def signup_page(prompt: str = ""):
             try:
                 user = store.create_user(
                     email.value or "", pw.value or "",
-                    tier=grant["tier"] if grant else DEFAULT_TIER,
-                    tier_expires_at=grant_expiry(grant["duration_days"]) if grant
-                    else None,
+                    invite_code=code_str if grant else None,
                     accepted_terms_version=LEGAL_VERSION,
                     allow_training=bool(allow_training.value))
             except ValueError as e:
                 ui.notify(str(e), color="negative")
                 return
-            if grant:  # only a real signup consumes one of the code's uses
-                store.record_invite_use(grant["id"])
             # Mint + send the verification link. The user is auto-logged-in but
             # unverified, so the Design button stays disabled until they click.
             token = store.create_verification_token(user.id)
@@ -4932,9 +5011,10 @@ def profile_page():
                          "community browser from your projects page.") \
                     .classes("text-xs").style("color:#94a3b8")
             else:
-                ui.label("Your completed projects are public and appear in the "
-                         "community browser. Upgrade to Pro to keep projects "
-                         "private.").classes("text-xs").style("color:#94a3b8")
+                ui.label("New completed projects are public in the community browser. "
+                         "Projects made private before a downgrade remain private. "
+                         "Upgrade to Pro to change visibility.") \
+                    .classes("text-xs").style("color:#94a3b8")
             with ui.row().classes("items-center gap-2 mt-1"):
                 ui.button("Manage your projects", icon="folder",
                           on_click=lambda: ui.navigate.to("/projects")) \
@@ -5123,9 +5203,10 @@ def projects_page():
             assurance = pres.get("assurance") or {}
             key = (pres["title"], pres["status"], pres["stage"], pres["headline"],
                    pres["detail"], pres["last_event_at"], pres["action"],
-                   pres["download_ready"], len(pres["issues"]),
-                   tuple(i.get("message") for i in pres["issues"]),
-                   assurance.get("level"), assurance.get("summary"))
+                   pres["download_ready"], p.status, p.is_public, p.board_code,
+                   p.created_at, p.finished_at, _actions_sig(p, pres, live),
+                   json.dumps(pres["issues"], sort_keys=True),
+                   json.dumps(assurance, sort_keys=True))
             if key == handles["key"]:
                 return  # nothing observable changed: leave the widgets alone
             handles["key"] = key
@@ -5278,8 +5359,10 @@ def projects_page():
                 sw.on_value_change(_flip)
             else:
                 with ui.row().classes("items-center gap-1"):
-                    ui.icon("public").classes("text-sm").style("color:#34d399")
-                    ui.label("Public in the community browser") \
+                    ui.icon("public" if p.is_public else "lock").classes("text-sm") \
+                        .style("color:#34d399" if p.is_public else "color:#94a3b8")
+                    ui.label("Public in the community browser" if p.is_public else
+                             "Private (retained after downgrade)") \
                         .classes("text-xs").style("color:#94a3b8")
 
         def _refresh_rows(*, force: bool = False) -> None:
@@ -5404,7 +5487,8 @@ def _render_pricing(user, error: str = "") -> None:
         '<a class="kc-nav-signin" href="/login">Sign in</a>'
         '<a class="kc-btn kc-btn-primary" href="/signup">Start building</a>')
     error_banner = ('<p class="kc-price-error">We could not start checkout. '
-                    'Nothing was charged; please try again.</p>') if error else ""
+                    'If you have a checkout in progress, complete it or contact '
+                    'billing support before trying again.</p>') if error else ""
 
     faq = "".join(
         f'<div class="kc-faq-item"><h3>{q}</h3><p>{a}</p></div>' for q, a in (
@@ -5568,7 +5652,7 @@ async def billing_success_page(session_id: str = ""):
 # is only ever minted for a project that passes _public_project_or_none.
 # --------------------------------------------------------------------------- #
 _QUALITY_CHIP = {
-    "fab_ready": ("Fab-ready", "#34d399"),
+    "fab_ready": ("Synthesis checks passed", "#34d399"),
     "erc_errors": ("Has ERC issues", "#fbbf24"),
     "unverified": ("Unverified", "#64748b"),
 }
@@ -5684,7 +5768,45 @@ def _public_project_or_none(project_id):
     return p
 
 
+def _rebase_cloned_artifacts(src: Path, dst: Path) -> None:
+    """Point copied artifact paths at the clone, never back at the source."""
+    path = _state_path(dst)
+    if not path.is_file():
+        return
+    state = json.loads(path.read_text(encoding="utf-8"))
+    artifacts = state.get("artifacts")
+    if not isinstance(artifacts, dict):
+        return
+    source_root = src.resolve()
+
+    def rebase(value):
+        if value is None:
+            return None
+        candidate = Path(value)
+        candidate = candidate if candidate.is_absolute() else src / candidate
+        relative = candidate.resolve().relative_to(source_root)
+        copied = dst / relative
+        if not copied.exists():
+            raise ValueError("artifact was not included in the cloned project")
+        return str(copied)
+
+    for key in ("project_dir", "root_sch", "kicad_pro", "autoplacer_json",
+                "custom_footprint_dir", "routed_pcb", "fab_zip", "step_file",
+                "board_3d_png"):
+        if artifacts.get(key) is not None:
+            artifacts[key] = rebase(artifacts[key])
+    if artifacts.get("leaf_schs") is not None:
+        artifacts["leaf_schs"] = [rebase(value) for value in artifacts["leaf_schs"]]
+    atomic_write_text(path, json.dumps(state, indent=2) + "\n")
+
+
 def _clone_project(source, cloner, make_private: bool):
+    # Serialize in-process attempt starts and clone snapshots of the same board.
+    with _ATTEMPT_LOCK:
+        return _clone_project_locked(source, cloner, make_private)
+
+
+def _clone_project_locked(source, cloner, make_private: bool):
     """Copy a source project into ``cloner``'s account as a new, re-runnable project.
 
     The caller supplies the source visibility/completion gate. The public detail
@@ -5695,26 +5817,64 @@ def _clone_project(source, cloner, make_private: bool):
     tree keeps the `.kicraft/` + `generated/` layout so the clone opens + rebuilds in
     place. events.jsonl is NOT copied: the clone starts a fresh history."""
     store = _store()
-    if not store.can_design(cloner):
-        return None, "quota"
+    fresh_source = store.get_project(source.id)
+    if (fresh_source is None or fresh_source.status != "ok"
+            or (source.is_public and not fresh_source.is_public)
+            or _project_run_live({"project_id": source.id, "user_id": source.user_id})):
+        return None, "missing"
+    source = fresh_source
+    # The store reserves quota atomically after validating the source below.
     make_private = bool(make_private and _can_make_private(cloner))
     src = Path(source.dir_path) if source.dir_path else None
-    if src is None or not src.is_dir():
+    if src is None or src.is_symlink() or not src.is_dir():
         return None, "missing"
     pid = store.create_project(cloner.id, source.brief or "", is_public=not make_private,
                                auto_default_questions=source.auto_default_questions)
+    if pid is None:
+        return None, "quota"
     dst = store.projects_dir / str(cloner.id) / str(pid)
     zip_path = None
     try:
+        # Copy only the selected project, not historical generations, and never
+        # follow or retain symlinked evidence.
+        current = _discover_generated_dir(src)
+        if current is None:
+            saved = _load_persisted_state(src)
+            if not isinstance(saved, dict) or saved.get("artifacts") is not None:
+                raise ValueError("source has no current project")
+        relative = current.relative_to(src) if current is not None else None
+        ancestors = ([src.joinpath(*relative.parts[:i])
+                      for i in range(1, len(relative.parts) + 1)]
+                     if relative is not None else [])
+        for candidate in (src / ".kicraft", src / "brief.txt",
+                          src / "kicraft_project.zip", *ancestors):
+            if candidate.is_symlink():
+                raise ValueError("source contains a symlink")
+        for tree in (src / ".kicraft", current):
+            if tree is not None and tree.is_dir() and any(p.is_symlink() for p in tree.rglob("*")):
+                raise ValueError("source contains a symlink")
         dst.mkdir(parents=True, exist_ok=True)
         if (src / "brief.txt").is_file():
             shutil.copy2(src / "brief.txt", dst / "brief.txt")
-        for sub in (".kicraft", "generated"):
-            if (src / sub).is_dir():
-                shutil.copytree(src / sub, dst / sub, dirs_exist_ok=True)
-        if (src / "kicraft_project.zip").is_file():
+        trees = [(src / ".kicraft", dst / ".kicraft")]
+        if current is not None:
+            trees.append((current, dst / relative))
+        for tree, target in trees:
+            if tree.is_dir():
+                shutil.copytree(tree, target, dirs_exist_ok=True, symlinks=True)
+                if any(p.is_symlink() for p in target.rglob("*")):
+                    raise ValueError("source changed to contain a symlink")
+        _rebase_cloned_artifacts(src, dst)
+        if (current is not None and source.zip_path
+                and Path(source.zip_path).resolve() == (src / "kicraft_project.zip").resolve()
+                and (src / "kicraft_project.zip").is_file()):
             zip_path = str(dst / "kicraft_project.zip")
             shutil.copy2(src / "kicraft_project.zip", zip_path)
+        after = store.get_project(source.id)
+        if (after is None or after.status != "ok"
+                or after.attempt_generation != source.attempt_generation
+                or (source.is_public and not after.is_public)):
+            raise ValueError("source changed during clone")
     except Exception:
         shutil.rmtree(dst, ignore_errors=True)
         try:
@@ -5807,7 +5967,7 @@ def browse_page():
                 {"popularity": "Popular", "new": "New", "clones": "Most clones"},
                 value="popularity").props("dense no-caps")
             badge_toggle = ui.toggle(
-                {"all": "All", "fab_ready": "Fab-ready", "erc_errors": "Has ERC issues"},
+                {"all": "All", "fab_ready": "Synthesis checks passed", "erc_errors": "Has ERC issues"},
                 value="all").props("dense no-caps")
         count_label = ui.label().classes("text-xs").style("color:#64748b")
         grid = ui.row().classes("w-full flex-wrap gap-4")
@@ -6124,7 +6284,7 @@ def sample_detail_page(sample_id: str):
 
     The files are prebuilt static assets, so logged-out visitors can inspect the
     3D model, schematic, and routed board without starting a model run. The CTA
-    still sends visitors through signup before creating their own design.
+    sends signed-in users to the workspace and visitors through signup.
     """
     sample = next((s for s in available_samples() if s.id == sample_id), None)
     if sample is None:
@@ -6152,7 +6312,7 @@ def sample_detail_page(sample_id: str):
             ui.label(sample.title).classes("text-2xl font-bold text-white")
             ui.button("Use this design as a starting point", icon="bolt",
                       on_click=lambda: ui.navigate.to(
-                          f"/signup?prompt={quote(sample.prompt)}")) \
+                          f"{'/' if _current_user() else '/signup'}?prompt={quote(sample.prompt)}")) \
                 .props("color=primary unelevated")
         ui.label(sample.blurb).classes("text-sm").style("color:#94a3b8")
         ui.label(f"{sample.sheets} sheets / {sample.parts} parts / routed") \
@@ -6391,7 +6551,8 @@ def part_detail_page(name: str):
                             with ui.column().classes("gap-0 items-start"):
                                 ui.label("JLC stock").classes("text-xs") \
                                     .style("color:#64748b")
-                                ui.label(f"{res.get('stock') or 0:,}") \
+                                stock = res.get("stock")
+                                ui.label(f"{stock:,}" if stock is not None else "unverified") \
                                     .classes("text-sm font-mono text-white")
                             with ui.column().classes("gap-0 items-start"):
                                 ui.label("LCSC retail").classes("text-xs") \
@@ -7296,10 +7457,13 @@ def index(prompt: str = "", project: str = ""):
             if not ws:
                 ui.notify("No open design.", color="warning")
                 return
+            try:
+                _begin_project_attempt(state)
+            except ValueError as exc:
+                ui.notify(str(exc), color="warning")
+                return
             record_answers(ws, stage, answers)
             runs = [stage] + downstream_stages(stage)
-            if state["project_id"]:  # same project, no new quota slot
-                _store().update_project_status(state["project_id"], "running")
             state.update(running=True, done=False, ok=None,
                          awaiting_input=False, questions=[])
             view.update(fab_done=False, account_refreshed=False,
@@ -7322,8 +7486,11 @@ def index(prompt: str = "", project: str = ""):
             if not rem:
                 ui.notify("Nothing left to run for this design.", color="info")
                 return
-            if state["project_id"]:  # same project, no new quota slot
-                _store().update_project_status(state["project_id"], "running")
+            try:
+                _begin_project_attempt(state)
+            except ValueError as exc:
+                ui.notify(str(exc), color="warning")
+                return
             state.update(running=True, done=False, ok=None)
             view.update(fab_done=False, account_refreshed=False, viewed_marked=False,
                         support_prompted=False)
@@ -7508,6 +7675,7 @@ def index(prompt: str = "", project: str = ""):
             nonlocal state
             state = _fresh_run_state()
             auto_default_chk.value = True
+            brief.value = ""
             _reset_view()
             tabs.reset()
             summary_card.set_visibility(False)
@@ -7547,10 +7715,16 @@ def index(prompt: str = "", project: str = ""):
                 return
             auto_default_questions = bool(auto_default_chk.value)
             pid = _store().create_project(u.id, brief.value,
-                                          auto_default_questions=auto_default_questions)
+                                           auto_default_questions=auto_default_questions)
+            if pid is None:
+                ui.notify("Unable to start a design. Verify your email and check your "
+                          "remaining quota before trying again.", color="warning")
+                refresh_account_ui()
+                return
             proj = _store().get_project(pid)
             state = _fresh_run_state()
             state.update(running=True, user_id=u.id, project_id=pid,
+                         attempt_generation=proj.attempt_generation if proj else 0,
                          auto_default_questions=auto_default_questions,
                          board_code=(proj.board_code if proj else None))
             _reset_view()
@@ -7663,6 +7837,11 @@ def index(prompt: str = "", project: str = ""):
             if not ml.is_file():
                 ui.notify("Save the layout first.", color="warning")
                 return
+            try:
+                _begin_project_attempt(state)
+            except ValueError as exc:
+                ui.notify(str(exc), color="warning")
+                return
             state.update(running=True, done=False, ok=None, status=None)
             status.text = ("Routing your manual layout (KiCad Routing Tools, may take "
                            "minutes) -- live progress is in the Place/Route tab.")
@@ -7729,10 +7908,18 @@ def index(prompt: str = "", project: str = ""):
                 state["stem"] = target.name
                 state["project_dir"] = str(target)
                 state["token"] = _register_project_dir(target)
+            try:
+                _begin_project_attempt(state)
+            except ValueError as exc:
+                ui.notify(str(exc), color="warning")
+                return
             state.update(running=True, done=False, ok=None, status=None)
             status.text = message
             design_btn.disable()
             _close_layout_editor()
+            target = Path(ws_dir) / "generated" / f"attempt-{state['attempt_generation']}" / target.name
+            state.update(project_dir=str(target), stem=target.name, pcb_ready=False,
+                         token=_register_project_dir(target))
             threading.Thread(target=_rerun_build_worker,
                              args=(state, "build"), daemon=True).start()
 
@@ -7954,10 +8141,11 @@ def index(prompt: str = "", project: str = ""):
             assurance = pres.get("assurance") or {}
             sig = (pres["title"], pres["status"], pres["stage"], pres["headline"],
                    pres["detail"], pres["last_event_at"], pres["action"],
-                   pres["download_ready"], len(pres["issues"]), units,
-                   detail.get("percent"), detail.get("phase"),
+                   pres["download_ready"], pres.get("zip_path"), state.get("brief"),
+                   state.get("retryable"), json.dumps(pres["issues"], sort_keys=True),
+                   units, detail.get("percent"), detail.get("phase"),
                    state.get("journal_failed"), state.get("board_code"),
-                   assurance.get("level"), assurance.get("summary"))
+                   json.dumps(assurance, sort_keys=True))
             if sig == view.get("summary_sig"):
                 return
             previous_sig = view.get("summary_sig")
@@ -8035,8 +8223,9 @@ def index(prompt: str = "", project: str = ""):
                     with assurance_box:
                         _render_section({"type": "assurance", "assurance": assurance},
                                         "#94a3b8")
-            actions_sig = (pres["action"], pres["download_ready"],
-                           bool(state.get("retryable")), bool(state.get("brief")), owner)
+            actions_sig = (pres["action"], pres["download_ready"], pres.get("zip_path"),
+                           assurance.get("level"), bool(state.get("retryable")),
+                           state.get("brief"), owner)
             if actions_sig != summary_actions_sig[0]:
                 summary_actions_sig[0] = actions_sig
                 summary_actions.clear()
@@ -8252,6 +8441,13 @@ def index(prompt: str = "", project: str = ""):
             # is the "still watching" signal that suppresses walk-away emails.
             notify.mark_active(state.get("user_id"))
             evs = state["events"]
+            # A continuation replaces the attempt's event list. Each attached page
+            # has its own cursor, so reset it when that list changes rather than
+            # skipping the new attempt until it grows beyond the old cursor.
+            if view.get("event_list") is not evs:
+                view["event_list"] = evs
+                view["rendered"] = 0
+                view["build_lines"] = []
             changed = False
             while view["rendered"] < len(evs):
                 e = evs[view["rendered"]]
@@ -8263,7 +8459,7 @@ def index(prompt: str = "", project: str = ""):
             if changed:
                 tabs.flush()
             if is_admin(user) and state["spend"] is not None:
-                spend.text = f"Spent this design: ${state['spend']:.4f}"
+                spend.text = f"Ledger-recorded cost this design: ${state['spend']:.4f}"
 
             # ---- workspace summary + failure card ---------------------------
             # The in-memory stream is ticked at 0.2 s, but the disk + queue
@@ -8403,6 +8599,15 @@ def index(prompt: str = "", project: str = ""):
                     state["token"] = _register_project_dir(pd)
 
             project_dir = Path(state["project_dir"]) if state["project_dir"] else None
+            current_dir = str(project_dir) if project_dir is not None else None
+            if view.get("project_dir_seen") != current_dir:
+                view["project_dir_seen"] = current_dir
+                view.update(sch_view=None, pcb_view=None, pcb_mtime=None,
+                            pcb_overlay_url=None, run_mtime=None,
+                            leaf_progress_sig=None)
+                if not view.get("layout_editor"):
+                    tabs.view_slot("synthesize").clear()
+                    tabs.view_slot("place_route").clear()
 
             # Schematic appears in the Synthesize tab once synth writes the sheets.
             if project_dir is not None and view["sch_view"] is None:
@@ -8565,9 +8770,11 @@ def index(prompt: str = "", project: str = ""):
                                             ui.label(w).classes("text-xs").style(
                                                 "color:#fde68a"
                                             )
-                                # Assembled-board 3D render from the fab stage
-                                # (best-effort artifact: absent when kicad-cli
-                                # render failed; the package is still complete).
+                                # Model bodies are best-effort; report actual STEP
+                                # reference coverage rather than implying a full assembly.
+                                ui.label(_step_model_summary(sj.get("artifacts") or {})).classes(
+                                    "text-xs w-full max-w-3xl q-mb-sm"
+                                ).style("color:#94a3b8")
                                 png = (project_dir / "fab" / "board_3d.png"
                                        if project_dir else None)
                                 if png is not None and png.is_file() and state["token"]:
@@ -8755,7 +8962,7 @@ def main() -> None:
         print("WARNING: host-metrics sampler failed to start; "
               "/admin usage charts will be empty until restart.")
     ui.run(
-        host=os.environ.get("KICRAFT_WEB_HOST", "0.0.0.0"),
+        host=os.environ.get("KICRAFT_WEB_HOST", "127.0.0.1"),
         port=int(os.environ.get("KICRAFT_WEB_PORT", "8080")),
         title="KiCraft",
         # Shared with the capability tokens; never falls open to a public

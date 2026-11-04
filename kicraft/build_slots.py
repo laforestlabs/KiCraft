@@ -113,10 +113,14 @@ def _try_acquire(n: int, d: Path):
         except OSError:
             os.close(fd)
             continue
-        # Owner breadcrumb for an operator inspecting a busy host; never read back.
-        os.ftruncate(fd, 0)
-        os.write(fd, f"pid={os.getpid()} acquired={time.strftime('%FT%T')}\n".encode())
-        return i, fd
+        try:
+            # Owner breadcrumb for an operator; never read back.
+            os.ftruncate(fd, 0)
+            os.write(fd, f"pid={os.getpid()} acquired={time.strftime('%FT%T')}\n".encode())
+            return i, fd
+        except BaseException:
+            os.close(fd)
+            raise
     return None
 
 
@@ -146,8 +150,8 @@ def build_slot(echo=None):
                 say(f"{WAITING_MARKER} (still queued) ...")
                 last_echo = time.monotonic()
     index, fd = got
-    say(f"{ACQUIRED_MARKER} ({index + 1}/{n})")
     try:
+        say(f"{ACQUIRED_MARKER} ({index + 1}/{n})")
         yield index
     finally:
         try:

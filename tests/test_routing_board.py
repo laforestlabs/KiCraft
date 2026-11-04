@@ -383,6 +383,8 @@ def test_validate_routed_board_unknown_footprint_count_not_empty(
 
     v = routing_board.validate_routed_board(str(board_path))
     assert "empty_board" not in v["rejection_reasons"]
+    assert "track_count_failed" in v["rejection_reasons"]
+    assert not v["accepted"]
 
 
 def testrun_pcbnew_script_retries_transient_failed_to_load_board(
@@ -673,3 +675,27 @@ def test_validate_routed_board_gates_items_not_allowed(
     assert validation["accepted"] is accepted
     assert validation["obviously_illegal_routed_geometry"] is (not accepted)
     assert ("illegal_routed_geometry" in validation["rejection_reasons"]) is (not accepted)
+
+
+def test_ignored_pad_edge_violation_does_not_waive_track_edge(tmp_path, monkeypatch):
+    report = (
+        "[copper_edge_clearance]: Board edge clearance\n"
+        "    @(1 mm, 1 mm): Pad 1 [SIG] of J1 on F.Cu\n"
+        "    @(1 mm, 2 mm): Board edge\n"
+        "[copper_edge_clearance]: Board edge clearance\n"
+        "    @(3 mm, 3 mm): Track [SIG] on F.Cu\n"
+        "    @(3 mm, 4 mm): Board edge\n"
+    )
+    monkeypatch.setattr(routing_board, "count_board_tracks", lambda _: {"footprints": 1})
+    monkeypatch.setattr(
+        routing_board, "run_kicad_cli_drc",
+        lambda *a, **k: {"copper_edge_clearance": 2, "report_text": report},
+    )
+    board = tmp_path / "board.kicad_pcb"
+    board.write_text("board")
+    validation = routing_board.validate_routed_board(
+        str(board), cfg={"outline_containment_check": False, "ignorable_footprint_refs": ["J1"]}
+    )
+    assert not validation["accepted"]
+    assert validation["footprint_internal_copper_edge_count"] == 1
+    assert validation["obviously_illegal_routed_geometry"]

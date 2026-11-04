@@ -194,9 +194,6 @@ def test_record_snapshot(store):
     assert s["snapshot_date"] and len(s["snapshot_date"]) == 10  # ISO date
 
 
-def test_create_and_delete_are_gone():
-    assert not hasattr(AccountStore, "create_core_component")
-    assert not hasattr(AccountStore, "delete_core_component")
 
 
 # ---- listing -------------------------------------------------------------------

@@ -3,7 +3,7 @@
 The skill at ``.agents/skills/kicraft/`` drives the LLM-authored conversation;
 this CLI handles the deterministic side: validating a state file,
 listing reusable leaves the skill can show to the model, and emitting
-the KiCad project once the four slots are populated.
+the KiCad project once all five stages are complete.
 
 Subcommands:
 
@@ -71,7 +71,7 @@ from .models import (
     StageStatus,
     Substitution,
 )
-from .stage_state import invalidate_downstream
+from .stage_state import invalidate_downstream, stage_done
 
 from .synthesize import SynthesisInputError, run as run_synth
 from .synthesis.fab_export import extract_lcsc_pin
@@ -377,9 +377,8 @@ _PAD_NUM_RE = re.compile(r'\(pad\s+(?:"([^"]*)"|([^\s()"]+))')
 _UNWIREABLE_PIN_TYPES = {"no_connect", "free"}
 
 
-def _footprint_pad_numbers(fp_id: str, project_root: Path) -> set[str] | None:
-    """The set of pad numbers a footprint exposes, or None when the footprint
-    doesn't resolve (that case is owned by ``_unresolved_footprints``)."""
+def _footprint_numbered_pads(fp_id: str, project_root: Path) -> tuple[str, ...] | None:
+    """Read each numbered pad primitive, retaining duplicate electrical numbers."""
     library, _, name = (fp_id or "").partition(":")
     if not library or not name:
         return None
@@ -394,12 +393,17 @@ def _footprint_pad_numbers(fp_id: str, project_root: Path) -> set[str] | None:
         text = mod.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
-    pads: set[str] = set()
-    for m in _PAD_NUM_RE.finditer(text):
-        num = m.group(1) if m.group(1) is not None else m.group(2)
-        if num:
-            pads.add(num)
-    return pads
+    return tuple(
+        num
+        for match in _PAD_NUM_RE.finditer(text)
+        if (num := match.group(1) if match.group(1) is not None else match.group(2))
+    )
+
+
+def _footprint_pad_numbers(fp_id: str, project_root: Path) -> set[str] | None:
+    """Distinct electrical pin numbers, or None when the footprint cannot be loaded."""
+    pads = _footprint_numbered_pads(fp_id, project_root)
+    return None if pads is None else set(pads)
 
 
 def _symbol_footprint_pin_mismatches(bom, project_root: Path) -> list[str]:
@@ -595,12 +599,12 @@ def _check_passive_array_mismatch(bom, project_root: Path) -> list[str]:
 
 
 def bom_position_mismatches(bom_parts, project_root: Path) -> list[dict]:
-    """Warn-only: a part whose LCSC pin count (``joints``) exceeds its
-    footprint's pad count cannot land — a 40-position breakaway strip pinned
-    to a 2-pad jumper (KC-6DCV66 J3/J4, C44526). Non-blocking: extra footprint
-    pads (thermal/shield/mounting) are normal, so only MORE pins than pads is
-    flagged. Multi-element arrays are hard-rejected by §9.28 first; this catches
-    the non-array excess (wrong-size connector strips/headers).
+    """Warn when a catalog contact count exceeds the numbered physical pad primitives.
+
+    A footprint may repeat an electrical number on multiple physical contacts;
+    counting unique numbers would misreport those contacts as missing. Additional
+    numbered thermal/shield pads remain permitted. This warning does not prove
+    mechanical fit, which requires separate identity and footprint evidence.
 
     ``bom_parts`` is any iterable of objects exposing ``ref`` / ``footprint`` /
     ``symbol`` / ``sourcing_note`` (Pydantic ``BomPart`` or a compatible
@@ -615,7 +619,7 @@ def bom_position_mismatches(bom_parts, project_root: Path) -> list[dict]:
     out: list[dict] = []
     for part in bom_parts:
         fp = getattr(part, "footprint", None) or ""
-        pads = _footprint_pad_numbers(fp, project_root)
+        pads = _footprint_numbered_pads(fp, project_root)
         if pads is None:  # footprint unresolvable — owned by _unresolved_footprints
             continue
         cid = _resolve_part_lcsc(part, manifest_by_name)
@@ -687,6 +691,16 @@ def _lcsc_identity_conflict(part, hit: dict) -> str | None:
                 f"the catalog MPN {catalog_mpn or '<missing>'!r} does not match "
                 f"the reviewed tactile-switch symbol/footprint pair"
             )
+    if part.symbol == "Device:L":
+        catalog_mpn = str(hit.get("model") or "").strip()
+        if not catalog_mpn or physical_inventory_record(
+            mpn=catalog_mpn, symbol=part.symbol, footprint=part.footprint
+        ) is None:
+            return (
+                f"the catalog inductor {catalog_mpn or '<missing>'!r} has no reviewed "
+                "identity/footprint pair for this land pattern"
+            )
+
 
     if _POT_PART_RE.search(ident) and "resistor" in desc.lower() and not _POT_DESC_RE.search(desc):
         return "the catalog part is a fixed resistor, not a potentiometer/trimmer"
@@ -700,7 +714,9 @@ def _lcsc_identity_conflict(part, hit: dict) -> str | None:
     return None
 
 
-def _repin_under_rated_capacitors(architecture, bom) -> list[str]:
+def _repin_under_rated_capacitors(
+    architecture, bom, *, automatic_pins: set[tuple[str, str]] | frozenset[tuple[str, str]] = frozenset()
+) -> list[str]:
     """Re-select a catalog capacitor that is rated for the rail it actually spans.
 
     §9.38 refuses an under-rated selected capacitor, but the parts it names are recipe-owned
@@ -724,6 +740,10 @@ def _repin_under_rated_capacitors(architecture, bom) -> list[str]:
     notes: list[str] = []
     floor = _bom_stock_floor()
     for part, old_cid, stress, rating in under_rated_capacitors(architecture, bom):
+        # An LCSC number is an exact identity unless a matching, current BOM
+        # receipt proves that this was a generic value/package selection.
+        if (part.ref, old_cid) not in automatic_pins or getattr(part, "mpn", None):
+            continue
         keyword = jlcparts.bom_keyword(part.value or "", part.footprint or "")
         if not keyword:
             notes.append(
@@ -770,7 +790,7 @@ def _repin_under_rated_capacitors(architecture, bom) -> list[str]:
             continue
         cid, candidate_rating = picked
         previous_note = str(part.sourcing_note or "")
-        part.sourcing_note = f"LCSC {cid}"
+        part.sourcing_note = previous_note.replace(old_cid, cid, 1)
         bom.substitutions.append(
             Substitution(
                 wanted=f"{part.ref} {old_cid}"
@@ -790,6 +810,34 @@ def _repin_under_rated_capacitors(architecture, bom) -> list[str]:
             + " (derived)"
         )
     return notes
+
+
+def _automatic_generic_pins(state_path: Path, bom, named_parts, brief: str) -> set[tuple[str, str]]:
+    """Read only generic selections from a receipt bound to these exact BOM parts."""
+    try:
+        receipt = json.loads((state_path.parent / "sourcing_validation.json").read_text())
+        parts = [part.model_dump() for part in bom.parts]
+        digest = hashlib.sha256(
+            json.dumps(parts, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        if receipt.get("parts_digest") != digest:
+            return set()
+        protected = " ".join([brief, *(str(name) for name in named_parts)]).casefold()
+        result = set()
+        for row in receipt.get("parts", []):
+            if not isinstance(row, dict) or row.get("picky_selection") is not True:
+                continue
+            cid, mpn, ref = (str(row.get(key) or "").strip() for key in (
+                "exact_lcsc", "catalog_mpn", "ref"
+            ))
+            if not cid or not ref or cid.casefold() in protected:
+                continue
+            if mpn and mpn.casefold() in protected:
+                continue
+            result.add((ref, cid))
+        return result
+    except (OSError, ValueError, TypeError, AttributeError):
+        return set()
 
 
 def _resolve_bom_mpn_sourcing(
@@ -1476,8 +1524,31 @@ def _archive_session(
     return dest
 
 
-def _load_state(path: Path) -> ConversationState:
+class LegacyRecipeStateError(ValueError):
+    """A saved recipe graph must be regenerated before wiring or build."""
+
+    def __init__(self, resume_stage: str):
+        self.resume_stage = resume_stage
+        super().__init__(
+            f"saved recipe graph is obsolete; rerun from {resume_stage} and regenerate "
+            "the BOM and wiring before continuing"
+        )
+
+
+def _load_state(
+    path: Path, *, require_current_recipe_bom: bool = False, repair_stage: str | None = None
+) -> ConversationState:
     data = json.loads(path.read_text())
+    if isinstance(data, dict) and (require_current_recipe_bom or repair_stage):
+        from .stage_state import legacy_recipe_resume_stage
+
+        resume_stage = legacy_recipe_resume_stage(data)
+        if resume_stage == "architecture" and repair_stage == "architecture":
+            invalidate_downstream(data, "functional_spec")
+        elif resume_stage == "bom" and repair_stage in {"architecture", "bom"}:
+            invalidate_downstream(data, "architecture")
+        elif resume_stage and (require_current_recipe_bom or repair_stage in {"bom", "wiring"}):
+            raise LegacyRecipeStateError(resume_stage)
     return ConversationState.model_validate(data)
 
 
@@ -3696,7 +3767,10 @@ def _cmd_stage_prep(args: argparse.Namespace) -> int:
     state_path = Path(args.state)
     if state_path.exists():
         try:
-            state = _load_state(state_path)
+            state = _load_state(state_path, repair_stage=stage)
+        except LegacyRecipeStateError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 3
         except ValidationError as e:
             print(f"schema validation failed:\n{e}", file=sys.stderr)
             return 2
@@ -3846,7 +3920,12 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
 
     if state_path.exists():
         try:
-            state = _load_state(state_path)
+            state = _load_state(
+                state_path, require_current_recipe_bom=stage == "wiring", repair_stage=stage
+            )
+        except LegacyRecipeStateError as e:
+            print(json.dumps({"ok": False, "errors": [str(e)], "reconcile_target": e.resume_stage}, indent=2))
+            return 3
         except ValidationError as e:
             print(
                 json.dumps(
@@ -3877,6 +3956,10 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
             )
         )
         return 2
+
+    if not isinstance(slot_data, dict):
+        print(json.dumps({"ok": False, "errors": ["slot validation failed: expected a JSON object"]}))
+        return 3
 
     try:
         _apply_slot(state, stage, slot_data, project_stem=args.project_stem)
@@ -4028,8 +4111,10 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
     if args.questions_file:
         try:
             q_data = json.loads(Path(args.questions_file).read_text())
+            if not isinstance(q_data, list):
+                raise ValueError("expected a JSON array")
             new_questions = [Question.model_validate(q) for q in q_data]
-        except (OSError, json.JSONDecodeError, ValidationError) as e:
+        except (OSError, json.JSONDecodeError, ValidationError, ValueError) as e:
             print(
                 json.dumps(
                     {"ok": False, "errors": [f"could not read questions-file: {e}"]},
@@ -4342,11 +4427,19 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
     if stage == "wiring" and state.bom is not None and state.bom.connections:
         from .synthesis.validation import check_composed_wiring
 
-        # §9.38's own repair, before the gate that raises it: the under-rated capacitor is a
-        # recipe-owned passive the wiring stage cannot re-select, so refusing it there is
-        # unrepairable. Re-pin it from the same catalog the BOM pin used and record the swap.
+        # Only a receipt-proven generic selection may be re-pinned. Exact
+        # identities and stale or missing receipts remain subject to the gate.
         if state.architecture is not None:
-            repinned = _repin_under_rated_capacitors(state.architecture, state.bom)
+            try:
+                brief_text = (state_path.resolve().parent.parent / "brief.txt").read_text()
+            except OSError:
+                brief_text = ""
+            automatic_pins = _automatic_generic_pins(
+                state_path, state.bom, getattr(state.intent, "named_parts", ()) or (), brief_text
+            )
+            repinned = _repin_under_rated_capacitors(
+                state.architecture, state.bom, automatic_pins=automatic_pins
+            )
             if repinned:
                 bom_normalizations.extend(repinned)
                 state.bom.assumptions.extend(repinned)
@@ -4585,6 +4678,14 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
         for m in bom_position_mismatches(state.bom.parts, state_path.resolve().parent.parent):
             bom_warnings.append(m["message"])
 
+    if stage == "bom":
+        state.wiring_complete = False
+    elif stage == "wiring":
+        state.wiring_complete = True
+        previous_status = state.stage_status.get("wiring")
+        if previous_status is not None and previous_status.ok is False:
+            state.stage_status.pop("wiring", None)
+
     state_path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(state_path, state.model_dump_json(indent=2) + "\n")
     if stage == "bom" and state.bom is not None and sourcing_receipt:
@@ -4711,20 +4812,58 @@ def _write_synthesis_check(
                 "message": r.message,
                 "offenders": r.offenders[:20],
                 "offenders_total": len(r.offenders),
+                **({"report_path": getattr(r, "report_path", None)} if r.name == "9.12 ERC" else {}),
             }
             for r in results
         ],
     }
     out = state_path.parent / "synthesis_check.json"
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(summary, indent=2, default=str) + "\n")
+    atomic_write_text(out, json.dumps(summary, indent=2, default=str) + "\n")
+
+
+def _synthesis_attempt_id(project_dir: Path) -> str | None:
+    try:
+        data = json.loads((project_dir / ".kicraft" / "synthesis-generated.json").read_text())
+        return data.get("attempt_id") if isinstance(data, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def _run_synth_with_freshness(state, state_path: Path, project_dir: Path, **kwargs):
+    """Invalidate old success only if this attempt actually began emitting."""
+    before = _synthesis_attempt_id(project_dir)
+    try:
+        return run_synth(state, project_dir, **kwargs)
+    except Exception:
+        after = _synthesis_attempt_id(project_dir)
+        if after is not None and after != before:
+            if state.artifacts is not None:
+                state.artifacts = state.artifacts.model_copy(update={
+                    "status": "failed", "routed_pcb": None, "fab_zip": None,
+                    "step_file": None, "board_3d_png": None,
+                    "step_model_missing_refs": None,
+                })
+                _persist_artifacts(state, state_path, state.artifacts)
+            _write_synthesis_check(
+                state_path, state.project_stem,
+                [CheckResult(name="9.12 ERC", ok=False, message="synthesis did not complete")],
+                ok=False,
+            )
+            _write_build_gate(state_path, {
+                "ok": False, "fab_acceptable": False, "reasons": ["synthesis_failed"]
+            })
+        raise
 
 
 def _cmd_synthesize(args: argparse.Namespace) -> int:
     state_path = Path(args.state)
     out_dir = Path(args.out_dir)
     try:
-        state = _load_state(state_path)
+        state = _load_state(state_path, require_current_recipe_bom=True)
+    except LegacyRecipeStateError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 3
     except ValidationError as e:
         print(f"schema validation failed:\n{e}", file=sys.stderr)
         return 2
@@ -4736,8 +4875,8 @@ def _cmd_synthesize(args: argparse.Namespace) -> int:
         out_dir = out_dir / state.project_stem
 
     try:
-        artifacts, results = run_synth(
-            state, out_dir, smoke=args.smoke, smoke_timeout_s=args.smoke_timeout
+        artifacts, results = _run_synth_with_freshness(
+            state, state_path, out_dir, smoke=args.smoke, smoke_timeout_s=args.smoke_timeout
         )
     except SynthesisInputError as e:
         print(f"synthesis input error: {e}", file=sys.stderr)
@@ -5696,6 +5835,9 @@ def _persist_pcb_diagnostics(
     artifacts.pcb_errors = errors
     artifacts.status = "failed"
     artifacts.fab_zip = None
+    artifacts.step_file = None
+    artifacts.board_3d_png = None
+    artifacts.step_model_missing_refs = None
     if board is not None and board.is_file():
         artifacts.routed_pcb = board
     _persist_artifacts(state, state_path, artifacts)
@@ -5847,20 +5989,15 @@ def _verify_routed_board(pcb: Path) -> dict:
     if courtyard > 0:
         measured = measure_courtyard_overlaps(str(pcb))
         minor, gross = classify_courtyard_overlaps(
-            measured,
+            measured or [],
             max_penetration_mm=float(
                 DEFAULT_CONFIG.get("courtyard_overlap_warn_penetration_mm", 0.5)
             ),
             max_area_mm2=float(DEFAULT_CONFIG.get("courtyard_overlap_warn_area_mm2", 0.5)),
         )
-        courtyard_overlaps = [o.to_dict() for o in measured]
-        # Downgrade to a warning ONLY with positive evidence: the measurement
-        # ran, saw every flagged overlap, and found them all minor. When the
-        # measurement is unavailable (pcbnew not in path) but the board is
-        # otherwise electrically clean, treat overlaps as minor so the board
-        # is still 3D-rendered for visual inspection — the designer can judge
-        # part clearance from the render. A board with shorts or unconnected
-        # nets gets the conservative hard-fail.
+        courtyard_overlaps = [o.to_dict() for o in measured or []]
+        # Downgrade only with positive measurement evidence. Missing or
+        # empty geometry cannot explain a positive KiCad DRC count.
         if measured:
             courtyard_minor_only = not gross
         else:
@@ -6018,7 +6155,7 @@ def _maybe_electrical_review(
     identity.  Web callers omit them and retain the established environment-based
     review route.
     """
-    if state is None or state.bom is None or not state.bom.connections:
+    if state is None or not stage_done("wiring", state.model_dump()):
         return {"ran": False, "findings": [], "blocked": False, "cost_usd": 0.0}
     if os.environ.get("KICRAFT_ELECTRICAL_REVIEW", "").strip().lower() in (
         "0",
@@ -6172,7 +6309,7 @@ def run_post_wiring_review(
     ):
         return skipped  # explicit opt-out: don't even paint the tab
     state = _load_state(state_path) if state_path.exists() else None
-    if state is None or state.bom is None or not state.bom.connections:
+    if state is None or not stage_done("wiring", state.model_dump()):
         return skipped
     review_settings = settings or getattr(client, "s", None)
     model = None
@@ -6766,15 +6903,6 @@ def _promote_verify_fab(
         )
         return 6
     shutil.copy(routed, pcb)  # copy (not copy2) -> honest promote-time mtime
-    artifact_paths.write_promote_provenance(
-        pcb,
-        run_id=run_id,
-        run_started_at=run_started_at,
-        source_board=routed,
-        source_kind="routed",
-        fresh=True,
-        advisories=_shipped_advisory_codes(state),
-    )
     print(f"[build] 3/5 promoted routed parent -> {pcb.name}")
 
     # 3a. Silkscreen legend + authored labels. Runs on the promoted board
@@ -6802,6 +6930,15 @@ def _promote_verify_fab(
             artifacts.silk_dropped = [f"{d['id']}: {d['reason']}" for d in _dropped]
     except Exception as _silk_err:  # noqa: BLE001 - cosmetic, never a gate
         print(f"[build]     silk legend skipped ({_silk_err})", file=sys.stderr)
+    artifact_paths.write_promote_provenance(
+        pcb,
+        run_id=run_id,
+        run_started_at=run_started_at,
+        source_board=routed,
+        source_kind="routed",
+        fresh=True,
+        advisories=_shipped_advisory_codes(state),
+    )
 
     # 4. Verification gate: no shorts, no unconnected, and no silently-dropped
     #    components (a board that dropped parts can still verify "clean").
@@ -7080,6 +7217,11 @@ def _promote_verify_fab(
     artifacts.fab_zip = Path(fab["zip"])
     artifacts.step_file = Path(fab["step"]) if fab.get("step") else None
     artifacts.board_3d_png = Path(fab["board_3d_png"]) if fab.get("board_3d_png") else None
+    step_coverage = fab.get("step_model_coverage") or {}
+    artifacts.step_model_missing_refs = (
+        step_coverage.get("missing_refs")
+        if step_coverage.get("status") == "observed" else None
+    )
     _persist_artifacts(state, state_path, artifacts)
     _write_build_gate(state_path, gate)
 
@@ -7094,6 +7236,12 @@ def _promote_verify_fab(
     print(f"  contents   : {', '.join(fab['files'])}")
     if fab.get("step"):
         print(f"  STEP model : {fab['step']}")
+        if artifacts.step_model_missing_refs is None:
+            print("  STEP bodies: reference coverage unmeasured")
+        elif artifacts.step_model_missing_refs:
+            print("  STEP bodies: missing " + ", ".join(artifacts.step_model_missing_refs))
+        else:
+            print("  STEP bodies: all expected assembly references present")
     if fab.get("board_3d_png"):
         print(f"  3D render  : {fab['board_3d_png']}")
     return 0
@@ -7326,7 +7474,10 @@ def _cmd_build_impl(args: argparse.Namespace) -> int:
     state_path = Path(args.state)
     out_dir = Path(args.out_dir)
     try:
-        state = _load_state(state_path)
+        state = _load_state(state_path, require_current_recipe_bom=True)
+    except LegacyRecipeStateError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 3
     except ValidationError as e:
         print(f"schema validation failed:\n{e}", file=sys.stderr)
         return 2
@@ -7336,10 +7487,10 @@ def _cmd_build_impl(args: argparse.Namespace) -> int:
 
     _record_build_meta(args, state_path)
 
-    if state.bom is None or not state.bom.connections:
+    if not stage_done("wiring", state.model_dump()):
         print(
-            "error: build needs a fully-staged state with wiring "
-            "(bom.connections). Run the KiCraft stages first.",
+            "error: build needs a fully-staged state with completed wiring. "
+            "Run the KiCraft stages first.",
             file=sys.stderr,
         )
         return 3
@@ -7349,7 +7500,7 @@ def _cmd_build_impl(args: argparse.Namespace) -> int:
     # 1. Synthesize: schematic + seed PCB + ERC gate.
     print("[build] 1/5 synthesize (schematic + seed PCB + ERC) ...")
     try:
-        artifacts, results = run_synth(state, out_dir, smoke=False)
+        artifacts, results = _run_synth_with_freshness(state, state_path, out_dir, smoke=False)
     except SynthesisInputError as e:
         print(f"synthesis input error: {e}", file=sys.stderr)
         return 4
@@ -7873,7 +8024,7 @@ def _cmd_artifacts(args: argparse.Namespace) -> int:
             "mtime": _iso(board.stat().st_mtime) if board.exists() else None,
             "md5": artifact_paths.file_md5(board),
             # drift signal: does this artifact's run match what was last promoted?
-            "matches_promoted": (rid == promoted_run_id) if (rid and promoted_run_id) else None,
+            "matches_promoted_run": (rid == promoted_run_id) if (rid and promoted_run_id) else None,
         }
 
     if args.json:
@@ -7911,7 +8062,7 @@ def _cmd_artifacts(args: argparse.Namespace) -> int:
         if e is None:
             print(f"  {kind:7}: (none)")
             continue
-        drift = "  [!] run_id differs from promoted board" if e["matches_promoted"] is False else ""
+        drift = "  [!] run_id differs from promoted board" if e["matches_promoted_run"] is False else ""
         print(f"  {kind:7}: {e['path']}")
         print(
             f"           run_id={e['run_id'] or '(unrecorded)'}  "

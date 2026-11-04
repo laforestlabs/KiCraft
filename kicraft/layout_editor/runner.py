@@ -353,14 +353,20 @@ def _seeded_grid(leaves: list[LeafInfo]) -> dict[str, Any]:
             "mounting_holes": [],
         }
     cols = max(1, int(math.ceil(math.sqrt(len(leaves)))))
-    cell_w = max(lf.width_mm for lf in leaves) + DEFAULT_SPACING_MM
-    cell_h = max(lf.height_mm for lf in leaves) + DEFAULT_SPACING_MM
+    bounds = [
+        (lf.edge_min_x, lf.edge_min_y, lf.edge_max_x, lf.edge_max_y)
+        if lf.edge_max_x > lf.edge_min_x and lf.edge_max_y > lf.edge_min_y
+        else (0.0, 0.0, lf.width_mm, lf.height_mm)
+        for lf in leaves
+    ]
+    cell_w = max(x1 - x0 for x0, _, x1, _ in bounds) + DEFAULT_SPACING_MM
+    cell_h = max(y1 - y0 for _, y0, _, y1 in bounds) + DEFAULT_SPACING_MM
     placements = []
     for i, lf in enumerate(leaves):
         col = i % cols
         row = i // cols
-        x = DEFAULT_SPACING_MM + col * cell_w
-        y = DEFAULT_SPACING_MM + row * cell_h
+        x = DEFAULT_SPACING_MM + col * cell_w - bounds[i][0]
+        y = DEFAULT_SPACING_MM + row * cell_h - bounds[i][1]
         placements.append(
             {
                 "instance_path": lf.instance_path,

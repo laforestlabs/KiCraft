@@ -22,7 +22,7 @@
 				)
 			)
 		)
-		(property "Footprint" "Package_DFN_QFN:QFN-48-1EP_7x7mm_P0.5mm_EP4.4x4.4mm"
+		(property "Footprint" "ip2368:QFN-48-1EP_7x7mm_P0.5mm_EP5.1x5.1mm"
 			(at -48.768 -38.608 0)
 			(effects
 				(font

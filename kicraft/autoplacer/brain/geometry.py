@@ -66,14 +66,25 @@ def bbox_after_rotation(
 
 
 def rotate_component_in_place(comp: Component, delta_deg: float) -> None:
-    """Rotate a ``Component`` about its own ``pos`` by ``delta_deg`` -- its
-    pads, ``body_center``, ``rotation``, and (for 90/270) the AABB
-    ``width_mm``/``height_mm``. KiCad CW, so the result agrees with
-    :func:`transform_point` / pcbnew / ``opening_board_angle``; math-CCW here
-    would orient a connector mouth toward the opposite edge."""
+    """Rotate a component about its footprint origin in KiCad's CW convention.
+
+    Body and pad dimensions are world AABBs. Retain their original rotation
+    basis while they are unchanged, so repeated non-cardinal trial rotations
+    neither shrink the bounds nor compound their conservative enlargement.
+    """
     delta = delta_deg % 360.0
     if abs(delta) < 1e-6:
         return
+    old_rot = comp.rotation
+    new_rot = (old_rot + delta) % 360.0
+    body_basis = getattr(comp, "_rotation_body_basis", None)
+    if body_basis is None or body_basis[3:] != (old_rot, comp.width_mm, comp.height_mm):
+        body_basis = (old_rot, comp.width_mm, comp.height_mm, old_rot, comp.width_mm, comp.height_mm)
+    body_w, body_h = bbox_after_rotation(
+        body_basis[1], body_basis[2], new_rot - body_basis[0]
+    )
+    pad_bases = getattr(comp, "_rotation_pad_bases", ())
+    new_pad_bases = []
     cx, cy = comp.pos.x, comp.pos.y
 
     def _rot(p: Point) -> Point:
@@ -82,14 +93,19 @@ def rotate_component_in_place(comp: Component, delta_deg: float) -> None:
 
     if comp.body_center is not None:
         comp.body_center = _rot(comp.body_center)
-    for pad in comp.pads:
+    for index, pad in enumerate(comp.pads):
         pad.pos = _rot(pad.pos)
-        if pad.size_mm is not None:
-            # size_mm is a WORLD-axis-aligned AABB (types.Pad contract), so
-            # it must be re-rotated with the pad, like _rotate_size on the
-            # artifact path.
-            w, h = bbox_after_rotation(pad.size_mm.x, pad.size_mm.y, delta)
-            pad.size_mm = Point(w, h)
-    comp.rotation = (comp.rotation + delta) % 360.0
-    if round(delta) % 180 == 90:
-        comp.width_mm, comp.height_mm = comp.height_mm, comp.width_mm
+        if pad.size_mm is None:
+            new_pad_bases.append(None)
+            continue
+        current = (pad.ref, pad.pad_id, old_rot, pad.size_mm.x, pad.size_mm.y)
+        basis = pad_bases[index] if index < len(pad_bases) else None
+        if basis is None or basis[3:] != current:
+            basis = (old_rot, pad.size_mm.x, pad.size_mm.y, *current)
+        w, h = bbox_after_rotation(basis[1], basis[2], new_rot - basis[0])
+        pad.size_mm = Point(w, h)
+        new_pad_bases.append((basis[0], basis[1], basis[2], pad.ref, pad.pad_id, new_rot, w, h))
+    comp.rotation = new_rot
+    comp.width_mm, comp.height_mm = body_w, body_h
+    comp._rotation_body_basis = (body_basis[0], body_basis[1], body_basis[2], new_rot, body_w, body_h)
+    comp._rotation_pad_bases = new_pad_bases

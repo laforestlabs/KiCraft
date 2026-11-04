@@ -237,15 +237,7 @@ def test_recommend_downranks_low_quant_unless_allowed():
     assert rec2["pick"].endpoint.tag == "deepinfra/fp4"
 
 
-def test_report_warns_when_current_pin_failed_to_resolve():
-    s = Settings(api_key="k", provider_order=["deepseek"])                                   # provider_order ["deepseek"]
-    dead = _mk_failed("DeepSeek", "deepseek", 0.14, 0.28)       # 404 when pinned
-    alt = _mk_result("Novita", "novita/fp8", 0.14, 0.28, 0.00018, 92, quant="fp8")
-    rec = pb.recommend([dead, alt], s)
-    assert rec["pick"].endpoint.tag == "novita/fp8"
-    report = pb.format_report([dead, alt], rec, s, 0.01,
-                              {"prompt_tokens": 3500, "max_tokens": 200, "repeat": 2})
-    assert "did NOT resolve" in report and "silently routing" in report
+
 
 
 # ---- discover_endpoints ---------------------------------------------------

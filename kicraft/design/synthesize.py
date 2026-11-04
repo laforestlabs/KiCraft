@@ -22,9 +22,14 @@ AFTER writing files (so the user can inspect what was produced).
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
-import shutil
+import uuid
+from collections.abc import Callable
 from pathlib import Path
+
+from kicraft.fsutil import atomic_write_text
 
 from .models import ArtifactPaths, ConversationState, board_copper_layers
 from .synthesis.autoplacer import write_autoplacer_json
@@ -84,6 +89,7 @@ def _install_library_sheets(
     state: ConversationState,
     project_dir: Path,
     sheet_instances: list,
+    on_written: Callable[[Path], None] | None = None,
 ) -> tuple[dict, dict[str, dict]]:
     """Install every library-backed sheet. Returns (fragments, library_leaves).
 
@@ -143,6 +149,7 @@ def _install_library_sheets(
             project_refs=project_refs,
             autoplacer_dict=fragments,
             check_dependencies=True,
+            on_schematic_written=on_written,
         )
         project_refs.extend(result.ref_map.values())
         library_leaves[sheet.name] = result.to_library_leaves_entry()
@@ -163,6 +170,83 @@ def _requested_copper_layers(state: ConversationState) -> int:
     if requested is None:
         return DEFAULT_COPPER_LAYERS
     return requested
+
+def _read_generated_files(project_dir: Path) -> dict[str, str]:
+    manifest = project_dir / ".kicraft" / "synthesis-generated.json"
+    if not manifest.exists():
+        return {}
+    data = json.loads(manifest.read_text(encoding="utf-8"))
+    if not isinstance(data, dict) or data.get("version") != 1 or not isinstance(data.get("files"), dict):
+        raise SynthesisInputError(f"invalid synthesis output manifest: {manifest}")
+    return data["files"]
+
+
+def _check_output_destinations(
+    project_dir: Path, paths: list[Path], owned: dict[str, str]
+) -> None:
+    """Refuse to overwrite files not proven to be unchanged synthesis outputs."""
+    for path in paths:
+        if not path.resolve().is_relative_to(project_dir):
+            raise SynthesisInputError(f"synthesis output escapes project directory: {path}")
+        if not path.exists() and not path.is_symlink():
+            continue
+        expected = owned.get(str(path.relative_to(project_dir)))
+        if (
+            path.is_symlink() or not path.is_file() or expected is None
+            or hashlib.sha256(path.read_bytes()).hexdigest() != expected
+        ):
+            raise SynthesisInputError(
+                f"refusing to overwrite untracked or modified synthesis output: {path}"
+            )
+
+
+def _record_completed_outputs(
+    project_dir: Path, paths: list[Path], *, attempt_id: str
+) -> None:
+    """Record completed writes without deleting any earlier generated output."""
+    files = _read_generated_files(project_dir)
+    for path in paths:
+        if path.is_file() and not path.is_symlink():
+            files[str(path.relative_to(project_dir))] = hashlib.sha256(path.read_bytes()).hexdigest()
+    manifest = project_dir / ".kicraft" / "synthesis-generated.json"
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_text(manifest, json.dumps(
+        {"version": 1, "status": "failed", "attempt_id": attempt_id, "files": files},
+        indent=2, sort_keys=True,
+    ) + "\n")
+
+
+def _reconcile_generated_files(
+    project_dir: Path, generated: list[Path], *, attempt_id: str | None = None
+) -> None:
+    """Remove only unchanged obsolete files recorded by an earlier synthesis."""
+    manifest = project_dir / ".kicraft" / "synthesis-generated.json"
+    previous = _read_generated_files(project_dir)
+    current = {
+        str(path.relative_to(project_dir)): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in generated
+        if path.is_file()
+    }
+    for name, digest in previous.items():
+        if name in current or not isinstance(name, str) or not isinstance(digest, str):
+            continue
+        relative = Path(name)
+        if relative.is_absolute() or ".." in relative.parts:
+            continue
+        path = project_dir / relative
+        if (
+            path.is_file() and not path.is_symlink()
+            and path.resolve().is_relative_to(project_dir)
+            and hashlib.sha256(path.read_bytes()).hexdigest() == digest
+        ):
+            path.unlink()
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_text(manifest, json.dumps(
+        {"version": 1, "status": "failed", "attempt_id": attempt_id, "files": current},
+        indent=2, sort_keys=True,
+    ) + "\n")
+
+
 
 
 def run(
@@ -190,27 +274,8 @@ def run(
     project_dir = project_dir.resolve()
     project_dir.mkdir(parents=True, exist_ok=True)
 
-    # Re-synthesis (a resumable-session stage rerun) emits into the same dir; clear
-    # the prior generated top-level files first so an orphan leaf from a PREVIOUS
-    # architecture cannot linger. A stale `*.kicad_sch` the new root no longer
-    # references would surface as a phantom sheet in the web sheet list and leave the
-    # hierarchy degenerate (the place/route engine then finds 0 leaf subcircuits and
-    # fails). Scoped to this dir's own generated files by extension -- the
-    # `.experiments/` and `.kicraft/` trees (subdirectories) are untouched.
-    for pat in (
-        "*.kicad_sch",
-        "*.kicad_pcb",
-        "*.kicad_pro",
-        "*.kicad_prl",
-        "*_autoplacer.json",
-        "*_erc.rpt",
-    ):
-        for stale in project_dir.glob(pat):
-            if stale.is_file():
-                stale.unlink()
-    # Staged 3D models follow the BOM, so a re-synthesis with a changed BOM
-    # must not leave orphan models behind; stage_3d_models repopulates below.
-    shutil.rmtree(project_dir / "3dmodels", ignore_errors=True)
+    # Existing files are not assumed to be generated merely from their suffix.
+    # Obsolete files are reconciled against our output manifest after emission.
 
     # Guard the root/leaf filename collision (a leaf stem equal to the project
     # stem would clobber the root, or be clobbered by it) BEFORE building sheet
@@ -221,9 +286,6 @@ def run(
     # Deterministic BOM rule: thin per-LED decoupling to a couple of bulk caps for
     # a LOW-current LED array (loud + recorded in bom.assumptions). Must run BEFORE
     # the schematic / netlist / autoplacer artifacts are emitted from the BOM.
-    from kicraft.design.synthesis.array_decap_footprints import (
-        downsize_array_decap_footprints,
-    )
     from kicraft.design.synthesis.array_decaps import (
         drop_decap_only_arrays,
         isolate_array_sheets,
@@ -240,10 +302,6 @@ def run(
     # -> doomed route. Drop it first so the caps become array companions.
     drop_decap_only_arrays(state.bom)
     normalize_array_decaps(state.bom)
-    # Backstop the prompt's package nudge: size each LED array's surviving decaps
-    # to fit beside the LEDs (0603, or 0402 for sub-2.5mm LEDs). Runs after the
-    # thinning so only surviving caps are touched.
-    downsize_array_decap_footprints(state.bom)
     # Keep array sheets pure: a non-member, non-companion part (a header, an MCU)
     # sharing an array's sheet gets stranded ~60mm from the locked grid by the
     # leaf solver (KC-WXN3SN). Move it to its own sheet -> its own leaf, composed
@@ -263,10 +321,27 @@ def run(
     if split_dense_sheets_enabled():
         split_dense_soc_sheets(state.bom, state.architecture)
     ensure_leaf_stems_distinct(state.project_stem, state.architecture.sheets)
+    owned_files = _read_generated_files(project_dir)
+    output_paths = [
+        project_dir / f"{state.project_stem}.kicad_sch",
+        project_dir / f"{state.project_stem}.kicad_pcb",
+        project_dir / f"{state.project_stem}.kicad_pro",
+        project_dir / f"{state.project_stem}_autoplacer.json",
+        *(project_dir / f"{sheet.stem}.kicad_sch" for sheet in state.architecture.sheets),
+    ]
+    _check_output_destinations(project_dir, output_paths, owned_files)
+
 
     sheet_instances = build_sheet_instances(state.architecture, state.bom)
+    attempt_id = str(uuid.uuid4())
+    _record_completed_outputs(project_dir, [], attempt_id=attempt_id)
 
-    fragments, library_leaves = _install_library_sheets(state, project_dir, sheet_instances)
+    def record_written(path: Path) -> None:
+        _record_completed_outputs(project_dir, [path], attempt_id=attempt_id)
+
+    fragments, library_leaves = _install_library_sheets(
+        state, project_dir, sheet_instances, on_written=record_written
+    )
 
     library_sheet_names = {name for name in library_leaves}
     root, leaves = emit_schematic(
@@ -277,6 +352,7 @@ def run(
         title=state.intent.goal if state.intent else state.project_stem,
         skip_leaf_sheets=library_sheet_names,
         sheet_instances=sheet_instances,
+        on_written=record_written,
     )
 
     if library_sheet_names:
@@ -287,6 +363,7 @@ def run(
                     leaves.append(lib_path)
 
     pro = write_kicad_pro(project_dir, state.project_stem, state.architecture)
+    record_written(pro)
     ap = write_autoplacer_json(
         project_dir,
         state.project_stem,
@@ -297,6 +374,7 @@ def run(
         placement=getattr(state, "placement", None),
         form_factor=state.intent.form_factor if state.intent else None,
     )
+    record_written(ap)
     # Build the artifact record BEFORE the PCB stub — the schematic files
     # exist on disk regardless of whether the stub or the §9 checks pass —
     # so any failure below can still report what was written
@@ -311,7 +389,7 @@ def run(
     )
 
     try:
-        write_empty_pcb(project_dir, state.project_stem, state.bom, copper_layers=copper_layers)
+        pcb = write_empty_pcb(project_dir, state.project_stem, state.bom, copper_layers=copper_layers)
     except PadBindingError as exc:
         # A wired endpoint matched no footprint pad (invisible dead copper).
         # §9.27 rejects the symbol/footprint pairing at BOM commit, but any
@@ -325,7 +403,11 @@ def run(
             artifacts=artifacts.model_copy(update={"status": "failed"}),
             results=[failure],
         ) from exc
-    stage_3d_models(project_dir, state.bom)
+    record_written(pcb)
+    staged_models = stage_3d_models(
+        project_dir, state.bom, owned_files=owned_files, on_written=record_written
+    )
+    _reconcile_generated_files(project_dir, [*output_paths, *staged_models], attempt_id=attempt_id)
 
     results = collect_validations(
         project_dir, state.project_stem, bom=state.bom, architecture=state.architecture,
@@ -354,4 +436,8 @@ def run(
             artifacts=artifacts.model_copy(update={"status": "failed"}),
             results=results,
         )
+    manifest = project_dir / ".kicraft" / "synthesis-generated.json"
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    payload["status"] = "complete"
+    atomic_write_text(manifest, json.dumps(payload, indent=2, sort_keys=True) + "\n")
     return artifacts, results

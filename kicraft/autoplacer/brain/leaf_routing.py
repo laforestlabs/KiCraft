@@ -549,6 +549,17 @@ def route_local_subcircuit(
     # outline can hug the routed copper too -- not just courtyards and
     # pad copper. See the silk re-stamp block after import_routed_copper.
     route_input_board.silkscreen = []
+    # Route against the antenna datum that the final board will retain. Applying
+    # it only after routing crops legal pre-escapes off the board (including GND
+    # corner vias) even though they cleared the original extraction outline.
+    if route_input_board.antenna_edge_intents:
+        antenna_outline = _outline_around_geometry(
+            route_input_board.components,
+            cfg,
+            antenna_edge_intents=route_input_board.antenna_edge_intents,
+        )
+        if antenna_outline is not None:
+            route_input_board.board_outline = antenna_outline
 
     stamp_start = time.monotonic()
     route_adapter = KiCadAdapter(str(source_pcb), config=cfg)

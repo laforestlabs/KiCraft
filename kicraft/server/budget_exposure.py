@@ -33,7 +33,18 @@ def strict_budget_exposure_status(ledger_path, *, run_id: str | None = None) -> 
             if exists
             else []
         )
-    exposure = {str(state): float(cost) for state, cost in rows}
+        provider_exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='provider_exposure'"
+        ).fetchone()
+        if provider_exists:
+            rows += conn.execute(
+                "SELECT state, COALESCE(SUM(ceiling_usd), 0) FROM provider_exposure "
+                "WHERE state IN ('reserved','uncertain')" + exposure_where[0] + " GROUP BY state",
+                exposure_where[1],
+            ).fetchall()
+    exposure: dict[str, float] = {}
+    for state, cost in rows:
+        exposure[str(state)] = exposure.get(str(state), 0.0) + float(cost)
     reserved = exposure.get("reserved", 0.0)
     uncertain = exposure.get("uncertain", 0.0)
     return {

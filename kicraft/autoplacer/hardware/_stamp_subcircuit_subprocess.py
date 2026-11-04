@@ -286,6 +286,10 @@ def main(argv: list[str]) -> int:
     # Consumers rebuild connectivity on LoadBoard().
 
     _save_status = board.Save(_out_path)
+    if _save_status is False:
+        # A previous round's valid file must never stand in for a failed save.
+        print(f"SELF_LOAD_FAILED save_status={_save_status!r} output={_out_path!r}")
+        return 2
 
     # pcbnew.Save() emits a sidecar .kicad_pro with KiCad defaults.
     # Overwrite with the source PCB's pro so kicad-cli pcb drc sees

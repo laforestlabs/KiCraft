@@ -17,6 +17,7 @@ directly, so it is hermetic w.r.t. the home/project/extra tiers.
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import kicraft.parts_library.loader as loader_mod
@@ -59,3 +60,19 @@ def test_esp32_module_bundles_present():
     assert {"esp32-wroom-32e-n4", "esp32-s3-wroom-1"} <= active_names, (
         f"ESP32 module bundles missing/broken; active vendored = {sorted(active_names)}"
     )
+
+
+def test_symbol_default_footprints_resolve_to_bundle_land_patterns():
+    """Manual KiCad use must not point at a different or missing land."""
+    vendored = _real_vendored_dir()
+    for name in ("ip2368", "tmp102aidrlr", "mf-msmf050-30x-2", "mf-msmf075-33x-2"):
+        part_dir = vendored / name
+        part = _load_one(part_dir, Tier.VENDORED)
+        assert not isinstance(part, BrokenPart)
+        symbol = (part_dir / f"{name}.kicad_sym").read_text(encoding="utf-8")
+        match = re.search(r'\(property\s+"Footprint"\s+"([^"]*)"', symbol)
+        assert match is not None
+        library, separator, footprint = match.group(1).partition(":")
+        assert separator and library == name
+        assert footprint == part.manifest.footprint_name
+        assert (part_dir / f"{library}.pretty" / f"{footprint}.kicad_mod").is_file()

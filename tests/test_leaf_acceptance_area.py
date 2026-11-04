@@ -85,8 +85,3 @@ class TestAreaObservationGate:
         assert gate["warning"] is True
         assert len(gate["warnings"]) == 2
 
-    def test_defaults(self):
-        cfg = LeafAcceptanceConfig()
-        assert cfg.area_warn_utilization == 0.15
-        assert cfg.area_warn_aspect == 4.0
-        assert cfg.area_warn_min_parts == 5

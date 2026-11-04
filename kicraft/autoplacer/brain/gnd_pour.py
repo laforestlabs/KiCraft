@@ -1421,7 +1421,7 @@ def repair_parent_gnd_islands(
                 )
     del board0
 
-    def _via_blocked(x_iu: int, y_iu: int) -> bool:
+    def _via_blocked(active_board, x_iu: int, y_iu: int) -> bool:
         if not _via_clears_board_edge(
             x_iu, y_iu, edge_geometry=via_edge_geometry, via_radius_iu=via_radius_iu
         ):
@@ -1430,7 +1430,7 @@ def repair_parent_gnd_islands(
         xy = (pcbnew.ToMM(x_iu), pcbnew.ToMM(y_iu))
         if any(via_intersects_rule_area(xy, via_r_mm, area) for area in via_keepouts):
             return True
-        if _via_hits_smd_pad(board, pt, via_radius_iu):
+        if _via_hits_smd_pad(active_board, pt, via_radius_iu):
             return True
         if any(item.HitTest(pt, margin) for item, margin in copper_obstacles):
             return True
@@ -1440,12 +1440,10 @@ def repair_parent_gnd_islands(
             for hx, hy, hr in holes
         )
 
-    def _add_via(x_iu: int, y_iu: int) -> bool:
-        # `board` is late-bound: assigned by the iteration loop below before
-        # this closure is ever called.
-        if _via_blocked(x_iu, y_iu):
+    def _add_via(active_board, x_iu: int, y_iu: int) -> bool:
+        if _via_blocked(active_board, x_iu, y_iu):
             return False
-        via = pcbnew.PCB_VIA(board)  # noqa: F821
+        via = pcbnew.PCB_VIA(active_board)
         via.SetPosition(pcbnew.VECTOR2I(x_iu, y_iu))
         via.SetDrill(via_drill)
         try:
@@ -1453,7 +1451,7 @@ def repair_parent_gnd_islands(
         except TypeError:
             via.SetWidth(pcbnew.F_Cu, via_size)
         via.SetNetCode(gnd_code)
-        board.Add(via)  # noqa: F821
+        active_board.Add(via)
         holes.append((pcbnew.ToMM(x_iu), pcbnew.ToMM(y_iu), via_drill_r_mm))
         return True
 
@@ -1495,7 +1493,7 @@ def repair_parent_gnd_islands(
                         p = si_pts.CPoint(k)
                         px_iu, py_iu = p.x, p.y
                         if mi["fill"].Contains(pcbnew.VECTOR2I(px_iu, py_iu), mi["idx"]):
-                            if _add_via(px_iu, py_iu):
+                            if _add_via(board, px_iu, py_iu):
                                 summary["vias"] += 1
                             break
                     else:
@@ -1503,7 +1501,7 @@ def repair_parent_gnd_islands(
                         bb = si_pts.BBox()
                         cx, cy = bb.GetCenter().x, bb.GetCenter().y
                         if mi["fill"].Contains(pcbnew.VECTOR2I(cx, cy), mi["idx"]):
-                            if _add_via(cx, cy):
+                            if _add_via(board, cx, cy):
                                 summary["vias"] += 1
 
         # Save vias, then run the track-based repair

@@ -186,7 +186,7 @@ _NATIVE_USB_MCU_RECIPES = frozenset(
         "esp32-s3-wroom-1-minimal@1",
         "esp32-c3-mini-1-minimal@1",
         "esp32-c3-mini-1-h4x-minimal@1",
-        "rp2040-minimal@2",
+        "rp2040-minimal@3",
     }
 )
 # Recipes whose own expansion carries the MCU-specific series pair, so the
@@ -198,7 +198,7 @@ _MCU_OWNED_USB_SERIES_RECIPES = frozenset(
         "esp32-s3-wroom-1-minimal@1",
         "esp32-c3-mini-1-minimal@1",
         "esp32-c3-mini-1-h4x-minimal@1",
-        "rp2040-minimal@2",
+        "rp2040-minimal@3",
     }
 )
 _HEADER_FAMILY = "pin-header"
@@ -3600,10 +3600,12 @@ def _usb_vbus_rail(intent: ArchitectureIntent) -> str | None:
         rail = intent.power.rails.get(name)
         return name if rail is not None and abs(rail.voltage - 5.0) <= 0.5 else None
     if len(from_input) == 1:
-        return from_input[0]
+        name = from_input[0]
+        return name if abs(intent.power.rails[name].voltage - 5.0) <= 0.5 else None
     named = [name for name in _USB_VBUS_RAIL_NAMES if name in intent.power.rails]
     if len(named) == 1:
-        return named[0]
+        name = named[0]
+        return name if abs(intent.power.rails[name].voltage - 5.0) <= 0.5 else None
     volts = [name for name, rail in intent.power.rails.items() if abs(rail.voltage - 5.0) <= 0.5]
     return volts[0] if len(volts) == 1 else None
 

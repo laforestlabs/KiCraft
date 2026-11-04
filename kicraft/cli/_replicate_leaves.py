@@ -110,6 +110,8 @@ def build_replication_maps(
     # signals map to their sibling). Must be an exact bijection of pad-sets.
     rep_nets = _pads_by_net(rep_components)
     sib_nets = _pads_by_net(sib_components)
+    if len(rep_nets) != len(sib_nets):
+        return None  # a sibling-only net would be lost during remapping
     sib_by_padset = {pads: net for net, pads in sib_nets.items()}
     if len(sib_by_padset) != len(sib_nets):
         return None  # ambiguous: two sib nets share a pad-set

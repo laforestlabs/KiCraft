@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from kicraft.server.spend_guard import BudgetExceeded, SpendGuard
+from kicraft.server.spend_guard import BudgetExceeded, KillSwitchEngaged, SpendGuard
 
 
 @pytest.fixture
@@ -50,6 +50,57 @@ def test_spent_for_project_none_is_zero(guard):
     assert guard.spent_for_project(None) == 0.0
 
 
+def test_live_kill_switch_stops_existing_guard_without_reloading_caps(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    monkeypatch.setattr("kicraft.server.spend_guard._KILL_SWITCH_ENV_PATH", tmp_path / ".env")
+    monkeypatch.setenv("KICRAFT_KILL_SWITCH", "0")
+    settings = SimpleNamespace(
+        ledger_path=str(tmp_path / "ledger.db"), kill_switch=False,
+        daily_usd_ceiling=1.0, total_usd_ceiling=1.0, project_llm_budget_usd=1.0,
+    )
+    guard = SpendGuard(settings)
+    dotenv = tmp_path / ".env"
+    dotenv.write_text("KICRAFT_KILL_SWITCH=0\nKICRAFT_TOTAL_USD_CEILING=1000\n")
+    guard.preflight(0.1, "run")
+    # The watcher may append an emergency stop before normalizing older entries.
+    with dotenv.open("a") as stream:
+        stream.write("KICRAFT_KILL_SWITCH='1'\n")
+    assert guard.status()["kill_switch"] is True
+    assert guard.status()["total_ceiling_usd"] == 1.0
+    with pytest.raises(KillSwitchEngaged):
+        guard.preflight(0.1, "run")
+    with pytest.raises(KillSwitchEngaged):
+        guard.reserve(0.1, "run")
+    assert guard.active_exposure() == 0
+
+
+def test_process_environment_can_engage_live_kill_switch(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("kicraft.server.spend_guard._KILL_SWITCH_ENV_PATH", tmp_path / ".env")
+    settings = SimpleNamespace(
+        ledger_path=str(tmp_path / "ledger.db"), kill_switch=False,
+        daily_usd_ceiling=1.0, total_usd_ceiling=1.0, project_llm_budget_usd=1.0,
+    )
+    guard = SpendGuard(settings)
+    monkeypatch.setenv("KICRAFT_KILL_SWITCH", "yes")
+    with pytest.raises(KillSwitchEngaged):
+        guard.reserve(0.1, "run")
+
+
+def test_unreadable_live_kill_file_fails_closed(tmp_path, monkeypatch):
+    monkeypatch.delenv("KICRAFT_KILL_SWITCH", raising=False)
+    monkeypatch.setattr("kicraft.server.spend_guard._KILL_SWITCH_ENV_PATH", tmp_path)
+    settings = SimpleNamespace(
+        ledger_path=str(tmp_path / "ledger.db"), kill_switch=False,
+        daily_usd_ceiling=1.0, total_usd_ceiling=1.0, project_llm_budget_usd=1.0,
+    )
+    guard = SpendGuard(settings)
+    with pytest.raises(KillSwitchEngaged, match="Cannot read"):
+        guard.reserve(0.1, "run")
+
+
 def test_preflight_reserves_call_against_project_run_budget(tmp_path):
     settings = SimpleNamespace(
         ledger_path=str(tmp_path / "ledger.db"),
@@ -64,6 +115,67 @@ def test_preflight_reserves_call_against_project_run_budget(tmp_path):
     with pytest.raises(BudgetExceeded, match="project run p7-run remaining budget"):
         guarded.preflight(call_ceiling_usd=0.031, run_id="p7-run")
     guarded.preflight(call_ceiling_usd=0.09, run_id="another-run")
+
+
+def test_atomic_reservations_retain_uncertain_exposure_and_settle_receipts(tmp_path):
+    settings = SimpleNamespace(
+        ledger_path=str(tmp_path / "ledger.db"), kill_switch=False,
+        daily_usd_ceiling=1.0, total_usd_ceiling=1.0, project_llm_budget_usd=1.0,
+    )
+    first = SpendGuard(settings)
+    second = SpendGuard(settings)
+    reservation = first.reserve(0.6, "p7-run")
+    with pytest.raises(BudgetExceeded):
+        second.reserve(0.5, "p8-run")
+    first.mark_uncertain(reservation)
+    assert second.spent_total() == 0
+    assert second.status()["uncertain_exposure_usd"] == pytest.approx(0.6)
+    with pytest.raises(BudgetExceeded):
+        second.reserve(0.5, "p8-run")
+    later = second.reserve(0.3, "p8-run")
+    second.settle_reservation(later, "model", 10, 5, 0.1, {"run_id": "p8-run"})
+    assert first.spent_total() == pytest.approx(0.1)
+    assert first.status()["reserved_exposure_usd"] == 0
+    assert first.status()["uncertain_exposure_usd"] == pytest.approx(0.6)
+
+
+def test_parallel_calls_cannot_reserve_more_than_total_limit(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    settings = SimpleNamespace(
+        ledger_path=str(tmp_path / "ledger.db"), kill_switch=False,
+        daily_usd_ceiling=1.0, total_usd_ceiling=1.0, project_llm_budget_usd=1.0,
+    )
+    guards = [SpendGuard(settings), SpendGuard(settings)]
+    barrier = Barrier(2)
+
+    def attempt(guard):
+        barrier.wait()
+        try:
+            return guard.reserve(0.6, "run")
+        except BudgetExceeded:
+            return None
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(attempt, guards))
+    assert sum(result is not None for result in results) == 1
+    assert guards[0].status()["reserved_exposure_usd"] == pytest.approx(0.6)
+
+
+def test_older_unsettled_request_still_counts_against_daily_limit(tmp_path):
+    settings = SimpleNamespace(
+        ledger_path=str(tmp_path / "ledger.db"), kill_switch=False,
+        daily_usd_ceiling=1.0, total_usd_ceiling=5.0, project_llm_budget_usd=0.0,
+    )
+    guard = SpendGuard(settings)
+    reservation = guard.reserve(0.6, "run")
+    with sqlite3.connect(guard.path) as conn:
+        conn.execute("UPDATE provider_exposure SET ts=? WHERE id=?", ("2000-01-01", reservation))
+    assert guard.status()["daily_remaining_usd"] == pytest.approx(0.4)
+    with pytest.raises(BudgetExceeded) as refused:
+        guard.reserve(0.5, "other-run")
+    assert refused.value.scope == "daily"
 
 
 def test_configured_project_cap_admits_only_fully_covered_calls(tmp_path, monkeypatch):

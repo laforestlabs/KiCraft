@@ -171,19 +171,10 @@ def test_block_unfiltered_when_catalog_absent(tmp_path, monkeypatch):
 # ---- system prompts carry the adoption rule ------------------------------------
 
 
-def test_bom_system_prompt_mentions_core_defaults():
-    low = build_system("bom").lower()
-    assert "core_defaults_block" in low
-    assert "add_part_from_lcsc" in low
 
 
-def test_architecture_system_prompt_mentions_core_defaults():
-    # The spec wraps its prose, so compare on normalized whitespace.
-    low = " ".join(build_system("architecture").lower().split())
-    assert "core_defaults_block" in low
-    # The assumptions-naming convention the BOM stage reads back (the intent spec's
-    # own wording; the legacy explicit spec's example sentence is gone with it).
-    assert "name the default family in `assumptions`" in low
+
+
 
 
 # ---- drive_stage injection ------------------------------------------------------

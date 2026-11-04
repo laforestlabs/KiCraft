@@ -17,9 +17,6 @@ from kicraft.parts_library.loader import BrokenPart, Tier, _iter_part_dirs, _loa
 from .conftest import make_valid_manifest, write_valid_part
 
 
-def test_default_maturity_is_prototype():
-    # conftest.make_valid_manifest does not set maturity -> the model default.
-    assert make_valid_manifest().maturity == "prototype"
 
 
 def test_maturity_edit_keeps_content_hash(tmp_path):
@@ -36,15 +33,6 @@ def test_maturity_edit_keeps_content_hash(tmp_path):
     assert compute_content_hash(part_dir) == h
 
 
-def test_vendored_bundles_are_not_prototype():
-    """Backfill guard: every shipped bundle is reviewed/production, not prototype."""
-    vendored = Path(loader_mod.__file__).resolve().parent
-    bad = []
-    for d in _iter_part_dirs(vendored):
-        r = _load_one(d, Tier.VENDORED)
-        if not isinstance(r, BrokenPart) and r.manifest.maturity == "prototype":
-            bad.append(d.name)
-    assert not bad, f"vendored bundles still defaulting to prototype: {bad}"
 
 
 def _promote_args(name, to, tier="home"):

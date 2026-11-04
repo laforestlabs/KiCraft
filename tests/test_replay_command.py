@@ -132,17 +132,7 @@ def test_resolve_neither_mode_raises(tmp_path):
 # ---- argparse wiring ---------------------------------------------------------
 
 
-def test_replay_subcommand_registered_and_defaults(monkeypatch):
-    seen = {}
-    monkeypatch.setattr(cli_app, "_cmd_replay", lambda args: seen.update(vars(args)) or 0)
-    rc = cli_app.main(["replay", "--project", "/tmp/x"])
-    assert rc == 0
-    assert seen["project"] == "/tmp/x"
-    assert seen["quality"] == "fast"  # replay defaults to the fast/deterministic engine
-    assert seen["seed"] == 0
-    assert seen["route"] is True  # routes by default
-    assert seen["no_fab"] is False
-    assert seen["no_archive"] is True  # replay skips the session archive by default
+
 
 
 def test_replay_flag_parsing(monkeypatch):

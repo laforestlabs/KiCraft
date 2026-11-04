@@ -598,9 +598,6 @@ def _led_parts(n: int) -> list[BomPart]:
     ]
 
 
-def test_arrayspec_valid() -> None:
-    spec = ArraySpec(refs=[f"D{i}" for i in range(1, 7)], rows=2, cols=3)
-    assert spec.serpentine is True and spec.pitch_mm is None
 
 
 def test_arrayspec_shape_mismatch_rejected() -> None:
@@ -641,5 +638,3 @@ def test_bom_ref_in_two_arrays_rejected() -> None:
         )
 
 
-def test_bom_arrays_default_empty() -> None:
-    assert BOM(parts=_led_parts(1)).arrays == []

@@ -44,31 +44,31 @@ class CourtyardOverlap:
         }
 
 
-def measure_courtyard_overlaps(pcb_path: str) -> list[CourtyardOverlap]:
+def measure_courtyard_overlaps(pcb_path: str) -> list[CourtyardOverlap] | None:
     """Return every same-side footprint-courtyard intersection on the board.
 
-    Best-effort: returns ``[]`` if pcbnew is unavailable or the board cannot be
-    loaded -- callers treat an empty result from a board the DRC flagged as
-    "could not measure" and keep the conservative (hard-fail) verdict.
+    Return ``None`` if the board or any courtyard cannot be measured. An empty
+    list means measurement completed and found no intersections; callers with
+    a positive DRC count must still conservatively reject that discrepancy.
     """
     try:
         import pcbnew
     except Exception:
-        return []
+        return None
 
     try:
         board = pcbnew.LoadBoard(pcb_path)
     except Exception:
-        return []
+        return None
     if board is None:
-        return []
+        return None
 
     try:
         return _measure(board)
     except Exception:
         # Any pcbnew/geometry hiccup -> "could not measure"; the caller keeps the
         # conservative hard-fail rather than mis-grading an overlap as minor.
-        return []
+        return None
 
 
 def _measure(board) -> list["CourtyardOverlap"]:
@@ -78,10 +78,7 @@ def _measure(board) -> list["CourtyardOverlap"]:
     for layer, tag in ((pcbnew.F_CrtYd, "F"), (pcbnew.B_CrtYd, "B")):
         ents: list[tuple[str, object, tuple[float, float, float, float]]] = []
         for fp in board.GetFootprints():
-            try:
-                poly = fp.GetCourtyard(layer)
-            except Exception:
-                poly = None
+            poly = fp.GetCourtyard(layer)
             if not poly or poly.OutlineCount() == 0:
                 continue
             bb = poly.BBox()
@@ -103,10 +100,7 @@ def _measure(board) -> list["CourtyardOverlap"]:
             if ba[2] < bb_[0] or bb_[2] < ba[0] or ba[3] < bb_[1] or bb_[3] < ba[1]:
                 continue
             inter = pcbnew.SHAPE_POLY_SET(pa)
-            try:
-                inter.BooleanIntersection(pb)
-            except Exception:
-                continue
+            inter.BooleanIntersection(pb)
             if inter.OutlineCount() == 0:
                 continue
             area = inter.Area() / 1e12  # nm^2 -> mm^2

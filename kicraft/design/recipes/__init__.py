@@ -7,6 +7,8 @@ from .registry import (
     get_recipe,
     locked_no_connect_pins,
     locked_pin_assignments,
+    migrate_recipe_selection,
+    migrate_recipe_selections,
     protected_identities,
     protected_identity_matches,
     recipe_summaries,
@@ -23,7 +25,7 @@ from .esp32_s3_mini_1_minimal import (
     ESP32_S3_MINI_1_MINIMAL,
     expand_esp32_s3_mini_1,
 )
-from .rp2040_minimal_v2 import RP2040_MINIMAL_V2, expand_rp2040_minimal
+from .rp2040_minimal_v2 import RP2040_MINIMAL_V3, expand_rp2040_minimal
 from .wave_a_mcus import WAVE_A_MCU_RECIPES, expand_wave_a_mcu
 from .wave_b_power import (
     USB_C_USB2_DEVICE,
@@ -48,14 +50,14 @@ from .dual_source_battery_power import WAVE_G_DUAL_SOURCE_POWER_RECIPES, expand_
 
 
 
-register_recipe(RP2040_MINIMAL_V2, expand_rp2040_minimal)
+register_recipe(RP2040_MINIMAL_V3, expand_rp2040_minimal)
 register_recipe(ESP32_S3_MINI_1_MINIMAL, expand_esp32_s3_mini_1)
 for definition in WAVE_A_MCU_RECIPES:
     register_recipe(definition, expand_wave_a_mcu)
 _POWER_EXPANDERS = {
     USB_C_USB2_DEVICE.recipe: expand_usb_c_usb2_device,
-    "tps54331-adjustable@1": expand_tps54331_buck,
-    "tps54331-12v-1a@1": expand_tps54331_buck,
+    "tps54331-adjustable@2": expand_tps54331_buck,
+    "tps54331-12v-1a@2": expand_tps54331_buck,
     "lm2577t-adj-12v-boost@1": expand_lm2577t_adj_12v_boost,
     "lm2577t-adj-2s-12v-boost@1": expand_lm2577t_adj_12v_boost,
     "tps61088-2s-12v-1a@1": expand_tps61088_boost,
@@ -103,6 +105,8 @@ __all__ = [
     "get_recipe",
     "locked_no_connect_pins",
     "locked_pin_assignments",
+    "migrate_recipe_selection",
+    "migrate_recipe_selections",
     "protected_identities",
     "protected_identity_matches",
     "recipe_summaries",

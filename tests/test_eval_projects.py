@@ -1,23 +1,11 @@
-"""Tests for the self-eval full-fidelity event sink, and a guard that self-eval
-runs are NOT registered as user projects.
-
-Self-eval runs used to be inserted into the ``projects`` table (EV- board codes)
-so they would open in the standard project viewer. That conflated eval artifacts
-with real user boards; they now live on their own page (``/admin/self-eval``),
-browsable to full depth there, and are never projects. The registration path
-(``AccountStore.sync_eval_projects`` and friends) was removed."""
+"""Tests for the self-eval full-fidelity event sink."""
 from __future__ import annotations
 
 import json
 
-from kicraft.server.accounts import AccountStore
 from kicraft.eval.self_eval import _event_writer
 
 
-def test_eval_runs_are_not_registered_as_projects():
-    # The decoupling: there is no longer any path that turns a self-eval run into
-    # a projects-table row. Guard it so the coupling can't silently come back.
-    assert not hasattr(AccountStore, "sync_eval_projects")
 
 
 def test_event_writer_lean_drops_token_deltas(tmp_path):

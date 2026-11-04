@@ -3292,6 +3292,30 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
         operating_limits={"forward_voltage_v": 2.0, "forward_current_ma": 20.0},
         port_pins={"cathode": "1", "anode": "2"},
     ),
+    # KENTO's drawing numbers the marked cathode "2" and the anode "1".
+    # KiCad Device:LED instead numbers the cathode "1"; its 0603 land marks
+    # pad 1 on that same physical end. These are KiCad, not vendor, pin numbers.
+    ReviewedPart(
+        identity="kt-0603r",
+        family="led-0603",
+        package="Hubei KENTO 0603 (1608 metric) red indicator LED",
+        bundle="kicad-standard",
+        symbol="Device:LED",
+        footprint="LED_SMD:LED_0603_1608Metric",
+        physical_features=frozenset({"led-0603", "indicator-led"}),
+        contacts=("1", "2"),
+        manufacturer_sources=(
+            "https://jlcpcb.com/api/file/downloadByFileSystemAccessId/8763907065070653440",
+            "https://www.lcsc.com/product-detail/C2286.html",
+        ),
+        lcsc="C2286",
+        operating_limits={
+            "forward_current_max_ma": 25.0,
+            "power_max_w": 0.04,
+            "reverse_voltage_max_v": 5.0,
+        },
+        port_pins={"cathode": "1", "anode": "2"},
+    ),
     # ALPS EC11E15244G1: through-hole incremental encoder with an integral push
     # switch.  KiCad 9 renamed the old Switch:SW_Encoder / Encoder_Alps pair to
     # Device:RotaryEncoder_Switch / Rotary_Encoder:RotaryEncoder_Alps_...; the
@@ -4443,12 +4467,46 @@ _STANDARD_LIBRARY_PARTS: tuple[ReviewedPart, ...] = (
             "voltage_v": 75.0,
         },
     ),
+    ReviewedPart(
+        identity="ptfr0603b680rp9",
+        family="resistor-0603",
+        package="RESI PTFR 0603 (1608 metric) thin-film resistor",
+        bundle="kicad-standard",
+        symbol="Device:R",
+        footprint="Resistor_SMD:R_0603_1608Metric",
+        physical_features=frozenset({"resistor-0603"}),
+        contacts=("1", "2"),
+        manufacturer_sources=(
+            "https://jlcpcb.com/api/file/downloadByFileSystemAccessId/8758104450110644224",
+            "https://www.lcsc.com/product-detail/C351634.html",
+        ),
+        lcsc="C351634",
+        # 0.1 W at 70 C; the 100 V element limit is further limited by
+        # sqrt(P*R) = 8.246 V. The manufacturer's land is not IPC nominal.
+        operating_limits={"resistance_ohm": 680.0, "tolerance_fraction": 0.001, "power_w": 0.1, "voltage_v": 8.246},
+    ),
     # UNI-ROYAL thick film datasheet pp. 2, 4-5: WA = 0.1 W at
     # 70 C, F = 1%, 0603 body 1.60 x 0.80 mm, and 75 V limiting
     # element voltage. Working voltage is min(75 V, sqrt(P * R)),
     # rounded down here; power must be derated above 70 C.
     # KiCad's IPC nominal 0603 land is not the manufacturer's exact
     # recommended land; assembly/thermal qualification remains necessary.
+    ReviewedPart(
+        identity="0603waf1003t5e",
+        family="resistor-0603",
+        package="UNI-ROYAL 0603 thick-film resistor",
+        bundle="kicad-standard",
+        symbol="Device:R",
+        footprint="Resistor_SMD:R_0603_1608Metric",
+        physical_features=frozenset({"resistor-0603"}),
+        contacts=("1", "2"),
+        manufacturer_sources=(
+            "https://jlcpcb.com/api/file/downloadByFileSystemAccessId/8579706350726930432",
+            "https://www.lcsc.com/product-detail/C25803.html",
+        ),
+        lcsc="C25803",
+        operating_limits={"resistance_ohm": 100000.0, "tolerance_fraction": 0.01, "power_w": 0.1, "voltage_v": 75.0},
+    ),
     ReviewedPart(
         identity="0603waf1002t5e",
         family="resistor-0603",
@@ -5138,6 +5196,24 @@ _STANDARD_LIBRARY_PARTS: tuple[ReviewedPart, ...] = (
             "capacitance_f": 100e-6, "tolerance_fraction": 0.20,
             "voltage_max_v": 6.3, "initial_esr_max_ohm_at_100khz": 0.035,
         },
+    ),
+    # Exact Samsung reference sheet: 1.60 x 0.80 x 0.80 mm, 1 uF,
+    # 50 V, X5R. Applied-bias capacitance and assembly qualification are
+    # not established by the nominal value or the standard KiCad land.
+    ReviewedPart(
+        identity="cl10a105kb8nnnc", family="capacitor-0603",
+        package="Samsung Electro-Mechanics 0603 (1608 metric) X5R MLCC",
+        bundle="kicad-standard", symbol="Device:C",
+        footprint="Capacitor_SMD:C_0603_1608Metric",
+        physical_features=frozenset({"capacitor", "capacitor-0603"}),
+        contacts=("1", "2"),
+        manufacturer_sources=(
+            "https://www1.futureelectronics.com/doc/Samsung%20Electro-Mechanics/CL10A105KB8NNNC.pdf",
+            "https://jlcpcb.com/api/file/downloadByFileSystemAccessId/8556213788459761664",
+            "https://www.lcsc.com/product-detail/C15849.html",
+        ),
+        lcsc="C15849",
+        operating_limits={"capacitance_f": 1e-6, "tolerance_fraction": 0.10, "voltage_max_v": 50.0},
     ),
     ReviewedPart(
         identity="cl10a225ko8nnnc", family="capacitor-0603",
@@ -6606,7 +6682,13 @@ def negation_names_a_reviewed_class(absent: str) -> bool:
     instead of being silently converted: a NOT gate is a part, and an absence of an unknown class
     is the writer's to state.
     """
-    return bool(realizable_physical_features(absent) or reviewed_class_variants(absent))
+    if realizable_physical_features(absent) or reviewed_class_variants(absent):
+        return True
+    # Recognizing a noun in an absence does not rename it or assert a carrier:
+    # "no-edge-connector" must retain the entire forbidden class. Positive
+    # demands still use the stricter reviewed_class_variants substitution rule.
+    tokens = _class_tokens(absent)
+    return any(_class_tokens(feature) < tokens for feature in reviewed_feature_vocabulary())
 
 
 def non_part_obligation_row(obligation) -> dict | None:
@@ -6647,9 +6729,9 @@ def reviewed_class_variants(component_class: str) -> tuple[str, ...]:
 
     Only a superset relation is safe to act on: "smt-voltage-regulator" contains the
     reviewed "voltage-regulator", and "stacking-through-hole-header" contains
-    "stacking-header". A bare shared token is deliberately NOT a relation —
-    "gps-module" shares only "module" with "wifi-module", and renaming a new category to
-    a reviewed neighbour would trade a visible late failure for a silently wrong part.
+    "stacking-header". A single shared token is deliberately NOT a relation —
+    "battery-connector" is not just any connector, and "led-ring-pcb" is not
+    just an LED. Renaming either would silently substitute a different part.
     """
     demanded = _class_tokens(component_class)
     if not demanded:
@@ -6658,7 +6740,7 @@ def reviewed_class_variants(component_class: str) -> tuple[str, ...]:
         (
             (-len(tokens), feature)
             for feature in reviewed_feature_vocabulary()
-            if (tokens := _class_tokens(feature)) and tokens < demanded
+            if (tokens := _class_tokens(feature)) and len(tokens) >= 2 and tokens < demanded
         )
     )
     return tuple(feature for _, feature in scored[:6])
@@ -6677,13 +6759,10 @@ def physical_inventory_record(
     ``datasheet`` and ``sourcing_note`` are intentionally ignored: they can
     aid human review but cannot classify a part.  An explicit MPN takes
     precedence and MUST match an exact reviewed or standard-library identity;
-    it never falls back to a symbol/footprint family.  A part with no MPN is
-    identified by its pair alone against the whole reviewed inventory: the parts
-    stage resolves a curated *bundle* part (a HOME or leaf bundle, a researched
-    part) by exactly that pair, so a commit gate that only knew the stock-library
-    sets saw no record at all for a part the stage had just proven (live seed-43
-    commit, 2026-09-25: ``E_PHYSICAL_REALIZATION 'power_led': requires 1 reviewed
-    'led' physical part(s), found 0`` for the vendored warm-white LED).
+    it never falls back to a symbol/footprint family.  A part with no MPN
+    resolves to a stock pattern, or to a uniquely owned nonstandard bundle
+    pair. A standard land or an ambiguous bundle pair does not identify an
+    orderable manufacturer part.
     """
     del datasheet, sourcing_note
     normalized_mpn = (mpn or "").strip().casefold()
@@ -6702,14 +6781,15 @@ def physical_inventory_record(
             ),
             None,
         )
-    return _stock_library_physical_record(exact_symbol, exact_footprint) or next(
-        (
-            candidate
-            for candidate in reviewed_inventory()
-            if candidate.symbol == exact_symbol and candidate.footprint == exact_footprint
-        ),
-        None,
+    pattern = _stock_library_physical_record(exact_symbol, exact_footprint)
+    if pattern is not None:
+        return pattern
+    candidates = tuple(
+        candidate for candidate in reviewed_inventory()
+        if candidate.symbol == exact_symbol and candidate.footprint == exact_footprint
+        and candidate.bundle not in (None, "kicad-standard")
     )
+    return candidates[0] if len(candidates) == 1 else None
 
 
 def reviewed_parts_for_feature(feature: str) -> tuple[ReviewedPart, ...]:

@@ -19,6 +19,7 @@ Default corpus: yesterday's self-eval batch.
 """
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import sys
@@ -43,12 +44,12 @@ def _design_of(path: str) -> str:
 
 
 def main() -> int:
-    args = [a for a in sys.argv[1:] if not a.startswith("--")]
-    corpus = args[0] if args else DEFAULT_CORPUS
-    json_out = None
-    for a in sys.argv[1:]:
-        if a.startswith("--json="):
-            json_out = a.split("=", 1)[1]
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("corpus", nargs="?", default=DEFAULT_CORPUS)
+    parser.add_argument("--json", dest="json_out")
+    args = parser.parse_args()
+    corpus = args.corpus
+    json_out = args.json_out
 
     # os.walk (not glob) so we descend into the dotted ``.experiments/`` tree
     # where the leaves live — glob's ``**`` skips dot-directories.

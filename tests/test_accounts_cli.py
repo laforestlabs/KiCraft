@@ -63,3 +63,13 @@ def test_list_shows_role_column(run_cli):
     run_cli("create", "boss@e.st", "--admin", "--password", "x")
     code, out = run_cli("list")
     assert code == 0 and "role" in out.out and "admin" in out.out
+
+
+def test_delete_refuses_unconfirmed_subscription_cancellation(run_cli, store, monkeypatch):
+    monkeypatch.delenv("KICRAFT_STRIPE_SECRET_KEY", raising=False)
+    user = store.create_user("payer@e.st", "pw")
+    store.apply_subscription_state(user.id, tier="pro", tier_expires_at=None,
+                                   subscription_id="sub_synthetic", status="active")
+    code, out = run_cli("delete", "payer@e.st", "--yes")
+    assert code == 1 and "not deleted" in out.err
+    assert store.get_user(user.id).stripe_subscription_id == "sub_synthetic"

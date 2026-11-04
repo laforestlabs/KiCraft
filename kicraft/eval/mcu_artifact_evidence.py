@@ -343,6 +343,8 @@ def mcu_circuit_facts(parts, names, pad_nets) -> dict[str, Any]:
             flash = next((row for row in parts if _is_identity(row, "w25q16jvss")), None)
             flash_qspi = bool(
                 flash
+                and all(qspi.values())
+                and len(set(qspi.values())) == len(qspi)
                 and all(
                     _net(pad_nets, str(flash.get("ref")), pin) == qspi[name]
                     for name, pin in {

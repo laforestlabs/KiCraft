@@ -39,6 +39,29 @@ def test_observer_proves_actual_recipe_sources_and_distinct_mux_output():
     assert (result.minimum_output_voltage_v, result.maximum_output_voltage_v) == (4.675, 5.25)
     assert observe_dual_source_battery_power(parts, pads, source_voltage=lambda *args: False) is None
 
+@pytest.mark.parametrize("left,right", [
+    ("HOST", "OUT"), ("HOST", "RAW"), ("OUT", "GND"),
+])
+def test_zero_ohm_bypass_does_not_prove_isolated_power(left, right):
+    parts, pads, refs = _fixture()
+    assert observe_dual_source_battery_power(parts, pads, source_voltage=_source) is not None
+    bypass = deepcopy(next(part for part in parts if part["ref"] == refs["mux_current_limit"][0]))
+    bypass.update(ref="R_BYPASS", value="0R")
+    parts.append(bypass)
+    pads["R_BYPASS", "1"], pads["R_BYPASS", "2"] = left, right
+    assert observe_dual_source_battery_power(parts, pads, source_voltage=_source) is None
+
+
+def test_series_zero_ohm_bypass_does_not_prove_isolation():
+    parts, pads, refs = _fixture()
+    template = next(part for part in parts if part["ref"] == refs["mux_current_limit"][0])
+    for ref, left, right in (("R_BYPASS1", "HOST", "BRIDGE"), ("R_BYPASS2", "BRIDGE", "OUT")):
+        bypass = deepcopy(template)
+        bypass.update(ref=ref, value="0R")
+        parts.append(bypass)
+        pads[ref, "1"], pads[ref, "2"] = left, right
+    assert observe_dual_source_battery_power(parts, pads, source_voltage=_source) is None
+
 
 @pytest.mark.parametrize("role,pin", [
     ("battery_connector", "1"), ("host_connector", "1"),

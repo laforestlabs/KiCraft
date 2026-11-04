@@ -24,6 +24,28 @@ from kicraft.layout_editor.outline import (
     OutlineSpec,
     circle_segment_count,
 )
+from kicraft.render.edge_cuts import parse_edge_cuts_aabb
+
+
+@pytest.mark.parametrize(
+    "graphic, expected",
+    [
+        ('(gr_circle (center 10 10) (end 13 14) (layer "Edge.Cuts"))',
+         (5, 5, 15, 15)),
+        ('(gr_arc (start 1 0) (mid 0 1) (end 0 -1) (layer "Edge.Cuts"))',
+         (-1, -1, 1, 1)),
+        ('(gr_arc (start 0 -1) (mid 0 1) (end 1 0) (layer "Edge.Cuts"))',
+         (-1, -1, 1, 1)),
+        ('(gr_arc (start 1 0) (mid 0.7071067812 0.7071067812) '
+         '(end 0 1) (layer "Edge.Cuts"))', (0, 0, 1, 1)),
+    ],
+)
+def test_edge_cuts_aabb_includes_only_extrema_on_curved_outline(
+    tmp_path, graphic, expected
+):
+    pcb = tmp_path / "board.kicad_pcb"
+    pcb.write_text(f"(kicad_pcb {graphic})", encoding="utf-8")
+    assert parse_edge_cuts_aabb(pcb) == pytest.approx(expected, abs=1e-9)
 
 
 def _spec(shape: str, w: float = 60.0, h: float = 40.0, **kw) -> OutlineSpec:

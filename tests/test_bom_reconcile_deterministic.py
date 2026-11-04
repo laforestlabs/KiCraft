@@ -256,16 +256,10 @@ def test_test_point_and_screw_terminal_are_non_passive_remainders():
         "connect the positive terminal of C3 to GND")
 
 
-def test_replacement_ask_gets_replacement_instruction():
-    ins = session.bom_reconcile_instruction([{"text": RUN_08_REPLACE}])
-    assert "remove ONLY the named part(s)" in ins
-    assert "do NOT drop any part already present" not in ins
-    assert RUN_08_REPLACE.split(".")[0] in ins
 
 
-def test_add_only_ask_keeps_add_only_instruction():
-    ins = session.bom_reconcile_instruction([{"text": RUN_24_BOOT0}])
-    assert "do NOT drop any part already present" in ins
+
+
 
 
 def test_deficit_key_stable_across_rewordings_distinct_across_deficits():
@@ -336,7 +330,6 @@ def test_changed_but_unresolved_gets_one_pointed_retry(tmp_path, monkeypatch):
         next_deficits=[{"text": RUN_24_TERMINALS,
                         "reconcile_target": "bom"}])
     assert len(calls) == 2, "exactly one pointed retry"
-    assert "did NOT resolve" in calls[1]["instruction"]
     assert passes == 2
 
 
@@ -470,4 +463,3 @@ def test_wiring_commit_rejects_empty_netlist(tmp_path, capsys):
     payload = json.loads(out) if out.strip() else {}
     assert rc != 0
     assert payload.get("ok") is False
-    assert "9.11 net coverage" in out

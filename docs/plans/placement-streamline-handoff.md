@@ -75,9 +75,13 @@ All changes are uncommitted on `main`. Nothing is deployed.
 | Script | What it does |
 |---|---|
 | `scripts/leaf_tidiness_report.py [CORPUS]` | Per-design + corpus tidiness metrics from `solved_layout.json`. |
-| `scripts/leaf_layout_viz.py [CORPUS] --designs=A,B [--rigid]` | Annotated diagnostic SVGs + gallery. |
-| `scripts/phase1_routing_parity.py` | N-of-3 routing parity, soft/classic (edit `DESIGNS`/`SEEDS`). The rigorous routing verdict. |
-| **`scripts/soft_tidiness_ab.py --out DIR`** | **Corpus-wide A/B: solves classic vs soft per design, measures tidiness + unconnected, emits `DIR/index.html` with side-by-side classic\|soft renders per leaf.** |
+| `scripts/leaf_layout_viz.py [CORPUS] --designs=A,B` | Annotated diagnostic SVGs + gallery of actual placements. |
+| **`scripts/soft_tidiness_ab.py --out DIR --seeds 0,1,2`** | **Current grid-versus-continuous leaf placement comparison, routing metrics and side-by-side renders.** |
+
+The packer/group-rigid primitives and their standalone parity benchmark have
+been retired. The measurements below are historical; their source snapshots
+and results are not replaced by the current grid comparison.
+
 
 Baseline corpus: `logs/self_eval/20260707T193651Z` (yesterday's 34-brief batch, 111 leaves).
 Baseline tidiness: orientation-consensus 73.1% grouped / 81.4% leaf, residual 4.02mm, fill 47.9%.

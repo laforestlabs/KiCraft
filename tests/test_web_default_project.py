@@ -18,6 +18,8 @@ Pure store + module-function tests (no NiceGUI client, no network, no build).
 """
 from __future__ import annotations
 
+from account_fixtures import seed_project
+
 import datetime as dt
 import json
 import os
@@ -39,7 +41,9 @@ def store(tmp_path, monkeypatch):
 
 @pytest.fixture
 def user_id(store):
-    return store.create_user("dev@example.com", "hunter2hunter2").id
+    user = store.create_user("dev@example.com", "hunter2hunter2")
+    store.consume_verification_token(store.create_verification_token(user.id))
+    return user.id
 
 
 @pytest.fixture
@@ -53,7 +57,7 @@ def live_runs(monkeypatch):
 
 
 def test_new_and_finished_projects_track_viewed_at(store, user_id):
-    pid = store.create_project(user_id, "usb battery bank")
+    pid = seed_project(store, user_id, "usb battery bank")
     assert store.get_project(pid).viewed_at is None
 
     store.finish_project(pid, "ok", stem="BANK", dir_path="/tmp/x")
@@ -64,7 +68,7 @@ def test_new_and_finished_projects_track_viewed_at(store, user_id):
 
     # Re-running makes a new result: the seen-marker must reset so the
     # workspace auto-opens the eventual outcome again.
-    store.update_project_status(pid, "running")
+    store.begin_project_attempt(pid)
     assert store.get_project(pid).viewed_at is None
 
 
@@ -103,34 +107,36 @@ def test_viewed_at_migration_backfills_already_finished_rows(tmp_path):
 def test_blank_composer_when_nothing_needs_attention(store, user_id, live_runs):
     assert web._pick_default_project(user_id) is None
 
-    pid = store.create_project(user_id, "seen already")
+    pid = seed_project(store, user_id, "seen already")
     store.finish_project(pid, "ok", dir_path="/tmp/x")
     store.mark_viewed(pid)
     assert web._pick_default_project(user_id) is None
 
 
 def test_live_run_wins_over_unseen_finished(store, user_id, live_runs):
-    done = store.create_project(user_id, "finished, unseen")
+    store.set_tier("dev@example.com", "pro")
+    done = seed_project(store, user_id, "finished, unseen")
     store.finish_project(done, "ok", dir_path="/tmp/x")
 
-    running = store.create_project(user_id, "usb battery bank")
+    running = seed_project(store, user_id, "usb battery bank")
     live_runs[running] = {"running": True, "user_id": user_id}
 
     assert web._pick_default_project(user_id).id == running
 
 
 def test_parked_question_outranks_live_run(store, user_id, live_runs):
-    running = store.create_project(user_id, "still going")
+    store.set_tier("dev@example.com", "pro")
+    running = seed_project(store, user_id, "still going")
     live_runs[running] = {"running": True, "user_id": user_id}
 
-    parked = store.create_project(user_id, "needs an answer")
+    parked = seed_project(store, user_id, "needs an answer")
     store.finish_project(parked, "awaiting_input", dir_path="/tmp/parked")
 
     assert web._pick_default_project(user_id).id == parked
 
 
 def test_unseen_finished_opens_then_stops_once_viewed(store, user_id, live_runs):
-    pid = store.create_project(user_id, "fresh result")
+    pid = seed_project(store, user_id, "fresh result")
     store.finish_project(pid, "failed", dir_path="/tmp/x")
 
     assert web._pick_default_project(user_id).id == pid
@@ -141,7 +147,7 @@ def test_unseen_finished_opens_then_stops_once_viewed(store, user_id, live_runs)
 def test_orphaned_running_row_is_skipped(store, user_id, live_runs):
     """A 'running' row whose worker died with the server must not auto-open a
     blank shell: with no live state and no artifacts there is nothing to show."""
-    store.create_project(user_id, "lost to a restart")
+    seed_project(store, user_id, "lost to a restart")
     assert web._pick_default_project(user_id) is None
 
 
@@ -151,7 +157,8 @@ def test_orphaned_running_row_is_skipped(store, user_id, live_runs):
 def _backdate_secs(store, project_id, secs_ago):
     ts = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=secs_ago)).isoformat()
     with sqlite3.connect(store.path) as conn:
-        conn.execute("UPDATE projects SET created_at=? WHERE id=?", (ts, project_id))
+        conn.execute("UPDATE projects SET created_at=?, attempt_started_at=? WHERE id=?",
+                     (ts, ts, project_id))
 
 
 def test_reconcile_closes_early_orphan_and_frees_quota(store, user_id, live_runs):
@@ -160,7 +167,7 @@ def test_reconcile_closes_early_orphan_and_frees_quota(store, user_id, live_runs
     user = store.get_user(user_id)
     before = store.quota_status(user)["remaining"]
 
-    pid = store.create_project(user_id, "lost to a restart")
+    pid = seed_project(store, user_id, "lost to a restart")
     _backdate_secs(store, pid, 300)
     assert store.quota_status(user)["remaining"] == before - 1  # slot consumed
 
@@ -177,13 +184,14 @@ def test_reconcile_leaves_live_recent_and_build_stage_runs(store, user_id, live_
     """The sweep must not touch a healthy live run, a just-started run inside the
     registration window, or a run that already reached the build queue (the
     build-job reaper owns that one and may still recover artifacts)."""
-    live = store.create_project(user_id, "still running here")
+    store.set_tier("dev@example.com", "pro")
+    live = seed_project(store, user_id, "still running here")
     _backdate_secs(store, live, 300)
     live_runs[live] = {"running": True, "user_id": user_id}
 
-    recent = store.create_project(user_id, "just started")  # within the age floor
+    recent = seed_project(store, user_id, "just started")  # within the age floor
 
-    build_stage = store.create_project(user_id, "reached the build")
+    build_stage = seed_project(store, user_id, "reached the build")
     _backdate_secs(store, build_stage, 300)
     store.enqueue_build(workspace="/ws", project_id=build_stage, user_id=user_id)
 
@@ -199,7 +207,7 @@ def test_reconcile_leaves_a_run_that_is_still_producing(store, user_id, live_run
     its workspace is still being written, its row must stay 'running'. Reaping it
     ends a healthy design's row mid-flight (and hands the slot back while the run
     keeps spending)."""
-    pid = store.create_project(user_id, "still writing")
+    pid = seed_project(store, user_id, "still writing")
     _backdate_secs(store, pid, 600)
     root = store.projects_dir / str(user_id) / str(pid)
     (root / ".kicraft").mkdir(parents=True, exist_ok=True)
@@ -214,7 +222,7 @@ def test_reconcile_leaves_a_run_that_is_still_producing(store, user_id, live_run
 def test_reconcile_closes_a_run_whose_workspace_went_quiet(store, user_id, live_runs):
     """The complement: the same row IS reaped once its journal has been silent
     past the activity grace, so a genuinely lost run still frees its slot."""
-    pid = store.create_project(user_id, "lost to a restart")
+    pid = seed_project(store, user_id, "lost to a restart")
     _backdate_secs(store, pid, 600)
     root = store.projects_dir / str(user_id) / str(pid)
     (root / ".kicraft").mkdir(parents=True, exist_ok=True)
@@ -230,7 +238,7 @@ def test_reconcile_closes_a_run_whose_workspace_went_quiet(store, user_id, live_
 def test_reconcile_never_overwrites_a_terminal_outcome(store, user_id, live_runs):
     """The janitor loses the race to the run's own worker: the terminal write is
     conditional, so a finished result is never replaced by a guess."""
-    pid = store.create_project(user_id, "finished while the sweep ran")
+    pid = seed_project(store, user_id, "finished while the sweep ran")
     store.finish_project(pid, "ok", stem="BANK", dir_path="/tmp/bank")
 
     landed = store.finish_project_if_running(pid, "interrupted")
@@ -239,11 +247,88 @@ def test_reconcile_never_overwrites_a_terminal_outcome(store, user_id, live_runs
     assert store.get_project(pid).status == "ok"
 
 
+@pytest.mark.parametrize("enqueue_new", [False, True])
+def test_old_build_cannot_finalize_new_attempt(store, user_id, live_runs, tmp_path,
+                                               enqueue_new):
+    pid = seed_project(store, user_id, "resume after a failed build")
+    workspace = str(tmp_path / "workspace")
+    old_id = store.enqueue_build(workspace=workspace, project_id=pid, user_id=user_id,
+                                 attempt_generation=0)
+    assert store.finish_build(old_id, rc=None, status="failed", expect="queued")
+    old_job = store.get_build_job(old_id)
+    store.finish_project(pid, "failed")
+    generation = store.begin_project_attempt(pid)
+    if enqueue_new:
+        store.enqueue_build(workspace=workspace, project_id=pid, user_id=user_id,
+                            attempt_generation=generation)
+
+    web._finalize_orphan(old_job)
+
+    project = store.get_project(pid)
+    assert project.status == "running"
+    assert project.attempt_generation == generation
+    assert not (store.projects_dir / str(user_id) / str(pid) / "provenance.jsonl").exists()
+
+def test_current_terminal_build_is_recovered(store, user_id, live_runs, tmp_path,
+                                             monkeypatch):
+    monkeypatch.setattr(web.notify, "notify_run_event", lambda *args, **kwargs: None)
+    pid = seed_project(store, user_id, "recover a finished build")
+    job_id = store.enqueue_build(workspace=str(tmp_path / "workspace"), project_id=pid,
+                                 user_id=user_id, attempt_generation=0)
+    assert store.finish_build(job_id, rc=None, status="failed", expect="queued")
+
+    web._finalize_orphan(store.get_build_job(job_id))
+
+    project = store.get_project(pid)
+    assert project.status == "failed"
+    assert project.attempt_generation == 0
+    assert (store.projects_dir / str(user_id) / str(pid) / "provenance.jsonl").is_file()
+
+
+def test_older_build_in_same_attempt_cannot_finalize(store, user_id, live_runs, tmp_path):
+    pid = seed_project(store, user_id, "retry a build")
+    workspace = str(tmp_path / "workspace")
+    first_id = store.enqueue_build(workspace=workspace, project_id=pid, user_id=user_id,
+                                   attempt_generation=0)
+    assert store.finish_build(first_id, rc=None, status="failed", expect="queued")
+    second_id = store.enqueue_build(workspace=workspace, project_id=pid, user_id=user_id,
+                                    attempt_generation=0)
+    assert second_id != first_id
+
+    web._finalize_orphan(store.get_build_job(first_id))
+
+    assert store.get_project(pid).status == "running"
+    assert store.get_build_job(second_id).status == "queued"
+    assert not (store.projects_dir / str(user_id) / str(pid) / "provenance.jsonl").exists()
+
+
+
+def test_reconcile_cannot_interrupt_newer_attempt_in_race(store, user_id, live_runs,
+                                                           monkeypatch):
+    pid = seed_project(store, user_id, "attempt changed during reconciliation")
+    _backdate_secs(store, pid, 600)
+    original = store.finish_project_if_running
+    newer = {}
+
+    def advance_then_finish(project_id, status, **kwargs):
+        store.finish_project(project_id, "failed")
+        newer["generation"] = store.begin_project_attempt(project_id)
+        return original(project_id, status, **kwargs)
+
+    monkeypatch.setattr(store, "finish_project_if_running", advance_then_finish)
+    web._reconcile_orphan_projects()
+
+    project = store.get_project(pid)
+    assert project.status == "running"
+    assert project.attempt_generation == newer["generation"]
+    assert not (store.projects_dir / str(user_id) / str(pid) / "provenance.jsonl").exists()
+
+
 # ---- project presentation (web._project_presentation) ------------------------
 
 
 def _mk_project(store, user_id, *, status="running", brief="usb battery bank"):
-    pid = store.create_project(user_id, brief)
+    pid = seed_project(store, user_id, brief)
     if status != "running":
         store.finish_project(pid, status)
     return store.get_project(pid)
@@ -353,6 +438,55 @@ def test_presentation_complete_offers_only_the_current_package(store, user_id):
     assert any(i["severity"] == "warning" for i in pres["issues"])
 
 
+def test_running_attempt_labels_previous_board_stale_and_hides_download(store, user_id):
+    p = _mk_project(store, user_id, status="failed")
+    root = store.projects_dir / str(user_id) / str(p.id)
+    old = root / "generated" / "attempt-0" / "BOARD"
+    old.mkdir(parents=True)
+    (old / "BOARD.kicad_sch").write_text("old schematic")
+    state = {"project_stem": "BOARD", "artifacts": {"project_dir": str(old)},
+             "stage_status": {k: {"ok": True} for k in web.DESIGN_STAGES}}
+    _with_root(store, p, state=state)
+    store.begin_project_attempt(p.id)
+    pres = web._project_presentation(
+        store.get_project(p.id),
+        live={"running": True, "activity": {"phase_status": "running", "mode": "build"}})
+    assert pres["assurance"]["stale_preview"] is True
+    assert "earlier attempt" in pres["assurance"]["summary"]
+    assert pres["download_ready"] is False
+
+
+def test_prequeue_failure_marks_old_manual_route_preview_stale(store, user_id):
+    pid = seed_project(store, user_id, "previous manually routed board")
+    root = store.projects_dir / str(user_id) / str(pid)
+    old = root / "generated" / "attempt-0" / "BOARD"
+    old.mkdir(parents=True)
+    (old / "BOARD.kicad_sch").write_text("previous schematic")
+    (old / "BOARD.kicad_pcb").write_text("previous board")
+    (root / ".kicraft").mkdir()
+    (root / ".kicraft" / "state.json").write_text(json.dumps({
+        "project_stem": "BOARD", "artifacts": {"project_dir": str(old)},
+        "stage_status": {k: {"ok": True} for k in web.DESIGN_STAGES},
+    }))
+    archive = root / "kicraft_project.zip"
+    archive.write_bytes(b"previous package")
+    old_job_id = store.enqueue_build(workspace=str(root), project_id=pid, user_id=user_id,
+                                     kind="manual_route", attempt_generation=0)
+    assert store.finish_build(old_job_id, rc=None, status="failed", expect="queued")
+    store.finish_project(pid, "failed", dir_path=str(root), zip_path=str(archive))
+    generation = store.begin_project_attempt(pid)
+    assert store.finish_project_if_running(pid, "failed", dir_path=str(root),
+                                           expected_attempt_generation=generation)
+
+    pres = web._project_presentation(store.get_project(pid), job=store.get_build_job(old_job_id))
+    assert pres["status"] == "failed"
+    assert pres["assurance"]["stale_preview"] is True
+    assert "earlier attempt" in pres["assurance"]["summary"]
+    assert pres["download_ready"] is False
+    assert pres["zip_path"] is None
+    assert archive.read_bytes() == b"previous package"
+
+
 def test_presentation_failed_row_never_offers_an_old_package(store, user_id):
     p = _mk_project(store, user_id, status="failed")
     p = _with_root(store, p, zip_bytes=b"old package")
@@ -401,6 +535,7 @@ def test_presentation_names_a_null_stem_project_from_its_brief(store, user_id):
 def test_every_presentation_uses_the_documented_vocabulary(store, user_id):
     """Status and action are a closed vocabulary: a new value must be added to
     activity.PRESENTATION_STATUSES / ACTIONS, not invented ad hoc."""
+    store.set_tier("dev@example.com", "pro")
     from kicraft.server import activity
 
     rows = [
@@ -428,7 +563,7 @@ def test_presentation_recovers_a_workspace_a_legacy_row_forgot(store, user_id):
         json.dumps({"project_stem": "RECOVERED"}), encoding="utf-8")
     assert web._project_presentation(store.get_project(p.id))["title"] == "RECOVERED"
 
-    missing = store.create_project(user_id, "never built")
+    missing = seed_project(store, user_id, "never built")
     row = store.get_project(missing)
     assert web._project_presentation(row)["title"] == "never built"
     assert not (store.projects_dir / str(user_id) / str(missing)).exists()

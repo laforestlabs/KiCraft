@@ -99,13 +99,16 @@ def _nets_pins_by_ref(bom: BOM) -> tuple[dict[str, set[str]], dict[str, set[str]
 
 
 def _decap_membership(bom: BOM) -> dict[str, bool]:
-    """ref -> True when it is a decoupling cap (2-pin, every net power/ground)."""
+    """ref -> True for a recognizable capacitor with two power/ground pins."""
     nets_by_ref, pins_by_ref = _nets_pins_by_ref(bom)
     out: dict[str, bool] = {}
     for p in bom.parts:
+        name = p.symbol.partition(":")[2]
+        is_cap = name in ("C", "CP") or name.startswith(("C_", "CP_"))
         nets = nets_by_ref.get(p.ref, set())
         out[p.ref] = (
-            len(pins_by_ref.get(p.ref, set())) == 2
+            is_cap
+            and len(pins_by_ref.get(p.ref, set())) == 2
             and bool(nets)
             and all(is_power_or_ground_name(n) for n in nets)
         )
@@ -179,45 +182,53 @@ def normalize_array_decaps(
     if not bom.arrays or threshold_ma <= 0 or keep < 0:
         return []
 
+    parts_by_ref = {p.ref: p for p in bom.parts}
     sheet_by_ref = {p.ref: p.sheet for p in bom.parts}
-    nets_by_ref, pins_by_ref = _nets_pins_by_ref(bom)
-
-    def _is_decap(ref: str) -> bool:
-        # A 2-pin part whose every net is power/ground -- a bypass cap, not a
-        # signal part (e.g. a series data resistor keeps a non-power net).
-        nets = nets_by_ref.get(ref, set())
-        return (
-            len(pins_by_ref.get(ref, set())) == 2
-            and bool(nets)
-            and all(is_power_or_ground_name(n) for n in nets)
-        )
+    nets_by_ref, _ = _nets_pins_by_ref(bom)
+    is_decap = _decap_membership(bom)
+    protected = {r for spec in bom.arrays for r in spec.refs}
+    protected.update(r for manifest in bom.recipe_ownership for r in manifest.refs)
+    protected.update(pin.ref for pin in bom.lowerer_ownership)
 
     drop: list[str] = []
     notes: list[str] = []
     for spec in bom.arrays:
-        sheets = {sheet_by_ref.get(r) for r in spec.refs}
-        members = set(spec.refs)
-        companions = sorted(
-            (
-                p.ref
-                for p in bom.parts
-                if p.sheet in sheets and p.ref not in members and _is_decap(p.ref)
-            ),
-            key=_ref_sort_key,
-        )
-        if len(companions) <= keep:
+        # This policy estimates LED current; it has no basis for other arrays.
+        if not spec.refs or any(
+            r not in parts_by_ref
+            or parts_by_ref[r].symbol.partition(":")[0].upper() not in ("LED", "LED_SMD")
+            for r in spec.refs
+        ):
             continue
         est_ma = len(spec.refs) * per_led_ma
         if est_ma >= threshold_ma:
-            continue  # high-current array -> per-LED decoupling stays
-        victims = companions[keep:]
-        drop.extend(victims)
-        notes.append(
-            f"LED array ({len(spec.refs)} members, ~{est_ma:.0f} mA < "
-            f"{threshold_ma:.0f} mA) thinned from {len(companions)} per-LED "
-            f"decaps to {keep} bulk caps; dropped {len(victims)}: "
-            f"{', '.join(victims)}"
-        )
+            continue
+        sheets = {sheet_by_ref[r] for r in spec.refs}
+        groups: dict[tuple, list[str]] = defaultdict(list)
+        for p in bom.parts:
+            if (
+                p.sheet not in sheets or p.ref in protected or not is_decap.get(p.ref, False)
+                or p.mpn or p.datasheet or p.sourcing_note or p.source_leaf
+                or p.reconcile_added or p.recipe_id or p.recipe_instance or p.recipe_role
+                or p.resolution_id or p.lowering_requirement_id or p.lowering_role
+                or p.resolution_source in ("recipe", "lowerer", "reuse")
+                or not p.assembly
+            ):
+                continue
+            # Distinct rails, values, symbols, and packages are not interchangeable.
+            key = (p.sheet, p.value, p.symbol, p.footprint, frozenset(nets_by_ref[p.ref]))
+            groups[key].append(p.ref)
+        for companions in groups.values():
+            companions.sort(key=_ref_sort_key)
+            victims = companions[keep:]
+            if not victims:
+                continue
+            drop.extend(victims)
+            notes.append(
+                f"LED array ({len(spec.refs)} members, ~{est_ma:.0f} mA < "
+                f"{threshold_ma:.0f} mA) thinned {len(companions)} matching generic "
+                f"decaps to {keep}; dropped {len(victims)}: {', '.join(victims)}"
+            )
 
     if not drop:
         return []
@@ -346,6 +357,67 @@ def _declare_cross_sheet_signal_nets(bom: BOM, architecture: Architecture) -> No
         declared.add(net_name)
 
 
+def _sheet_ownership_transfer(bom: BOM, architecture: Architecture, sheet: str, refs: set[str]):
+    """Resolve whole owners of a proposed move; refuse to split their provenance."""
+    owned: dict[str, set[str]] = defaultdict(set)
+    parts = {p.ref: p for p in bom.parts if p.sheet == sheet}
+    for p in parts.values():
+        if p.lowering_requirement_id:
+            owned[p.lowering_requirement_id].add(p.ref)
+    for pin in bom.lowerer_ownership:
+        if pin.ref in parts and pin.requirement_id:
+            owned[pin.requirement_id].add(pin.ref)
+    for manifest in bom.recipe_ownership:
+        on_sheet = set(manifest.refs) & parts.keys()
+        for requirement_id in manifest.requirement_ids:
+            owned[requirement_id].update(on_sheet)
+    moving_requirements = set()
+    for requirement_id, owner_refs in owned.items():
+        if owner_refs & refs:
+            if owner_refs - refs:
+                raise ValueError(
+                    f"cannot split requirement {requirement_id!r} across sheets: "
+                    f"moving {sorted(owner_refs & refs)}, retaining {sorted(owner_refs - refs)}"
+                )
+            moving_requirements.add(requirement_id)
+
+    selections = []
+    for selection in architecture.recipe_selections:
+        if sheet not in selection.sheets.values():
+            continue
+        recipe_refs = {
+            ref for manifest in bom.recipe_ownership
+            if manifest.recipe == selection.recipe and manifest.instance == selection.instance
+            for ref in manifest.refs if ref in parts
+        }
+        recipe_refs.update(
+            p.ref for p in parts.values()
+            if p.recipe_id == selection.recipe and p.recipe_instance == selection.instance
+        )
+        if recipe_refs & refs:
+            if recipe_refs - refs:
+                raise ValueError(
+                    f"cannot split recipe {selection.instance!r} across sheets: "
+                    f"moving {sorted(recipe_refs & refs)}, retaining {sorted(recipe_refs - refs)}"
+                )
+            selections.append(selection)
+    requirements = [
+        requirement for requirement in architecture.requirements
+        if requirement.id in moving_requirements and requirement.sheet == sheet
+    ]
+    return requirements, selections
+
+
+def _apply_sheet_ownership_transfer(requirements, selections, source: str, destination: str):
+    for requirement in requirements:
+        requirement.sheet = destination
+    for selection in selections:
+        selection.sheets = {
+            role: destination if sheet == source else sheet
+            for role, sheet in selection.sheets.items()
+        }
+
+
 def isolate_array_sheets(bom: BOM, architecture: Architecture) -> list[str]:
     """Keep every array sheet a pure grid: array members + their companions only.
 
@@ -410,20 +482,20 @@ def isolate_array_sheets(bom: BOM, architecture: Architecture) -> list[str]:
     taken_stems = {s.stem for s in architecture.sheets}
     moved: list[str] = []
     notes: list[str] = []
+    plans = []
     for sh in sorted(allowed_by_sheet):
         impure = sorted(
-            (
-                p.ref
-                for p in bom.parts
-                if p.sheet == sh and p.ref not in allowed_by_sheet[sh]
-            ),
+            (p.ref for p in bom.parts if p.sheet == sh and p.ref not in allowed_by_sheet[sh]),
             key=_ref_sort_key,
         )
         if not impure:
             continue
+        ownership = _sheet_ownership_transfer(bom, architecture, sh, set(impure))
         name, stem = _isolation_sheet_names(impure, taken_names, taken_stems)
         taken_names.add(name)
         taken_stems.add(stem)
+        plans.append((sh, impure, name, stem, ownership))
+    for sh, impure, name, stem, (requirements, selections) in plans:
         architecture.sheets.append(Sheet(name=name, stem=stem, function="interface"))
         for ref in impure:
             parts_by_ref[ref].sheet = name
@@ -442,35 +514,7 @@ def isolate_array_sheets(bom: BOM, architecture: Architecture) -> list[str]:
                 else:
                     bom.component_zones.pop(ref, None)
         moved.extend(impure)
-        # The parts' owning requirements move with them. Section 9.42 matches a requirement
-        # to its implementing parts BY SHEET, so relocating the parts alone made a correct
-        # board fail synthesis with "requires 1 reviewed 'stacking-header' physical part(s),
-        # found 0" while those very parts sat on the new sheet: the requirement still pointed
-        # at the array sheet. A lowered part names its requirement directly; a RECIPE-owned
-        # part does not (its `lowering_requirement_id` is null), so the recipe ownership
-        # manifests supply that link. Recipe selections name their sheets too, and the
-        # wiring/BOM provenance in state.json has to stay consistent with both.
-        ownership_by_ref: dict[str, set[str]] = {}
-        for manifest in bom.recipe_ownership or ():
-            for manifest_ref in manifest.refs:
-                ownership_by_ref.setdefault(manifest_ref, set()).update(manifest.requirement_ids)
-        moved_requirements = {
-            requirement_id
-            for ref in impure
-            for requirement_id in (
-                {getattr(parts_by_ref[ref], "lowering_requirement_id", None)}
-                | ownership_by_ref.get(ref, set())
-            )
-            if requirement_id
-        }
-        for requirement in architecture.requirements:
-            if requirement.id in moved_requirements:
-                requirement.sheet = name
-        for selection in architecture.recipe_selections:
-            selection.sheets = {
-                role: name if sheet == sh else sheet
-                for role, sheet in selection.sheets.items()
-            }
+        _apply_sheet_ownership_transfer(requirements, selections, sh, name)
         notes.append(
             f"moved {len(impure)} non-array part(s) ({', '.join(impure)}) off array "
             f"sheet {sh!r} onto a dedicated sheet {name!r} so the array leaf stays a "
@@ -540,6 +584,7 @@ def isolate_opposite_edge_connectors(
     taken_stems = {s.stem for s in architecture.sheets}
     moved: list[str] = []
     notes: list[str] = []
+    plans = []
 
     for sheet, edge_refs in sorted(sheet_edge_refs.items()):
         for pair in _OPPOSITE_EDGES:
@@ -557,27 +602,24 @@ def isolate_opposite_edge_connectors(
                 move_edge = _DEFAULT_MOVE_EDGE.get(pair, e1)
 
             move_refs = sorted(edge_refs[move_edge], key=_ref_sort_key)
+            ownership = _sheet_ownership_transfer(bom, architecture, sheet, set(move_refs))
             name, stem = _isolation_sheet_names(move_refs, taken_names, taken_stems)
             taken_names.add(name)
             taken_stems.add(stem)
-            architecture.sheets.append(
-                Sheet(name=name, stem=stem, function="interface")
-            )
-            for ref in move_refs:
-                if ref in parts_by_ref:
-                    parts_by_ref[ref].sheet = name
-                # Keep the edge zone — the new single-edge leaf can satisfy it.
-                # Unlike isolate_array_sheets (where the moved part is a stray
-                # internal component), these connectors genuinely belong at an
-                # edge, and their new leaf has only same-edge connectors.
-            moved.extend(move_refs)
             keep_edge = e1 if move_edge == e2 else e2
-            notes.append(
-                f"split sheet {sheet!r}: moved {len(move_refs)} "
-                f"{move_edge}-edge connector(s) ({', '.join(move_refs)}) "
-                f"to sheet {name!r} so the original leaf keeps the "
-                f"{keep_edge}-edge connector(s)"
-            )
+            plans.append((sheet, move_refs, name, stem, move_edge, keep_edge, ownership))
+    for sheet, move_refs, name, stem, move_edge, keep_edge, (requirements, selections) in plans:
+        architecture.sheets.append(Sheet(name=name, stem=stem, function="interface"))
+        for ref in move_refs:
+            parts_by_ref[ref].sheet = name
+        _apply_sheet_ownership_transfer(requirements, selections, sheet, name)
+        moved.extend(move_refs)
+        notes.append(
+            f"split sheet {sheet!r}: moved {len(move_refs)} "
+            f"{move_edge}-edge connector(s) ({', '.join(move_refs)}) "
+            f"to sheet {name!r} so the original leaf keeps the "
+            f"{keep_edge}-edge connector(s)"
+        )
 
     if not moved:
         return []

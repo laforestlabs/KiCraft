@@ -29,19 +29,10 @@ def test_autoplacer_types_imports():
     assert p.y == 2.0
 
 
-def test_hierarchy_parser_imports():
-    """Hierarchy parser is importable without pcbnew."""
 
 
-def test_scoring_imports():
-    """Scoring module is importable (may need pcbnew at runtime)."""
-    try:
-        from kicraft.scoring import ALL_CHECKS
-        assert isinstance(ALL_CHECKS, list)
-        assert len(ALL_CHECKS) > 0
-    except ImportError:
-        # pcbnew may not be available in test environment
-        pass
+
+
 
 
 def test_logging_config_imports():

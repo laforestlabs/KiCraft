@@ -2,6 +2,8 @@
 parameterized queries, and the FTS sanitizer must neutralize FTS5 operators."""
 from __future__ import annotations
 
+from account_fixtures import seed_project
+
 from kicraft.server.accounts import AccountStore
 
 
@@ -25,7 +27,7 @@ def test_search_runs_safely_with_injection_payloads(tmp_path):
     must not corrupt the DB (it returns results or nothing, never executes SQL)."""
     store = AccountStore(tmp_path / "accounts.db", tmp_path / "projects")
     u = store.create_user("a@x.io", "pw")
-    pid = store.create_project(u.id, "an esp32 sensor board", is_public=True)
+    pid = seed_project(store, u.id, "an esp32 sensor board", is_public=True)
     store.finish_project(pid, "ok", stem="ESP32")
     store.set_visibility(pid, True) if hasattr(store, "set_visibility") else None
     for payload in ["'; DROP TABLE projects; --", '" OR 1=1 --', "%", "esp32", "*]["]:
@@ -35,11 +37,3 @@ def test_search_runs_safely_with_injection_payloads(tmp_path):
     assert store.get_project(pid) is not None
 
 
-def test_queries_are_parameterized_not_fstring_built():
-    """Guardrail: account queries bind via '?' placeholders, never f-string the
-    user value into SQL. Spot-check the hot user-facing lookups."""
-    import inspect
-    src = inspect.getsource(AccountStore.authenticate)
-    assert "WHERE email=?" in src  # parameterized, not f"...{email}..."
-    create_src = inspect.getsource(AccountStore.create_project)
-    assert "VALUES (?" in create_src

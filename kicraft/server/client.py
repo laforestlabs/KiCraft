@@ -1,13 +1,13 @@
-"""Capped OpenRouter chat client: every model call enforces B0 cost-safety.
+"""Capped streaming client with persistent per-POST budget exposure.
 
-Call flow per completion: `SpendGuard.preflight()` (kill switch + ceilings) ->
-bounded request (`max_tokens`) -> `SpendGuard.record()` (actual cost). Both the
-plain `chat()` and the `chat_with_tools()` loop go through `_complete()`, so the
-caps cannot be bypassed by a new code path.
+Each provider request reserves its configured ceiling before dispatch. A cost
+receipt settles that reservation; an interrupted or unreceipted request leaves
+durable uncertain exposure counted against subsequent calls.
 """
 
 from __future__ import annotations
 import json
+import math
 import os
 import re
 import time
@@ -679,7 +679,11 @@ def estimate_cost(model: str, input_tokens, output_tokens) -> float:
 class CappedOpenRouterClient:
     def __init__(self, settings: Settings | None = None, guard: SpendGuard | None = None):
         self.s = settings or Settings.from_env()
-        self.guard = guard or SpendGuard(self.s)
+        self.guard = guard if guard is not None else SpendGuard(self.s)
+        if not all(callable(getattr(self.guard, name, None)) for name in (
+            "reserve", "settle_reservation", "mark_uncertain", "status",
+        )):
+            raise TypeError("provider client requires the reservation guard protocol")
 
     def with_design_profile(self, profile_name: str) -> "CappedOpenRouterClient":
         """Clone this route while retaining the run's one shared spend guard."""
@@ -769,14 +773,11 @@ class CappedOpenRouterClient:
         reasoning_guard: ReasoningGuardPolicy | None,
     ) -> float:
         """Conservative price-cap reservation for one outbound completion."""
-        prompt_chars = len(
-            json.dumps(
-                payload.get("messages") or [],
-                ensure_ascii=False,
-                separators=(",", ":"),
-            )
-        )
-        prompt_tokens = max(1, (prompt_chars + 3) // 4)
+        # Include tool and schema declarations, not just message text. UTF-8
+        # bytes provide a conservative bound when tokenization is unknown.
+        prompt_tokens = max(1, len(json.dumps(
+            payload, ensure_ascii=False, separators=(",", ":")
+        ).encode("utf-8")))
         output_tokens = max(0, int(payload.get("max_tokens") or 0))
         reasoning = payload.get("reasoning")
         if isinstance(reasoning, dict) and reasoning.get("enabled") is not False:
@@ -784,12 +785,7 @@ class CappedOpenRouterClient:
             if reasoning_tokens is None and reasoning_guard is not None:
                 reasoning_tokens = reasoning_guard.hard_max_tokens
             output_tokens += max(0, int(reasoning_tokens or 0))
-        prompt_price = max(0.0, float(getattr(self.s, "max_price_prompt", 0.0) or 0.0))
-        completion_price = max(
-            0.0,
-            float(getattr(self.s, "max_price_completion", 0.0) or 0.0),
-        )
-        return (prompt_tokens * prompt_price + output_tokens * completion_price) / 1_000_000
+        return self._estimated_cost(payload.get("model") or self.s.model, prompt_tokens, output_tokens)
 
     def _estimated_cost(self, model: str, input_tokens: int, output_tokens: int) -> float:
         """Estimate using the selected provider profile before model-family fallback."""
@@ -834,8 +830,9 @@ class CappedOpenRouterClient:
         max_retries = max(0, int(getattr(self.s, "llm_max_retries", 0)))
         backoff = float(getattr(self.s, "llm_retry_backoff_s", 1.0))
         for attempt in range(max_retries + 1):
+            reservation = None
             try:
-                self.guard.preflight(call_ceiling_usd, run_id)
+                reservation = self.guard.reserve(call_ceiling_usd, run_id)
                 resp = requests.post(
                     url,
                     headers=headers,
@@ -862,9 +859,14 @@ class CappedOpenRouterClient:
                 # (0xC2 0xB5) into "Âµ" and every other multibyte char into
                 # mojibake that then lands verbatim in the BOM value / state.json.
                 # Pin UTF-8 so the decoded stream matches the bytes on the wire.
+                resp._kicraft_reservation = reservation
                 resp.encoding = "utf-8"
                 return resp
-            except (*_RETRY_NETWORK_EXC, requests.exceptions.HTTPError) as e:
+            except BaseException as e:
+                if reservation is not None:
+                    self.guard.mark_uncertain(reservation)
+                if not isinstance(e, (*_RETRY_NETWORK_EXC, requests.exceptions.HTTPError)):
+                    raise
                 # Only 5xx HTTP errors and network failures are retried here.
                 # Every 4xx, including 429, belongs to the top-level action.
                 code = getattr(getattr(e, "response", None), "status_code", None)
@@ -978,6 +980,7 @@ class CappedOpenRouterClient:
                 collection_bounds, response_format_guard
             )
             stream_t0 = time.monotonic()
+            resp = None
             try:
                 resp = self._open_stream(
                     payload,
@@ -1015,7 +1018,7 @@ class CappedOpenRouterClient:
                             raise stream_error
                         if chunk.get("provider"):
                             provider = chunk["provider"]
-                        if chunk.get("usage"):
+                        if isinstance(chunk.get("usage"), dict):
                             usage = chunk["usage"]
                         for ch in chunk.get("choices") or []:
                             if ch.get("finish_reason"):
@@ -1072,20 +1075,22 @@ class CappedOpenRouterClient:
                                 break
                         if loop_abort_reason or collection_limit:
                             break
-            except (*_RETRY_NETWORK_EXC, requests.exceptions.HTTPError) as exc:
+            except BaseException as exc:
                 status = getattr(getattr(exc, "response", None), "status_code", None)
-                if isinstance(exc, requests.exceptions.HTTPError) and not getattr(
+                in_band = isinstance(exc, requests.exceptions.HTTPError) and getattr(
                     exc, "_kicraft_in_band", False
-                ):
-                    raise
-                if isinstance(exc, requests.exceptions.HTTPError) and status == 429:
-                    raise
-                if (
-                    isinstance(exc, requests.exceptions.HTTPError)
-                    and status is not None
-                    and status != 429
-                    and status < 500
-                ):
+                )
+                retryable = isinstance(exc, _RETRY_NETWORK_EXC) or (
+                    in_band and (status is None or status >= 500)
+                )
+                # A response already opened can have incurred charges even if
+                # a callback cancels or the provider emits a terminal error.
+                # A failed preflight or an HTTP rejection before streaming has
+                # no accepted response to account for here.
+                if resp is None:
+                    if retryable and stream_attempt < max_stream_retries:
+                        time.sleep(stream_backoff * (2**stream_attempt))
+                        continue
                     raise
                 prompt_chars = len(
                     json.dumps(
@@ -1095,25 +1100,12 @@ class CappedOpenRouterClient:
                     )
                 )
                 retry_input_tokens = max(1, prompt_chars // 4)
-                retry_output_tokens = max(1, (reasoning_chars + content_chars) // 4)
+                retry_output_tokens = max(1, (reasoning_chars + received_content_chars + 3) // 4)
                 retry_cost = self._estimated_cost(
                     payload["model"], retry_input_tokens, retry_output_tokens
                 )
-                self.guard.record(
-                    payload["model"],
-                    retry_input_tokens,
-                    retry_output_tokens,
-                    retry_cost,
-                    meta={
-                        "phase": meta_phase,
-                        "finish_reason": "stream_retry_discarded",
-                        "http_status": status,
-                        "content_chars": content_chars,
-                        "reasoning_chars": reasoning_chars,
-                        **meta_ctx,
-                    },
-                )
-                if stream_attempt >= max_stream_retries:
+                self.guard.mark_uncertain(resp._kicraft_reservation, retry_cost)
+                if not retryable or stream_attempt >= max_stream_retries:
                     raise
                 time.sleep(stream_backoff * (2**stream_attempt))
                 continue
@@ -1166,29 +1158,41 @@ class CappedOpenRouterClient:
         msg["collection_counts"] = collection_guard.counts()
 
         in_tok, out_tok = usage.get("prompt_tokens"), usage.get("completion_tokens")
-        if loop_abort_reason or collection_limit:
-            # A client-owned abort precedes the final usage chunk. Estimate both
-            # prompt and partial output so the spend ceiling remains conservative.
+        if not isinstance(in_tok, int) or isinstance(in_tok, bool) or in_tok < 0:
+            in_tok = None
+        if not isinstance(out_tok, int) or isinstance(out_tok, bool) or out_tok < 0:
+            out_tok = None
+        if in_tok is None:
             prompt_chars = len(
                 json.dumps(payload.get("messages") or [], ensure_ascii=False, separators=(",", ":"))
             )
-            in_tok = in_tok or max(1, prompt_chars // 4)
-            # The provider generated the entire last delta, even the suffix
-            # discarded by the guard. Charge that paid partial output as well.
-            out_tok = out_tok or max(1, (reasoning_chars + received_content_chars) // 4)
+            in_tok = max(1, (prompt_chars + 3) // 4)
+        if out_tok is None:
+            # Include a rejected suffix and tool arguments: both were generated.
+            tool_chars = sum(len(tc["name"]) + len(tc["args"]) for tc in tool_calls.values())
+            out_tok = max(1, (reasoning_chars + received_content_chars + tool_chars + 3) // 4)
         if getattr(self.s, "backend", "openrouter") == "deepseek":
             cached = usage.get("prompt_cache_hit_tokens") or 0
         else:
-            cached = (usage.get("prompt_tokens_details") or {}).get("cached_tokens") or 0
-        cost = float(usage.get("cost") or 0.0)
-        if cost <= 0.0:  # never record 0 for real spend, or the ceiling under-counts
-            cost = self._estimated_cost(payload["model"], in_tok, out_tok)
+            details = usage.get("prompt_tokens_details")
+            cached = details.get("cached_tokens") if isinstance(details, dict) else 0
+        if not isinstance(cached, int) or isinstance(cached, bool) or cached < 0:
+            cached = 0
+        try:
+            receipt_cost = float(usage.get("cost") or 0.0)
+        except (TypeError, ValueError, OverflowError):
+            receipt_cost = 0.0
+        has_receipt = math.isfinite(receipt_cost) and receipt_cost > 0.0
+        cost = receipt_cost if has_receipt else max(
+            call_ceiling_usd, self._estimated_cost(payload["model"], in_tok, out_tok)
+        )
         response_policy = (response_format_guard or {}).get("json_schema") or {}
         rec_meta = {
             "phase": meta_phase,
             "profile": getattr(self.s, "design_profile", "custom"),
             "provider": provider,
             "finish_reason": finish,
+            "cost_estimated": not has_receipt,
             "cached_tokens": int(cached or 0),
             "loop_detected": bool(loop_abort_reason),
             "bounded_collection_completed": bounded_completion is not None,
@@ -1203,7 +1207,13 @@ class CappedOpenRouterClient:
             **meta_ctx,
             "collection_counts": collection_guard.counts(),
         }
-        self.guard.record(payload["model"], in_tok, out_tok, cost, meta=rec_meta)
+        reservation = resp._kicraft_reservation
+        if has_receipt:
+            self.guard.settle_reservation(
+                reservation, payload["model"], in_tok, out_tok, cost, meta=rec_meta
+            )
+        else:
+            self.guard.mark_uncertain(reservation, cost)
         return msg, cost
 
     @staticmethod

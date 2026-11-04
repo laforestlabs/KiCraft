@@ -74,7 +74,7 @@ def test_unpinned_leaf_selectors_disk_acceptance_wins(tmp_path):
     _write_json(d / "metadata.json", {"sheet_name": "POWER"})
     _write_json(d / "solved_layout.json", {
         "instance_path": "/power-leaf",
-        "validation": {"accepted": True},
+        "validation": {"accepted": True, "leaf_acceptance_result": {"accepted": True}},
         "traces": [], "vias": [],
     })
 

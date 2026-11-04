@@ -93,6 +93,8 @@ A deterministic gate that fails the build (or downgrades fab-ready) when a stand
 but the delivered board's outline / connector positions don't match the template within tolerance.
 This is what makes the constraint *real* rather than advisory — see the investigate-skill
 intent-adherence audit (below), which is the diagnostic counterpart.
+Each expected contact must match a distinct delivered pad within tolerance;
+one pad cannot satisfy two neighboring contacts.
 
 ## Scope / sequencing
 

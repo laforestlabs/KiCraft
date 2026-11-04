@@ -620,10 +620,11 @@ def actuator_circuit_facts(
     if relay_complete >= 2 and relay_contact_bindings >= 2:
         gates["external_relay_control_function"] = "pass"
         gates["external_relay_outputs_on_screw_terminals"] = "pass"
-    if tb_functional_channels or drv_functional_channels or socket_screw_terminal_binding:
+    # A carrier socket establishes an interface, not a fitted motor driver.
+    if tb_functional_channels or drv_functional_channels:
         gates["external_motor_controller_function"] = "pass"
         gates["external_motor_screw_terminal_binding"] = "pass"
-    if uln_functional or relay_complete or tb_functional_channels or drv_functional_channels or socket_functional:
+    if uln_functional or relay_complete or tb_functional_channels or drv_functional_channels:
         gates["external_actuator_driver_function"] = "pass"
     return {
         "net_paths": paths,

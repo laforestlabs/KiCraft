@@ -1,5 +1,5 @@
 {
-  "content_hash": "sha256:e42055058b3c5271241dc20e36aeb0ef505efe6887a6d635f685c4806ba5ea55",
+  "content_hash": "sha256:be12435b010440e64ffec1693bf597812adca7d8d8fddd152507f8b50d02f819",
   "datasheet_url": "https://documentation.espressif.com/esp32-c3_mini_1_datasheet_en.pdf",
   "description": "ESPRESSIF(\u4e50\u946b) ESP32-C3-MINI-1-H4X",
   "footprint_name": "WIFIM-SMD_ESP32-C3-MINI-1",
@@ -19,7 +19,7 @@
   },
   "symbol_name": "ESP32-C3-MINI-1-H4X",
   "tags": [],
-  "three_d_model": null,
+  "three_d_model": "ESP32-C3-MINI-1.step",
   "version": "0.1.0",
-  "watch_out_for": "Espressif ESP32-C3-MINI-1 datasheet v2.2 Table 1-1, Table 3-1 and Figure 11-1; LCSC C41349510 supplier CAD reviewed against module pin table and recommended land pattern. Onboard PCB antenna requires the manufacturer's PCB placement and copper clearance. No 3D model, assembled-board RF or energized performance is asserted."
+  "watch_out_for": "Espressif ESP32-C3-MINI-1 datasheet v2.2 Table 1-1, Table 3-1 and Figure 11-1; LCSC C41349510 supplier CAD reviewed against module pin table and recommended land pattern. Manufacturer STEP from https://github.com/espressif/kicad-libraries/blob/main/3dmodels/espressif.3dshapes/ESP32-C3-MINI-1.STEP (CC-BY-SA-4.0 with exception; see 3d/LICENSE.txt). Model placement uses manufacturer footprint offset adjusted for the 2.7 mm land-pattern origin difference. Onboard PCB antenna requires manufacturer PCB placement and copper clearance. No assembled-board RF or energized performance is asserted."
 }

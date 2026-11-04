@@ -77,6 +77,13 @@ def _drop_stale_parent_artifacts(dest: Path) -> None:
                 pass
 
 
+def _reject_overlapping_paths(source: Path, dest: Path) -> None:
+    """Never remove the source or copy a workspace into itself."""
+    source, dest = source.resolve(), dest.resolve()
+    if source == dest or source in dest.parents or dest in source.parents:
+        raise ValueError(f"source and destination overlap: {source} and {dest}")
+
+
 def prepare_scratch(
     workspace: Path, dest: Path, *, fresh_leaves: bool
 ) -> tuple[Path, str]:
@@ -92,6 +99,7 @@ def prepare_scratch(
     """
     workspace = Path(workspace)
     dest = Path(dest)
+    _reject_overlapping_paths(workspace, dest)
     if dest.exists():
         shutil.rmtree(dest)
     shutil.copytree(workspace, dest)

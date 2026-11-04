@@ -273,7 +273,7 @@ def _analyze(tmp_path, **kwargs):
     batch, ledger = _campaign(tmp_path, **kwargs)
     rc = analysis.analyze_batch(
         batch,
-        baseline=Path("/home/kicraft/.kicraft/self_eval/20260825T033602Z"),
+        baseline=tmp_path / "absent-synthetic-baseline",
         ledger=ledger,
         projects_dir=tmp_path / "no-production",
     )

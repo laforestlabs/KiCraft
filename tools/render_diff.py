@@ -248,7 +248,7 @@ def pixel_diff(
         "image_size": [int(img_a.width), int(img_a.height)],
         "pixels_differing_above_threshold": n_diff,
         "total_pixels": total,
-        "fraction_differing": round(n_diff / total, 4) if total else 0.0,
+        "fraction_differing": n_diff / total if total else 0.0,
         "mean_pixel_diff": round(float(diff.mean()), 3),
         "max_pixel_diff": int(diff.max()),
         "threshold": threshold,

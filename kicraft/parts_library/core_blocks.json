@@ -77,7 +77,7 @@
       "category": "power",
       "qualifier": "Fixed 3.3V, 500mA composition, normal input 7-28V",
       "package": "SOIC-8-EP",
-      "selection_notes": "TPS54331DDAR C90761 is an adjustable IC, but tps54331-adjustable@1 is a fixed 3.3V, 500mA composition with two 47uF 25V X5R output capacitors and two 4.7uF 50V input capacitors. Its normal input envelope is 7-28V. Do not infer arbitrary outputs or the IC's 3A rating for this design. EN floats or is grounded, never tied to the input. Validate loop, thermal and transients on the finished board. https://www.ti.com/lit/ds/symlink/tps54331.pdf.",
+      "selection_notes": "TPS54331DDAR C90761 is an adjustable IC, but tps54331-adjustable@2 is a fixed 3.3V, 500mA composition with two 47uF 25V X5R output capacitors and two 4.7uF 50V input capacitors. Its normal input envelope is 7-28V. Do not infer arbitrary outputs or the IC's 3A rating for this design. EN normally floats; an optional local shunt grounds it or an external 0-6V/open-drain control drives it, never the high-voltage input directly. Validate loop, thermal and transients on the finished board. https://www.ti.com/lit/ds/symlink/tps54331.pdf.",
       "sort_order": 90,
       "bundle": "tps54331"
     },

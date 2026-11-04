@@ -204,12 +204,15 @@ class TestExtractPreservesPadGeometry:
 
         original_r1 = full_state.components["R1"]
         translated_r1 = result.local_state.components["R1"]
+        assert [pad.pad_id for pad in translated_r1.pads] == [
+            pad.pad_id for pad in original_r1.pads
+        ]
 
         # The translation zeroes the origin, so pads should shift by translation
         dx = result.translation.x
         dy = result.translation.y
 
-        for orig_pad, trans_pad in zip(original_r1.pads, translated_r1.pads):
+        for orig_pad, trans_pad in zip(original_r1.pads, translated_r1.pads, strict=True):
             assert trans_pad.pos.x == pytest.approx(orig_pad.pos.x + dx)
             assert trans_pad.pos.y == pytest.approx(orig_pad.pos.y + dy)
             # Net name is preserved
@@ -273,10 +276,8 @@ class TestEnvelope:
         leaf = _make_leaf_subcircuit(["R1"])
         result = extract_leaf_board_state(leaf, full_state, margin_mm=20.0)
 
-        # With margin=20 but board is only 5x5, the envelope should be
-        # clamped so it does not extend beyond what the board allows
-        assert result.envelope is not None
-        assert result.envelope.source_board_outline is not None
+        assert result.envelope.top_left == Point(0.0, 0.0)
+        assert result.envelope.bottom_right == Point(5.0, 5.0)
 
 
 class TestTranslation:
@@ -327,15 +328,6 @@ class TestErrorCases:
 class TestSummarize:
     """summarize_extraction and extraction_debug_dict tests."""
 
-    def test_summarize_extraction(self):
-        leaf, full_state = _basic_full_state()
-        result = extract_leaf_board_state(leaf, full_state)
-        summary = summarize_extraction(result)
-
-        assert isinstance(summary, str)
-        assert "TEST" in summary
-        assert "refs=" in summary
-        assert "internal_nets=" in summary
 
     def test_extraction_debug_dict(self):
         leaf, full_state = _basic_full_state()

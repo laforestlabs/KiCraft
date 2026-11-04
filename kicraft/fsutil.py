@@ -10,6 +10,7 @@ with JSONDecodeError and the design session is lost. Write-to-tmp +
 from __future__ import annotations
 
 import os
+import secrets
 from pathlib import Path
 
 
@@ -17,15 +18,20 @@ def atomic_write_text(path: Path | str, text: str,
                       encoding: str = "utf-8") -> None:
     """Write ``text`` to ``path`` atomically.
 
-    Same-directory tmp file (rename must not cross filesystems), pid-suffixed
-    so two processes writing the same target can't truncate each other's
-    in-flight tmp, then ``os.replace`` so readers see either the old or the
-    new content, never a partial write.
+    A unique same-directory tmp file avoids collisions between both processes
+    and threads. ``os.replace`` then makes the new contents visible at once.
     """
     p = Path(path)
-    tmp = p.with_name(f"{p.name}.tmp-{os.getpid()}")
+    while True:
+        tmp = p.with_name(f"{p.name}.tmp-{secrets.token_hex(16)}")
+        try:
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+            break
+        except FileExistsError:
+            continue
     try:
-        tmp.write_text(text, encoding=encoding)
+        with os.fdopen(fd, "w", encoding=encoding) as handle:
+            handle.write(text)
         os.replace(tmp, p)
     finally:
         tmp.unlink(missing_ok=True)

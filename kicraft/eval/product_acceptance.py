@@ -81,8 +81,15 @@ def _artifact_inventory(rundir: Path) -> list[str]:
     suffixes = {".zip", ".kicad_pro", ".kicad_dru", ".kicad_sch"}
     return sorted(
         str(path.relative_to(rundir))
-        for path in generated.glob("*/*")
+        for path in generated.rglob("*")
         if path.is_file()
+        and (
+            len(path.relative_to(generated).parts) == 2
+            or (
+                len(path.relative_to(generated).parts) == 3
+                and path.relative_to(generated).parts[0].startswith("attempt-")
+            )
+        )
         and (
             path.suffix in suffixes
             or path.name.endswith(".receipt.json")

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import hashlib
 import uuid as uuidlib
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -1222,6 +1223,7 @@ def emit_schematic(
     *,
     skip_leaf_sheets: set[str] | None = None,
     sheet_instances: list[_SheetInstance] | None = None,
+    on_written: Callable[[Path], None] | None = None,
 ) -> tuple[Path, list[Path]]:
     """Emit root + leaf .kicad_sch files into project_dir.
 
@@ -1234,6 +1236,7 @@ def emit_schematic(
             supplied, the emitter uses these (with their pre-allocated
             UUIDs) instead of building fresh ones. The installer needs
             the same UUIDs to derive the matching leaf_key.
+        on_written: called after each root or leaf file has been written successfully.
 
     Returns (root_path, [leaf_paths]).
     """
@@ -1249,6 +1252,8 @@ def emit_schematic(
         architecture,
         project_title=title or project_stem,
     )
+    if on_written is not None:
+        on_written(root)
     skip = skip_leaf_sheets or set()
     # Assign each UNDRIVEN power net exactly one PWR_FLAG, on the first
     # (non-skipped) sheet that connects it, so ERC sees the global power net as
@@ -1277,15 +1282,18 @@ def emit_schematic(
             ):
                 flag_by_sheet.setdefault(si.sheet.name, set()).add(c.net_name)
                 seen_power.add(c.net_name)
-    leaves = [
-        _emit_leaf(
+    leaves = []
+    for si in sheet_insts:
+        if si.sheet.name in skip:
+            continue
+        leaf = _emit_leaf(
             project_dir, project_stem, si,
             architecture=architecture, bom=bom,
             flag_nets=frozenset(flag_by_sheet.get(si.sheet.name, ())),
         )
-        for si in sheet_insts
-        if si.sheet.name not in skip
-    ]
+        leaves.append(leaf)
+        if on_written is not None:
+            on_written(leaf)
     return root, leaves
 
 

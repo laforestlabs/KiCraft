@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any
 
 from kicraft.pcb_layers import declared_copper_layers
+from .models3d import collect_step_coverage
 
 _KICAD_CLI = "kicad-cli"
 # Standard 2-layer fab stack. KiCad-9 untranslated layer names.
@@ -228,6 +229,7 @@ def _export_fab(
             )
             step_path = step_candidate
         except (RuntimeError, subprocess.TimeoutExpired) as exc:
+            step_candidate.unlink(missing_ok=True)
             print(f"fab: STEP export failed, continuing without: {exc}", file=sys.stderr)
 
         render_candidate = fab / "board_3d.png"
@@ -257,13 +259,33 @@ def _export_fab(
             try:
                 _run(render_cmd, timeout=300)
             except (RuntimeError, subprocess.TimeoutExpired):
+                render_candidate.unlink(missing_ok=True)
                 # Headless boxes have no GL context; xvfb-run provides one.
                 if not shutil.which("xvfb-run"):
                     raise
                 _run(["xvfb-run", "-a", *render_cmd], timeout=300)
             render_path = render_candidate
         except (RuntimeError, subprocess.TimeoutExpired) as exc:
+            render_candidate.unlink(missing_ok=True)
             print(f"fab: 3D render failed, continuing without: {exc}", file=sys.stderr)
+
+    step_coverage = {"status": "unknown", "observed_refs": None, "missing_refs": None}
+    assembly_refs = [
+        str(part["ref"]) for part in (bom_parts or [])
+        if part.get("assembly", True) and part.get("ref")
+    ]
+    if step_path is not None and assembly_refs:
+        step_coverage = collect_step_coverage(step_path, assembly_refs)
+    if include_3d:
+        (fab / "step_model_coverage.json").write_text(
+            json.dumps({
+                "schema_version": 1,
+                "step": step_path.name if step_path else None,
+                "scope": "Top-level STEP assembly references; not geometry or render qualification.",
+                **step_coverage,
+            }, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
 
     ts = datetime.now(timezone.utc).strftime("%Y%m%d")
     zip_path = out / f"{stem}_fab_{ts}.zip"
@@ -296,6 +318,7 @@ def _export_fab(
         "bom_csv": str(bom_csv) if bom_csv else None,
         "step": str(step_path) if step_path else None,
         "board_3d_png": str(render_path) if render_path else None,
+        "step_model_coverage": step_coverage,
     }
 
 

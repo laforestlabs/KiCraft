@@ -6,10 +6,9 @@ bought today. Three outcomes, decided here so every caller decides them the same
 - **keep** a part the brief names by its own order code. The owner may hold stock or have a second
   source, and only they can weigh that. A person is asked when one is watching; an auto-defaulted
   run keeps the part and records the shortfall so the board is not held up by it.
-- **swap** a part the pipeline chose for a class the brief named: an in-stock carrier of the *same
-  family* **and the same package** takes its place, so every pin, footprint and wire the design
-  already states stays valid. A different package is a different board (pins move), which is the
-  owner's decision, never a silent substitution.
+- **swap** a part the pipeline chose for a class the brief named only when a reviewed equivalent
+  device in the same package is in stock. Sharing a family and package alone does not establish
+  compatible ratings, values or pin functions.
 - **keep, with the reason**, when no such carrier exists -- and name what a different package would
   offer, because that is the choice left.
 
@@ -77,9 +76,7 @@ def _footprint_leaf(footprint: object) -> str:
 def same_package(record, other) -> bool:
     """Whether two reviewed carriers are the same package with the same contacts.
 
-    The swap is only safe when the footprint *shape* and the contact count match: then every pad
-    number the design already binds means the same thing in the replacement part. A different
-    package (a SOP-16 standing in for a SOP-8) moves the pins, which is a design change.
+    This checks physical compatibility only; callers must separately prove device equivalence.
     """
     return (
         _footprint_leaf(getattr(record, "footprint", "")) == _footprint_leaf(getattr(other, "footprint", ""))
@@ -97,11 +94,12 @@ def swap_candidates(
 ) -> tuple[object, ...]:
     """In-stock reviewed carriers of ``family`` that share ``identity``'s package.
 
-    Same family keeps the *device* class (a CH32V003 stays a CH32V003), and the same package keeps
-    the pins; together they make the swap invisible to the rest of the design. Stock is the
-    caller's reading (the two inventories live behind one callable), so this stays testable.
+    A common family and footprint do not prove interchangeable devices. Only explicit reviewed
+    order-code equivalence or a record's reviewed same-device/package/grade relation is accepted.
     """
-    from kicraft.design.part_identity import reviewed_inventory, reviewed_part
+    from kicraft.design.part_identity import (
+        reviewed_identity_for_order_code, reviewed_inventory, reviewed_part,
+    )
 
     key = str(family or "").strip().casefold()
     current = reviewed_part(identity)
@@ -118,17 +116,24 @@ def swap_candidates(
             continue
         if not same_package(current, candidate):
             continue
+        current_id = str(getattr(current, "identity", "")).strip().casefold()
+        candidate_id = str(getattr(candidate, "identity", "")).strip().casefold()
+        current_limits = getattr(current, "operating_limits", {}) or {}
+        candidate_limits = getattr(candidate, "operating_limits", {}) or {}
+        equivalent = (
+            reviewed_identity_for_order_code(current_id) == reviewed_identity_for_order_code(candidate_id)
+            or str(current_limits.get("same_device_package_grade_as", "")).casefold() == candidate_id
+            or str(candidate_limits.get("same_device_package_grade_as", "")).casefold() == current_id
+        )
+        if not equivalent:
+            continue
         if in_stock(candidate):
             out.append(candidate)
     return tuple(sorted(out, key=lambda row: str(getattr(row, "identity", ""))))
 
 
 def family_variants(family: str, identity: str) -> tuple[object, ...]:
-    """Every other reviewed carrier of the family, whatever its package.
-
-    Not a swap source: a different package moves the pins, so these are what the caller *names*
-    when it reports that only a design change can help.
-    """
+    """Other reviewed carriers of the family in a different package."""
     from kicraft.design.part_identity import reviewed_inventory, reviewed_part
 
     key = str(family or "").strip().casefold()
@@ -142,6 +147,7 @@ def family_variants(family: str, identity: str) -> tuple[object, ...]:
                 for row in reviewed_inventory()
                 if str(getattr(row, "family", "")).strip().casefold() == key
                 and getattr(row, "identity", "") != getattr(current, "identity", "")
+                and (current is None or not same_package(current, row))
             ),
             key=lambda row: str(getattr(row, "identity", "")),
         )
@@ -182,7 +188,7 @@ def stock_questions(
         ok, shortfall = reader(cid, record)
         if ok:
             continue
-        # The variations this board can take without a design change: same family, same package.
+        # Only explicitly equivalent devices can replace this part without a design change.
         options = [f"Keep {identity} as designed"]
         if record is not None:
             for candidate in swap_candidates(
@@ -319,7 +325,7 @@ def decide(
         f"({', '.join(str(getattr(row, 'identity', '')) for row in variants)}), which changes the "
         "pins and is a design decision"
         if variants
-        else "; the library holds no other reviewed variant of this family"
+        else "; the library holds no other reviewed variant in a different package"
     )
     return StockDecision(
         action=KEEP,
@@ -328,7 +334,7 @@ def decide(
         alternative=None,
         reason=(
             f"{identity} ({mpn or identity}) is {shortfall} and the pipeline chose it for a class "
-            f"the brief names, but no in-stock carrier shares its package{detail}"
+            f"the brief names, but no in-stock reviewed equivalent shares its package{detail}"
         ),
     )
 

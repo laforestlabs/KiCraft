@@ -42,7 +42,12 @@ never cached).
 - **Persistent MPN->LCSC cache** (`kicraft/parts_library/mpn_cache.py` + the
   `lookup-lcsc-id` CLI): a part resolved once on a machine resolves instantly,
   offline, on every later run. Stored as `~/.kicraft/mpn_cache.json` (override
-  `$KICRAFT_MPN_CACHE`).
+  `$KICRAFT_MPN_CACHE`). Unreadable, invalid-encoding, malformed JSON and
+  non-object cache files are treated as empty rather than blocking resolution.
+- **Evidence-bearing offline research:** catalog searches used to establish
+  query provenance require literal matches for every original query word in
+  the full catalog fields; prefix-widened suggestions are not proof of a
+  part's function. Ordinary exploratory searches retain their wider behavior.
 
 **Scope of Phase B (important, was overstated):** both the cap and the cache
 key on the *exact normalized spelling*. They eliminate **exact-repeat** churn

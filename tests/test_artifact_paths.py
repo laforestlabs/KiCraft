@@ -137,21 +137,38 @@ def test_provenance_path_single_suffix():
     assert got.name == "USB_PD_TRIGGER.provenance.json"
 
 
-def test_promote_provenance_roundtrip(tmp_path):
+@pytest.mark.parametrize("mutation", ["changed", "removed"])
+def test_provenance_rejects_changed_or_missing_promoted_bytes(tmp_path, mutation):
     pcb = _touch(tmp_path / "PROJ.kicad_pcb")
     src = _touch(_pdir(tmp_path) / ap.PARENT_ROUTED)
-    _touch(src.parent / ap.METADATA_JSON, json.dumps({"run_id": "RSRC"}))
     out = ap.write_promote_provenance(
         pcb, run_id="RUN", run_started_at=123.0,
         source_board=src, source_kind="routed", fresh=True,
     )
-    assert out == ap.provenance_path(pcb)
-    data = ap.read_provenance(pcb)
-    assert data["run_id"] == "RUN"
-    assert data["source_kind"] == "routed"
-    assert data["source_run_id"] == "RSRC"  # read from the source's metadata
-    assert data["fresh"] is True
-    assert data["md5"]  # fingerprint computed
+    record = out.read_bytes()
+    assert ap.read_provenance(pcb)["fresh"] is True
+    if mutation == "changed":
+        pcb.write_text("(kicad_pcb changed)\n")
+    else:
+        pcb.unlink()
+    actual = ap.read_provenance(pcb)
+    assert actual["fresh"] is False
+    assert actual["hash_matches"] is False
+    assert out.read_bytes() == record
+
+
+def test_final_provenance_distinguishes_selected_source_from_finished_board(tmp_path):
+    src = _touch(_pdir(tmp_path) / ap.PARENT_ROUTED, "(kicad_pcb routed)\n")
+    pcb = _touch(tmp_path / "PROJ.kicad_pcb", "(kicad_pcb routed (gr_text legend))\n")
+    ap.write_promote_provenance(
+        pcb, run_id="RUN", run_started_at=123.0,
+        source_board=src, source_kind="routed", fresh=True,
+    )
+    actual = ap.read_provenance(pcb)
+    assert actual["fresh"] is True
+    assert actual["md5"] == ap.file_md5(pcb)
+    assert actual["source_md5"] == ap.file_md5(src)
+    assert actual["source_md5"] != actual["md5"]
 
 
 def test_ensure_run_context_idempotent():

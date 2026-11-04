@@ -31,6 +31,7 @@ import re
 import subprocess
 import sys
 import time
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -77,15 +78,14 @@ def _identity_name(identity: str) -> str:
 
 def _run_metrics(stage_result: dict, events: list[dict], trace: list[dict]) -> dict:
     retries = [event for event in events if event.get("kind") == "retry"]
-    identities = [
-        event.get("declared_identities") or []
-        for event in retries
-        if event.get("declared_identities") is not None
+    identity_retries = [
+        event for event in retries if event.get("declared_identities") is not None
     ]
     dropped: list[dict] = []
-    for index in range(1, len(identities)):
-        previous, current = set(identities[index - 1]), set(identities[index])
-        text = _rejection_text(retries[index])
+    for index in range(1, len(identity_retries)):
+        previous = set(identity_retries[index - 1]["declared_identities"])
+        current = set(identity_retries[index]["declared_identities"])
+        text = _rejection_text(identity_retries[index])
         lost = sorted(
             _identity_name(item) for item in previous - current if _identity_name(item) not in text
         )
@@ -182,7 +182,7 @@ def run_arm(args) -> int:
             # One unique artifact pair per run: an interleaved driver invokes this
             # script once per run with `--runs 1`, so a label+index name would
             # overwrite the previous run's events and trace.
-            stamp = time.strftime("%Y%m%dT%H%M%S", time.gmtime())
+            stamp = time.strftime("%Y%m%dT%H%M%S", time.gmtime()) + uuid.uuid4().hex
             events_path = out / f"{label}-{board}-{stamp}.events.jsonl"
             trace_path = out / f"{label}-{board}-{stamp}.trace.jsonl"
             record: dict = {
@@ -206,14 +206,6 @@ def run_arm(args) -> int:
                         NONINTERACTIVE_DEFAULTS_INSTRUCTION if args.unattended else None
                     ),
                 )
-                events_path.write_text(
-                    "".join(json.dumps(event, separators=(",", ":")) + "\n" for event in events),
-                    encoding="utf-8",
-                )
-                trace_path.write_text(
-                    "".join(json.dumps(row, separators=(",", ":")) + "\n" for row in trace),
-                    encoding="utf-8",
-                )
                 record.update(_run_metrics(result.get("stage"), events, trace))
                 record["error"] = result.get("error")
             except Exception as exc:  # noqa: BLE001 - every aborted run is reported
@@ -232,6 +224,14 @@ def run_arm(args) -> int:
                         ],
                     }
                 )
+            events_path.write_text(
+                "".join(json.dumps(event, separators=(",", ":")) + "\n" for event in events),
+                encoding="utf-8",
+            )
+            trace_path.write_text(
+                "".join(json.dumps(row, separators=(",", ":")) + "\n" for row in trace),
+                encoding="utf-8",
+            )
             record["wall_s_total"] = round(time.monotonic() - started, 3)
             record["spent_total_usd"] = _spent_total(client)
             record["spent_arm_usd"] = round(record["spent_total_usd"] - spent_start, 6)
@@ -379,7 +379,7 @@ def scan_corpus(roots: list[Path], since: float | None = None) -> int:
 def run_full(args) -> int:
     """Drive all five stages + the deterministic build for a fresh brief."""
     from kicraft.server.stage_pipeline import run_pipeline
-    from kicraft.server.stage_state import DESIGN_STAGES
+    from kicraft.server.stage_contracts import DESIGN_STAGES
 
     try:
         parse_contract_ladder(args.arm)
@@ -798,16 +798,17 @@ def replay_corpus(root: Path, *, limit: int | None, state_root: Path) -> int:
         if not drafts:
             continue
         first = drafts[0]
-        draft_codes, unclassified = _draft_codes(first, prompt_state)
+        draft_codes, draft_error = _draft_codes(first, prompt_state)
         for code in draft_codes:
             before[code] = before.get(code, 0) + 1
         skipped = None
         derived_codes: list[str] = []
         dropped: list[str] = []
+        derived_error = None
         try:
             intent, dropped = _project_to_intent(first)
             derived = derive_architecture(intent).model_dump(exclude_none=True)
-            derived_codes, unclassified = _draft_codes(derived, prompt_state)
+            derived_codes, derived_error = _draft_codes(derived, prompt_state)
         except ArchitectureIntentError as exc:
             skipped = f"refused: {sorted({row.code for row in exc.diagnostics})}"
             derived_codes = sorted({row.code for row in exc.diagnostics})
@@ -822,7 +823,8 @@ def replay_corpus(root: Path, *, limit: int | None, state_root: Path) -> int:
                 "draft_codes": draft_codes,
                 "derived_codes": derived_codes,
                 "skipped": skipped,
-                "unclassified": unclassified,
+                "unclassified": draft_error,
+                "derived_unclassified": derived_error,
                 "inexpressible_ports": dropped,
             }
         )
@@ -832,7 +834,9 @@ def replay_corpus(root: Path, *, limit: int | None, state_root: Path) -> int:
 
     known = [row for row in rows if _expressible(row)]
     accepted_before = sum(1 for row in known if not row["draft_codes"] and not row["unclassified"])
-    accepted_after = sum(1 for row in known if not row["derived_codes"])
+    accepted_after = sum(
+        1 for row in known if not row["derived_codes"] and not row["derived_unclassified"]
+    )
     print(f"replayed {len(rows)} first drafts from {len(streams)} event streams")
     print(
         f"first drafts accepted: as written {accepted_before}/{len(known)}; "

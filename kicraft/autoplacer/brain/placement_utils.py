@@ -169,21 +169,11 @@ def _pad_half_extents(comp: Component) -> tuple[float, float]:
     offset side.  The base half-extents include this offset so the entire
     courtyard is kept within board boundaries.
     """
-    if comp.body_center:
-        # The courtyard spans from body_center ± width/2.
-        # Measured from pos, the furthest extent on each side is:
-        #   body_center_offset + width/2
-        hw = comp.width_mm / 2 + abs(comp.body_center.x - comp.pos.x)
-        hh = comp.height_mm / 2 + abs(comp.body_center.y - comp.pos.y)
-    else:
-        hw = comp.width_mm / 2
-        hh = comp.height_mm / 2
-    for pad in comp.pads:
-        dx = abs(pad.pos.x - comp.pos.x)
-        dy = abs(pad.pos.y - comp.pos.y)
-        hw = max(hw, dx)
-        hh = max(hh, dy)
-    return hw, hh
+    tl, br = comp.physical_bbox()
+    return (
+        max(comp.pos.x - tl.x, br.x - comp.pos.x),
+        max(comp.pos.y - tl.y, br.y - comp.pos.y),
+    )
 
 
 def _bbox_overlap_amount(a: Component, b: Component) -> float:
@@ -212,27 +202,7 @@ def _effective_bbox(comp: Component, clearance: float = 0.0) -> tuple[Point, Poi
     connectors.  Keeps legality overlap checks aligned to the real stamped
     footprint envelope instead of a symmetric box around comp.pos.
     """
-    if comp.body_center is not None:
-        min_x = comp.body_center.x - comp.width_mm / 2
-        max_x = comp.body_center.x + comp.width_mm / 2
-        min_y = comp.body_center.y - comp.height_mm / 2
-        max_y = comp.body_center.y + comp.height_mm / 2
-    else:
-        min_x = comp.pos.x - comp.width_mm / 2
-        max_x = comp.pos.x + comp.width_mm / 2
-        min_y = comp.pos.y - comp.height_mm / 2
-        max_y = comp.pos.y + comp.height_mm / 2
-
-    for pad in comp.pads:
-        min_x = min(min_x, pad.pos.x)
-        max_x = max(max_x, pad.pos.x)
-        min_y = min(min_y, pad.pos.y)
-        max_y = max(max_y, pad.pos.y)
-
-    return (
-        Point(min_x - clearance, min_y - clearance),
-        Point(max_x + clearance, max_y + clearance),
-    )
+    return comp.physical_bbox(clearance)
 
 
 def _swap_pad_positions(a: Component, b: Component):

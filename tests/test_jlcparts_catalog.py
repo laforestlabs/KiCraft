@@ -88,6 +88,24 @@ def test_search_terms_fallback_over_description(catalog):
     assert rows[0]["type"] == "Basic"
     assert rows[0]["package"] is None                   # '-' normalized to None
 
+def test_strict_search_never_widens_and_requires_every_full_query_word(catalog):
+    con = sqlite3.connect(catalog)
+    con.execute(
+        "INSERT INTO jlc_components "
+        "(lcsc, mfr, package, manufacturer, library_type, stock, price, description) "
+        "VALUES (?,?,?,?,?,?,?,?)",
+        (123, "VARIST-IC", "SOT-23", "Example", "base", 1000, "1-:0.1",
+         "logic controller"),
+    )
+    con.commit()
+    con.close()
+    assert [row["lcsc"] for row in jlcparts.search("varistor")] == ["C123"]
+    assert jlcparts.search("varistor", strict=True) == []
+    assert [row["lcsc"] for row in jlcparts.search("100nF 0805 X7R", strict=True)] == ["C1525"]
+    assert jlcparts.search("100nF absent", strict=True) == []
+    assert {row["lcsc"] for row in jlcparts.search("%", strict=True)} == {"C25744", "C1525"}
+
+
 
 def test_button_footprint_keyword_uses_its_reviewed_order_code():
     footprint = "Button_Switch_SMD:SW_SPST_TL3342"

@@ -316,6 +316,9 @@ def audit_architecture(
     model: str = DEFAULT_MODEL,
     confidence: float = DEFAULT_CONFIDENCE,
     recorder=None,
+    guard=None,
+    run_id: str | None = None,
+    stage: str | None = None,
 ) -> list[models.StageDiagnostic]:
     """Typed findings about a draft, or nothing when the audit cannot be taken.
 
@@ -328,7 +331,10 @@ def audit_architecture(
     if not questions:
         return []
     try:
-        answers = decide(candidate, questions, model=model, recorder=recorder)
+        options = {"model": model, "recorder": recorder}
+        if guard is not None:
+            options.update(guard=guard, run_id=run_id, stage=stage)
+        answers = decide(candidate, questions, **options)
     except DecisionUnavailable:
         return []
 

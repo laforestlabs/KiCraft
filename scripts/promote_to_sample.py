@@ -131,6 +131,8 @@ def _resolve_model_refs(dest: Path, stem: str) -> tuple[int, list[str]]:
         path = m.group(1)
         if path.startswith("${KICAD9_3DMODEL_DIR}"):
             return m.group(0)  # stock model, resolves through system KiCad
+        if path.startswith("${KIPRJMOD}/") and (dest / path[len("${KIPRJMOD}/"):]).is_file():
+            return m.group(0)
         base = path.rsplit("/", 1)[-1]
         target = staged.get(base)
         if target is None:
@@ -144,8 +146,7 @@ def _resolve_model_refs(dest: Path, stem: str) -> tuple[int, list[str]]:
                 target = (lib_dir / src.name).relative_to(dest).as_posix()
                 staged[base] = target
         if target is None:
-            if not path.startswith("${KIPRJMOD}/3dmodels/"):
-                unresolved.append(path)
+            unresolved.append(path)
             return m.group(0)
         want = "${KIPRJMOD}/" + target
         if path == want:

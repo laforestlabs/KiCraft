@@ -21,7 +21,7 @@
     )
     (property
       "Footprint"
-      "tmp102aidrlr:SC-89-6_L1.6-W1.2-P0.50-LS1.6-BL"
+      "tmp102aidrlr:TI_DRL0006A_TMP102"
       (id 2)
       (at 0 -10.16 0)
       (effects (font (size 1.27 1.27) ) hide)

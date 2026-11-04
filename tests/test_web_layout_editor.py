@@ -21,6 +21,8 @@ from pathlib import Path
 
 import pytest
 
+from account_fixtures import seed_project
+
 from kicraft.server.accounts import AccountStore
 from kicraft.server.config import LEGAL_VERSION
 from kicraft.server.layout_panel import (
@@ -100,6 +102,7 @@ async def harness(tmp_path):
         real_fetch = web._safe_fetch
         web._safe_fetch = lambda key: web._FETCH_ERROR
         acct = store.create_user(EMAIL, PASSWORD)
+        acct = store.consume_verification_token(store.create_verification_token(acct.id))
         store.record_consent(acct.id, LEGAL_VERSION)
         try:
             yield u, web, store, acct
@@ -120,7 +123,7 @@ def _persisted_project_with_board(
     must hold a .kicad_sch: that's how _discover_generated_dir finds
     the project (and how open_project derives pcb_ready)."""
     stem = "USB_BMP280_READER"  # == STATE_FIXTURE's project_stem
-    pid = store.create_project(user_id, f"{stem} brief")
+    pid = seed_project(store, user_id, f"{stem} brief")
     base = store.projects_dir / str(user_id) / str(pid)
     (base / ".kicraft").mkdir(parents=True)
     (base / "brief.txt").write_text("brief", encoding="utf-8")
@@ -277,3 +280,24 @@ async def test_pro_user_opens_placement_rules_panel(harness):
 
     u.find("Back to board", kind=ui.button).click()
     await u.should_see("Placement rules", retries=30)
+
+
+async def test_fixed_board_rules_require_both_dimensions(harness):
+    u, web, store, acct = harness
+    store.set_tier(EMAIL, "pro")
+    _persisted_project_with_board(store, acct.id)
+
+    await _login(u)
+    await u.should_see("Placement rules")
+    from nicegui import ui
+    u.find("Placement rules", kind=ui.button).click()
+    await u.should_see("Auto size")
+    u.find("Auto size", kind=ui.switch).click()
+    u.find("Apply & re-place", kind=ui.button).click()
+    await u.should_see("Enter both board dimensions when Auto size is off.")
+    await u.should_not_see("Apply placement rules and re-place the board?")
+
+    u.find("W (mm)", kind=ui.number).clear().type("60")
+    u.find("H (mm)", kind=ui.number).clear().type("40")
+    u.find("Apply & re-place", kind=ui.button).click()
+    await u.should_see("Apply placement rules and re-place the board?")

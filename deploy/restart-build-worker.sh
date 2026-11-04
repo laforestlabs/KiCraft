@@ -14,22 +14,31 @@ set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LOG="${KICRAFT_BUILD_WORKER_LOG:-$REPO/logs/kicraft_build_worker.log}"
-PATTERN='python -m kicraft\.server\.build_worker'
+PATTERN='^([^ ]*/)?python([0-9.]*)? -m kicraft\.server\.build_worker( |$)'
+
+workers() {
+    local pid
+    while read -r pid; do
+        [ -n "$pid" ] || continue
+        [ "$(readlink -f "/proc/$pid/cwd" 2>/dev/null || true)" = "$REPO" ] && echo "$pid"
+    done < <(pgrep -f "$PATTERN" || true)
+}
 
 mkdir -p "$REPO/logs"
 
-pids="$(pgrep -f "$PATTERN" || true)"
+pids="$(workers)"
 if [ -n "$pids" ]; then
     echo "stopping build worker: $pids (SIGTERM requeues its running builds)"
     # shellcheck disable=SC2086  # word-splitting the pid list is intended
     kill $pids 2>/dev/null || true
     for _ in $(seq 1 40); do          # up to 20s: it may be killing build trees
-        pgrep -f "$PATTERN" >/dev/null || break
+        [ -z "$(workers)" ] && break
         sleep 0.5
     done
-    if pgrep -f "$PATTERN" >/dev/null; then
+    pids="$(workers)"
+    if [ -n "$pids" ]; then
         echo "still running; sending SIGKILL"
-        pkill -9 -f "$PATTERN" || true
+        kill -9 $pids 2>/dev/null || true
         sleep 1
     fi
 else
@@ -37,12 +46,17 @@ else
 fi
 
 echo "==== $(date -Is) restart-build-worker.sh ====" >> "$LOG"
+offset=$(( $(wc -c < "$LOG") + 1 ))
 cd "$REPO"
 setsid nohup .venv/bin/python -m kicraft.server.build_worker >> "$LOG" 2>&1 < /dev/null &
+pid=$!
 
 for _ in $(seq 1 20); do              # up to 10s for the ready line
-    if tail -5 "$LOG" 2>/dev/null | grep -q "\[build-worker\] ready"; then
-        echo "build worker is up (pid $(pgrep -f "$PATTERN" | head -1)); log: $LOG"
+    if ! kill -0 "$pid" 2>/dev/null; then
+        break
+    fi
+    if tail -c "+$offset" "$LOG" | grep -q "\[build-worker\] ready"; then
+        echo "build worker is up (pid $pid); log: $LOG"
         exit 0
     fi
     sleep 0.5

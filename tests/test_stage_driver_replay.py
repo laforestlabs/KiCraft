@@ -73,22 +73,7 @@ def test_budget_guard_reserves_full_next_call_before_dispatch():
         guard.preflight(call_ceiling_usd=0.061)
 
 
-def test_budget_guard_delegates_other_methods():
-    base = _FakeBase(0.0)
-    g = _BudgetGuard(base, 0.25)
-    assert g.status()["spent_total_usd"] == 0.0
-    g.record("m", 1, 1, 0.0)
-    g.record_stage(
-        run_id=None,
-        stage="intent",
-        ok=True,
-        attempts=1,
-        rounds=None,
-        tool_calls=None,
-        wall_s=0.0,
-        cpu_s=0.0,
-        cost_usd=0.0,
-    )
+
 
 
 def test_make_budget_client_mock_mode_skips_wrapper(monkeypatch):
@@ -125,6 +110,7 @@ def test_drive_replay_seeds_temp_workspace_and_recovers_brief(tmp_path, monkeypa
         captured["brief"] = brief
         captured["workspace"] = str(workspace)
         captured["client_is_fake"] = kw.get("client") is fake_client
+        captured["seeded_state"] = json.loads((workspace / ".kicraft" / "state.json").read_text())
         return (
             [{"stage": stages[0], "commit_ok": True}],
             {"spent_total_usd": 0.0},
@@ -143,6 +129,7 @@ def test_drive_replay_seeds_temp_workspace_and_recovers_brief(tmp_path, monkeypa
     assert captured["client_is_fake"] is True
     # source untouched, replay workspace holds a copy
     assert sp.read_text() == json.dumps(state)
+    assert captured["seeded_state"] == state
     assert captured["workspace"] != str(tmp_path)
 
 

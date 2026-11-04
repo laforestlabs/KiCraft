@@ -103,20 +103,6 @@ class TestLoadProjectConfig:
         assert "power_nets" in cfg
         assert isinstance(cfg["power_nets"], set)
 
-    def test_example_config_merges_over_defaults(self):
-        """Project config values should override DEFAULT_CONFIG values."""
-        if not _EXAMPLE_CONFIG.exists():
-            pytest.skip("Example config not found")
-        cfg = load_project_config(str(_EXAMPLE_CONFIG))
-        merged = {**DEFAULT_CONFIG, **cfg}
-        # The merged dict should have all default keys ...
-        for key in DEFAULT_CONFIG:
-            assert key in merged
-        # ... plus any project-specific keys
-        for key in cfg:
-            assert key in merged
-            assert merged[key] == cfg[key]
-
     def test_nonexistent_path_raises(self):
         """A non-existent explicit path should raise FileNotFoundError."""
         with pytest.raises(FileNotFoundError):

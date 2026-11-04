@@ -209,7 +209,7 @@ async def test_stage_tabs_render_execution_provenance():
                 {
                     "kind": "recipe_selected",
                     "stage": "bom",
-                    "recipe": "rp2040-minimal@2",
+                    "recipe": "rp2040-minimal@3",
                     "instance": "controller",
                     "sheets": {"mcu": "MCU", "io": "IO"},
                     "parameters": {"native_usb": True, "programming": "native_usb"},
@@ -250,11 +250,30 @@ async def test_stage_tabs_render_execution_provenance():
             )
 
         await u.should_see("Circuit recipe")
-        await u.should_see("rp2040-minimal@2")
+        await u.should_see("rp2040-minimal@3")
         await u.should_see("Deterministic")
         await u.should_see("LLM")
         await u.should_see("invalid_work_unit")
         await u.should_see("Candidate validated and retained")
+
+
+@pytest.mark.anyio
+async def test_stage_and_unit_costs_are_labeled_as_estimates():
+    holder = {}
+
+    def root():
+        holder["tabs"] = StageTabs(show_cost=True)
+
+    async with user_simulation(root=root) as u:
+        await u.open("/")
+        with u:
+            tabs = holder["tabs"]
+            tabs.push({"kind": "stage_start", "stage": "bom"})
+            tabs.push({"kind": "work_unit_attempt", "stage": "bom", "unit_id": "u1",
+                       "source": "llm", "outcome": "candidate", "cost_usd": 1.25})
+            tabs.push({"kind": "stage_done", "stage": "bom", "ok": True, "cost": 2.5})
+        await u.should_see("cost/exposure estimate $1.2500")
+        await u.should_see("Cost/exposure estimate $2.5000")
 
 
 # --------------------------------------------------- inspector tables (kc-table)
@@ -453,6 +472,94 @@ async def test_manual_tab_choice_survives_later_activity():
             tabs.follow_live()
         assert tabs.active() == "architecture"
         assert tabs.active() is not None
+
+
+@pytest.mark.anyio
+async def test_replay_settle_respects_tab_click_and_explicit_navigation():
+    from nicegui.testing.user_interaction import UserInteraction
+
+    holder = {}
+
+    def root():
+        holder["tabs"] = StageTabs()
+
+    async with user_simulation(root=root) as u:
+        await u.open("/")
+        tabs = holder["tabs"]
+        with u:
+            tabs.begin_replay()
+            tabs.push({"kind": "stage_start", "stage": "wiring"})
+            tabs.end_replay("wiring")
+            # A browser's initial-value echo is corrected while settling.
+            tabs.tabs.set_value("intent")
+            tabs.settle()
+        assert tabs.active() == "wiring"
+
+        UserInteraction(u, {tabs._tab_el["bom"]}, None).click()
+        with u:
+            for _ in range(10):
+                tabs.settle()
+        assert tabs.active() == "bom"
+
+        with u:
+            tabs.begin_replay()
+            tabs.end_replay("intent")
+            tabs.follow_live()
+            tabs.settle()
+        assert tabs.active() == "wiring"
+
+        with u:
+            tabs.begin_replay()
+            tabs.end_replay("wiring")
+            tabs.reset()
+            tabs.settle()
+        assert tabs.active() == "intent"
+
+
+@pytest.mark.anyio
+async def test_build_queue_becomes_running_on_first_synthesis_log():
+    holder = {}
+
+    def root():
+        holder["tabs"] = StageTabs()
+
+    async with user_simulation(root=root) as u:
+        await u.open("/")
+        tabs = holder["tabs"]
+        with u:
+            tabs.push({"kind": "build_start"})
+            tabs.push({"kind": "queue", "position": 0})
+        assert tabs._tab_el["synthesize"]._props["aria-label"] == "Synthesize: queued"
+        with u:
+            tabs.push({"kind": "build_log", "text": "[build] 1/5 synthesize (schematic)"})
+        assert tabs._tab_el["synthesize"]._props["aria-label"] == "Synthesize: active"
+        await u.should_not_see("Queued: next up")
+
+
+@pytest.mark.anyio
+async def test_unmatched_tool_id_does_not_consume_same_name_call():
+    holder = {}
+
+    def root():
+        holder["tabs"] = StageTabs()
+
+    async with user_simulation(root=root) as u:
+        await u.open("/")
+        tabs = holder["tabs"]
+        with u:
+            tabs.push({"kind": "stage_start", "stage": "wiring"})
+            tabs.push({"kind": "tool", "name": "lookup", "call_id": "a"})
+            tabs.push({"kind": "tool_result", "name": "lookup", "call_id": "b",
+                       "ok": False, "output": "orphan failure"})
+        panel = tabs.panels["wiring"]
+        assert panel._tool_cards["a"]["state"] == "Running"
+        await u.should_see("orphan failure")
+        await u.should_see("Failed")
+        with u:
+            tabs.push({"kind": "tool_result", "name": "lookup", "call_id": "a",
+                       "ok": True, "output": "original result"})
+        await u.should_see("original result")
+        await u.should_see("Returned")
 
 
 @pytest.mark.anyio

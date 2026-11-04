@@ -168,3 +168,44 @@ class TestDeepChain:
         assert levels[1][0].id.sheet_name == "P1"
         assert levels[2][0].id.sheet_name == "P2"
         assert levels[3][0].id.sheet_name == "ROOT"
+
+
+def test_repeated_sheet_references_are_selected_per_instance(tmp_path):
+    from kicraft.autoplacer.brain.hierarchy_parser import parse_hierarchy
+
+    root = tmp_path / "root.kicad_sch"
+    root.write_text(
+        '(kicad_sch (uuid "root")'
+        ' (sheet (uuid "a") (property "Sheetname" "A")'
+        ' (property "Sheetfile" "child.kicad_sch"))'
+        ' (sheet (uuid "b") (property "Sheetname" "B")'
+        ' (property "Sheetfile" "child.kicad_sch")))'
+    )
+    (tmp_path / "child.kicad_sch").write_text(
+        '(kicad_sch (uuid "child") (symbol (lib_id "Device:R")'
+        ' (instances (project "root"'
+        ' (path "/root/a" (reference "R1"))'
+        ' (path "/root/b" (reference "R2"))))))'
+    )
+    graph = parse_hierarchy(tmp_path, root)
+    assert {
+        node.id.instance_path: node.definition.component_refs
+        for node in graph.leaf_nodes()
+    } == {"/a": ["R1"], "/b": ["R2"]}
+
+
+def test_generated_leaf_schematic_uuid_path_remains_supported(tmp_path):
+    from kicraft.autoplacer.brain.hierarchy_parser import parse_hierarchy
+
+    root = tmp_path / "root.kicad_sch"
+    root.write_text(
+        '(kicad_sch (uuid "root") (sheet (uuid "sheet")'
+        ' (property "Sheetname" "Leaf")'
+        ' (property "Sheetfile" "leaf.kicad_sch")))'
+    )
+    (tmp_path / "leaf.kicad_sch").write_text(
+        '(kicad_sch (uuid "leaf") (symbol (lib_id "Device:R")'
+        ' (instances (project "root" (path "/leaf" (reference "R1"))))))'
+    )
+    graph = parse_hierarchy(tmp_path, root)
+    assert graph.leaf_nodes()[0].definition.component_refs == ["R1"]

@@ -83,6 +83,24 @@ async def test_non_admin_is_bounced(harness):
     await u.should_see("design a PCB from a sentence")
 
 
+async def test_revoked_admin_cannot_launch_from_open_self_eval_page(harness, monkeypatch):
+    u, web, store = harness
+    admin_routes = web.routes_admin
+    launches = []
+    monkeypatch.setattr(admin_routes, "_self_eval_running", lambda: False)
+    monkeypatch.setattr(admin_routes, "_self_eval_adopt_latest", lambda: None)
+    monkeypatch.setattr(admin_routes, "_self_eval_batch_dirs", lambda: [])
+    monkeypatch.setattr(admin_routes, "_self_eval_launch",
+                        lambda *args: launches.append(args) or "synthetic")
+    await _login(u, ADMIN_EMAIL)
+    await u.open("/admin/self-eval")
+    await u.should_see("Run self-eval")
+    store.set_role(ADMIN_EMAIL, "user")
+    u.find("Run self-eval").click()
+    await u.should_see("Admin access required.")
+    assert launches == []
+
+
 async def test_save_round_trips_through_the_routing_file(harness):
     u, web, store = harness
     await _login(u, ADMIN_EMAIL)

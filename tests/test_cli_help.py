@@ -6,6 +6,7 @@ at import time are automatically skipped rather than marked as failures.
 
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 
@@ -26,7 +27,7 @@ def _skip_if_pcbnew_import_error(result: subprocess.CompletedProcess, name: str)
     """Skip the test if the command failed due to missing pcbnew."""
     if result.returncode != 0:
         stderr = result.stderr
-        if "pcbnew" in stderr.lower() or "ModuleNotFoundError" in stderr:
+        if re.search(r"ModuleNotFoundError: No module named ['\"]pcbnew['\"]", stderr):
             pytest.skip(
                 f"{name} requires pcbnew (KiCad Python bindings) which is not available"
             )

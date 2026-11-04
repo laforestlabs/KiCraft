@@ -36,13 +36,19 @@ class DRCCheck(LayoutCheck):
             report_path = f.name
 
         try:
-            subprocess.run(
+            completed = subprocess.run(
                 ["kicad-cli", "pcb", "drc", "-o", report_path, pcb_path],
                 capture_output=True, text=True, timeout=60,
             )
+            if completed.returncode != 0:
+                return CheckResult(
+                    score=0,
+                    issues=[Issue("error", f"kicad-cli DRC failed (exit {completed.returncode}): {completed.stderr.strip()}")],
+                    metrics={}, summary="DRC failed",
+                )
             with open(report_path) as f:
                 report = f.read()
-        except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+        except (subprocess.TimeoutExpired, OSError) as e:
             return CheckResult(
                 score=0, issues=[Issue("error", f"kicad-cli DRC failed: {e}")],
                 metrics={}, summary="DRC failed",
@@ -57,6 +63,13 @@ class DRCCheck(LayoutCheck):
 
     def _parse_report(self, report):
         """Parse kicad-cli DRC text report."""
+        violations_match = re.search(r'\*\* Found (\d+) DRC violations \*\*', report)
+        uc_match = re.search(r'\*\* Found (\d+) unconnected', report)
+        if violations_match is None or uc_match is None:
+            return CheckResult(
+                score=0, issues=[Issue("error", "kicad-cli DRC report is incomplete or invalid")],
+                metrics={}, summary="DRC failed",
+            )
         counts = {}  # type -> count
         issues = []
 
@@ -76,11 +89,17 @@ class DRCCheck(LayoutCheck):
             # Skip minor issues from issue list to save tokens
 
         # Also count unconnected items section
-        uc_match = re.search(r'\*\* Found (\d+) unconnected', report)
-        if uc_match:
-            uc_count = int(uc_match.group(1))
-            if "unconnected_items" not in counts:
-                counts["unconnected_items"] = uc_count
+        uc_count = int(uc_match.group(1))
+        reported_violations = int(violations_match.group(1))
+        if (
+            uc_match.start() < violations_match.end()
+            or len(re.findall(r'^\[\w+\]:\s+.+', report[violations_match.end():uc_match.start()], re.M)) != reported_violations
+            or counts.get("unconnected_items", 0) != uc_count
+        ):
+            return CheckResult(
+                score=0, issues=[Issue("error", "kicad-cli DRC report is incomplete or invalid")],
+                metrics={}, summary="DRC failed",
+            )
 
         # Scoring — heavily penalize critical issues
         critical = sum(counts.get(t, 0) for t in CRITICAL_TYPES)

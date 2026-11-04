@@ -79,7 +79,7 @@ def external_load_budget_stated(text) -> bool:
     doing so makes the converter rating appear to qualify a later load name.
     """
     for fragment in _text_fragments(text):
-        for clause in re.split(r"[.;\n]+", fragment):
+        for clause in re.split(r"(?<!\d)\.|\.(?!\d)|[;\n]+", fragment):
             load_spans = [match.span() for match in _EXTERNAL_LOAD_PATTERN.finditer(clause)]
             current_spans = [match.span() for match in _CURRENT_PATTERN.finditer(clause)]
             if any(
@@ -3547,10 +3547,12 @@ def _architecture(upstream: dict, candidate: dict) -> list[StageDiagnostic]:
             )
         )
     external_load_currents = [
-        float(match.group(1))
+        float(match.group(1)) / (1000 if match.group(2).casefold() == "ma" else 1)
+        for answer in stage_answers
+        if isinstance(answer, dict) and _external_load_budget_answered([answer])
         for match in re.finditer(
-            r"(\d+(?:\.\d+)?)\s*a\b",
-            answer_text,
+            r"\b(\d+(?:\.\d+)?)\s*(ma|a)\b",
+            str(answer.get("answer") or ""),
             re.I,
         )
     ]
