@@ -184,8 +184,8 @@ _NATIVE_USB_MCU_RECIPES = frozenset(
         "esp32-s3-mini-1-minimal@1",
         "esp32-s3-mini-1u-n4r2-minimal@1",
         "esp32-s3-wroom-1-minimal@1",
-        "esp32-c3-mini-1-minimal@1",
-        "esp32-c3-mini-1-h4x-minimal@1",
+        "esp32-c3-mini-1-minimal@2",
+        "esp32-c3-mini-1-h4x-minimal@2",
         "rp2040-minimal@3",
     }
 )
@@ -196,8 +196,8 @@ _MCU_OWNED_USB_SERIES_RECIPES = frozenset(
         "esp32-s3-mini-1-minimal@1",
         "esp32-s3-mini-1u-n4r2-minimal@1",
         "esp32-s3-wroom-1-minimal@1",
-        "esp32-c3-mini-1-minimal@1",
-        "esp32-c3-mini-1-h4x-minimal@1",
+        "esp32-c3-mini-1-minimal@2",
+        "esp32-c3-mini-1-h4x-minimal@2",
         "rp2040-minimal@3",
     }
 )
@@ -964,7 +964,7 @@ def _complete_enable_jumper_requirements(payload: dict) -> dict:
         ):
             continue
         obligation_id = str(obligation.get("original_obligation_id") or "")
-        if not obligation_id or obligation_id in owned or obligation_id in requirement_ids:
+        if not obligation_id or obligation_id in requirement_ids:
             continue
         candidates = []
         for requirement in requirements:
@@ -989,21 +989,43 @@ def _complete_enable_jumper_requirements(payload: dict) -> dict:
         if len(candidates) != 1:
             continue
         target, control_rail, owns_shunt = candidates[0]
+        physical_id = obligation_id.removesuffix("-control")
+        physical = next(
+            (
+                row for row in obligations
+                if row.get("original_obligation_id") == physical_id
+                and row.get("kind") == "physical"
+                and "jumper" in canonical_physical_features(class_key(str(row.get("component_class") or "")))
+            ),
+            None,
+        ) if physical_id != obligation_id else None
+        movable = {obligation_id, *([physical_id] if physical else [])}
+        if any(
+            requirement is not target
+            and movable.intersection(requirement.get("obligation_ids") or [])
+            for requirement in requirements
+        ):
+            continue
+        if obligation_id in owned and obligation_id not in (target.get("obligation_ids") or []):
+            continue
         if owns_shunt:
             target["parameters"] = {
                 **(target.get("parameters") or {}),
                 "enable_control": True,
             }
-            target["obligation_ids"] = [
-                *(target.get("obligation_ids") or []),
-                obligation_id,
-            ]
+            target["obligation_ids"] = list(dict.fromkeys([
+                *(target.get("obligation_ids") or []), *sorted(movable),
+            ]))
             owned.add(obligation_id)
             continue
         target_id = str(target["id"])
         signal_name = f"{target_id.upper()}_ENABLE_JUMPER"
         if any(str(signal.get("name") or "") == signal_name for signal in signals):
             continue
+        target["obligation_ids"] = [
+            identifier for identifier in target.get("obligation_ids") or []
+            if identifier not in movable
+        ]
         requirements.append(
             {
                 "id": obligation_id,
@@ -1013,7 +1035,7 @@ def _complete_enable_jumper_requirements(payload: dict) -> dict:
                 "parameters": {"pull_policy": "external", "active_level": "high"},
                 "supply": control_rail,
                 "functional_blocks": list(target.get("functional_blocks") or []),
-                "obligation_ids": [obligation_id],
+                "obligation_ids": sorted(movable),
             }
         )
         signals.append(
@@ -1220,6 +1242,61 @@ def _complete_terminal_returns(payload: dict) -> dict:
     return payload
 
 
+def _complete_explicit_input_sources(payload: dict) -> None:
+    """Recover a rail source only from a unique, explicitly tied power-entry contact."""
+    rails = (payload.get("power") or {}).get("rails") or {}
+    if not isinstance(rails, dict):
+        return
+    candidates: dict[str, list[str]] = {}
+    for requirement in payload.get("requirements") or []:
+        if not isinstance(requirement, dict) or requirement.get("role") != "power_input":
+            continue
+        identifier = str(requirement.get("id") or "")
+        for port, net in (requirement.get("ties") or {}).items():
+            if (
+                identifier
+                and isinstance(net, str)
+                and net in rails
+                and str(port).casefold() not in {"gnd", "ground", "negative", "vss"}
+            ):
+                candidates.setdefault(str(net), []).append(f"{identifier}.{port}")
+    for name, rail in rails.items():
+        sources = candidates.get(str(name), [])
+        if isinstance(rail, dict) and not rail.get("from") and len(sources) == 1:
+            rail["from"] = sources[0]
+
+
+def _complete_driver_logic_supplies(payload: dict) -> None:
+    """Bind a driver's logic supply only to its directly connected MCU's stated rail."""
+    requirements = [row for row in payload.get("requirements") or [] if isinstance(row, dict)]
+    rails = ((payload.get("power") or {}).get("rails") or {})
+    mcus = {str(row.get("id")): row for row in requirements if row.get("role") == "mcu_core"}
+    for row in requirements:
+        if row.get("family") != "dual-dc-motor-driver":
+            continue
+        explicit = row.get("supply_bindings") or {}
+        if "logic_vdd" in explicit or "logic_vdd" in (row.get("ties") or {}):
+            continue
+        driver_id = str(row.get("id") or "")
+        peers = set()
+        for signal in payload.get("signals") or []:
+            if not isinstance(signal, dict):
+                continue
+            targets = signal.get("to")
+            refs = [signal.get("from"), *(targets if isinstance(targets, list) else [targets])]
+            ids = {str(ref or "").partition(".")[0] for ref in refs}
+            if driver_id in ids:
+                peers.update(ids & mcus.keys())
+        if len(peers) != 1:
+            continue
+        mcu = mcus[next(iter(peers))]
+        mcu_supplies = (mcu.get("supply_bindings") or {})
+        rail = mcu_supplies.get("vdd") or mcu.get("supply")
+        stated_rails = {value for value in [mcu.get("supply"), *mcu_supplies.values()] if value}
+        if rail in rails and stated_rails == {rail}:
+            row["supply_bindings"] = {**explicit, "logic_vdd": rail}
+
+
 def complete_architecture_payload(payload: dict) -> dict:
     """Drop the duplicate power statements the deterministic contracts can only refuse.
 
@@ -1238,6 +1315,8 @@ def complete_architecture_payload(payload: dict) -> dict:
         return payload
     # Requirement production precedes family/interface repairs so the same contracts see generated
     # and authored controls. The producer acts only on one unowned, unambiguous safe jumper fact.
+    _complete_explicit_input_sources(payload)
+    _complete_driver_logic_supplies(payload)
     _complete_enable_jumper_requirements(payload)
     _adopt_carrier_families(payload)
     _complete_terminal_returns(payload)
@@ -1415,6 +1494,20 @@ def complete_architecture_payload(payload: dict) -> dict:
     completed = dict(payload)
     completed["signals"] = kept
     completed["requirements"] = completed_requirements
+    # A dropped signal can prove which physical input contact sources a rail.
+    # Preserve that fact only when it identifies one connector, never when
+    # several entry contacts compete or the source is an internal signal.
+    for rail in {entry[0] for entry in rail_entries}:
+        entries = [
+            (requirement_id, port)
+            for name, requirement_id, port in rail_entries
+            if name == rail and by_id[requirement_id].get("role") in {"connector", "power_input"}
+            and (requirement_id.casefold(), port.casefold()) not in carried
+        ]
+        rail_row = ((completed.get("power") or {}).get("rails") or {}).get(rail)
+        if len(entries) == 1 and isinstance(rail_row, dict) and not rail_row.get("from"):
+            rail_row["from"] = f"{entries[0][0]}.{entries[0][1]}"
+    _complete_enable_jumper_requirements(completed)
     return completed
 
 
@@ -1793,6 +1886,25 @@ def derive_architecture(
         if row.sheet not in sheet_names:
             continue
         catalog = _catalog(row, recipes, lowerers)
+        for obligation in _owned_obligations(row):
+            if obligation.kind != "external_interface":
+                continue
+            definition = catalog.recipe.definition if catalog and catalog.recipe else None
+            required = [port.name for port in definition.ports if port.required] if definition else []
+            wired = {pin.net for pin in definition.pins} if definition else set()
+            if (
+                definition is None
+                or obligation.protocol not in definition.external_interface_protocols
+                or not required
+                or not set(required) <= wired
+            ):
+                _fail(
+                    "external_interface_unrealized",
+                    f"requirement {row.id!r} must select a reviewed construction for "
+                    f"external interface {obligation.protocol!r} with physically wired ports",
+                    requirement_id=row.id,
+                    sheet=row.sheet,
+                )
         if catalog is None:
             continue  # model-owned, or refused below once we know whether a signal needs its pins
         catalogs[row.id] = catalog

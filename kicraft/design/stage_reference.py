@@ -106,6 +106,8 @@ def reviewed_class_options_block(intent: dict) -> str | None:
         canonical_physical_features,
         reviewed_parts_for_feature,
     )
+    from kicraft.parts_library import jlcparts
+    from kicraft.design.recipes.registry import registered_recipes
 
     demanded = sorted(
         {
@@ -116,12 +118,21 @@ def reviewed_class_options_block(intent: dict) -> str | None:
         - {""}
     )
     lines: list[str] = []
+    terminal_demanded = False
     for component_class in demanded:
         options: dict[str, str] = {}
+        terminal_demanded |= "screw-terminal" in canonical_physical_features(component_class)
         for feature in sorted(canonical_physical_features(component_class)):
             for part in reviewed_parts_for_feature(feature):
                 if part.identity.startswith("kicad-"):
                     continue  # Reserved library-pattern namespace, not manufacturer MPNs.
+                if part.family == "screw-terminal":
+                    # A reviewed land pattern is not evidence that its ordering
+                    # code exists in this installation's offline catalog.
+                    row = jlcparts.lookup(part.lcsc) if part.lcsc else None
+                    if (not row or (row.get("model") or "").casefold() != part.identity.casefold()
+                            or (row.get("stock") or 0) <= 0):
+                        continue
                 limits = dict(part.operating_limits or {})
                 ratings = [
                     f"{key.removesuffix('_v').removesuffix('_a').replace('_', ' ')}="
@@ -142,15 +153,42 @@ def reviewed_class_options_block(intent: dict) -> str | None:
             lines.append(
                 f"  {component_class}: " + "; ".join(sorted(options.values())[:6])
             )
+    external = [
+        row for row in intent.get("obligations") or []
+        if isinstance(row, dict) and row.get("kind") == "external_interface"
+    ]
+    for obligation in external:
+        protocol = str(obligation.get("protocol") or "").casefold()
+        for registered in registered_recipes():
+            definition = registered.definition
+            if definition.maturity != "production" or protocol not in definition.external_interface_protocols:
+                continue
+            ports = ", ".join(port.name for port in definition.ports if port.required)
+            lines.append(
+                f"  external interface {protocol}: assign obligation "
+                f"{obligation.get('original_obligation_id')} to family {definition.family} "
+                f"({definition.recipe}); wire required ports {ports}. Preserve the brief's "
+                "current and power-source assumptions. An external load is not an onboard "
+                "physical component; satisfy any separate onboard physical obligation only "
+                "with a construction that actually emits that component."
+            )
+    if terminal_demanded:
+        lines.append(
+            "  screw-terminal construction: leave exact_part null unless the brief requires "
+            "an exact ordering code. A generic contact count can be realized by multiple "
+            "reviewed housings; bind every intended net to its own contiguous pin, and "
+            "undeclared positions remain unconnected. If the brief requires a single "
+            "housing, preserve that requirement and choose a suitable exact part; do not "
+            "substitute a bank. Counts of contacts are not counts of housings."
+        )
     if not lines:
         return None
     return "\n".join(
         [
-            "REVIEWED MANUFACTURER PARTS FOR THE DEMANDED CLASSES: prefer these identities "
-            "with their reviewed symbol/footprint pairs. Generic KiCad library-pattern "
-            "identifiers are not ordering codes: leave exact_part null for an unspecified "
-            "generic component rather than inventing an MPN. A listed contact count must "
-            "match the contacts the requirement declares:",
+            "REVIEWED MANUFACTURER PARTS FOR THE DEMANDED CLASSES: these identities "
+            "have reviewed symbol/footprint pairs; listed screw terminals also have an "
+            "exact matching, in-stock offline catalog row. Leave exact_part null for "
+            "an unspecified generic component; retain any exact part required by the brief.",
             *lines,
         ]
     )

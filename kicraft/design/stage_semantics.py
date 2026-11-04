@@ -203,6 +203,63 @@ def complete_intent_classification(brief: str, candidate: dict) -> dict:
             obligations.append(_board_stackup_obligation(layers))
         completed["obligations"] = obligations
 
+    # A driver for a named off-board load owns the interface, not the load's LEDs.
+    # Only retype an explicitly described strip class when the brief describes a
+    # driver/interface for that strip and identifies a reviewed interface protocol.
+    from kicraft.design.recipes.registry import registered_recipes
+
+    protocols = {
+        protocol
+        for registered in registered_recipes()
+        for protocol in registered.definition.external_interface_protocols
+        if re.search(rf"\b{re.escape(protocol)}\b", brief, re.I)
+    }
+    external_strip = bool(
+        re.search(r"\b(?:driver|interface|controller)\s+(?:board\s+)?for\b[^.;]*\b(?:strip|string)\b", brief, re.I)
+        and not re.search(r"\b(?:on[ -]?board|board[ -]?mounted)\b[^.;]*\b(?:leds?|strip|string)\b", brief, re.I)
+    )
+    if external_strip and len(protocols) == 1:
+        protocol = next(iter(protocols))
+        completed["obligations"] = [
+            {
+                "kind": "external_interface",
+                "original_obligation_id": row["original_obligation_id"],
+                "protocol": protocol,
+            }
+            if isinstance(row, dict)
+            and row.get("kind") == "physical"
+            and re.search(r"\b(?:strip|string)\b", str(row.get("component_class") or "").replace("-", " "), re.I)
+            and row.get("original_obligation_id")
+            else row
+            for row in completed.get("obligations") or []
+        ]
+    obligations = list(completed.get("obligations") or [])
+    jumper_rows = [
+        row for row in obligations
+        if isinstance(row, dict)
+        and row.get("kind") == "physical"
+        and str(row.get("component_class") or "").casefold() == "jumper"
+    ]
+    if (
+        len(jumper_rows) == 1
+        and re.search(r"\b(?:enable[ -]+jumper|jumper[ -]+enable)\b", brief, re.I)
+        and not any(
+            isinstance(row, dict) and row.get("kind") == "adjustability"
+            and str(row.get("mechanism") or "").casefold() == "jumper"
+            and "enable" in str(row.get("parameter") or "").casefold()
+            for row in obligations
+        )
+    ):
+        identifier = f"{jumper_rows[0].get('original_obligation_id', '')}-control"
+        if len(identifier) <= 64 and not any(
+            isinstance(row, dict) and row.get("original_obligation_id") == identifier
+            for row in obligations
+        ):
+            completed["obligations"] = [
+                *obligations,
+                {"kind": "adjustability", "original_obligation_id": identifier,
+                 "parameter": "enable", "mechanism": "jumper"},
+            ]
     normalized_obligations = []
     for obligation in completed.get("obligations") or []:
         # A demanded class that states a board fact (an outline or shape, a mechanical hole, the
@@ -1608,6 +1665,98 @@ def _onboard_relay_supply_diagnostics(requirement: dict, rails: dict) -> list[St
     )]
 
 
+def _linear_regulator_dissipation_diagnostics(upstream: dict, candidate: dict) -> list[StageDiagnostic]:
+    """Reject a proven excess over a reviewed linear regulator's absolute dissipation limit."""
+    from kicraft.design.part_identity import reviewed_part
+
+    rails = _architecture_rail_voltages(candidate)
+    source_rows = {
+        str(row.get("original_obligation_id")): row
+        for slot in ("intent", "functional_spec")
+        for row in (upstream.get(slot) or {}).get("obligations") or []
+        if isinstance(row, dict) and row.get("original_obligation_id")
+    }
+    diagnostics = []
+    for requirement in candidate.get("requirements") or []:
+        if not isinstance(requirement, dict) or requirement.get("role") != "regulator":
+            continue
+        record = reviewed_part(str(requirement.get("exact_part") or ""))
+        if record is None or record.family != "linear-regulator":
+            continue
+        limit = record.operating_limits.get("dissipated_power_limit_w")
+        if not isinstance(limit, (int, float)) or limit <= 0:
+            continue
+        ports = requirement.get("ports") or {}
+        params = requirement.get("parameters") or {}
+        input_values = [rails.get(ports.get("input") or ports.get("vin")), params.get("input_voltage")]
+        output_values = [rails.get(ports.get("output") or ports.get("vout")), params.get("output_voltage")]
+        owned = [source_rows[key] for key in _requirement_obligation_ids(requirement) if key in source_rows]
+        owned.extend(row for row in requirement.get("obligations") or [] if isinstance(row, dict))
+        input_net = ports.get("input") or ports.get("vin")
+        source_voltage_rows = []
+        for source in candidate.get("requirements") or []:
+            if (
+                not isinstance(source, dict)
+                or source.get("role") not in {"power_input", "connector"}
+                or not input_net
+                or input_net not in (source.get("ports") or {}).values()
+            ):
+                continue
+            source_voltage_rows.extend(
+                source_rows[key] for key in _requirement_obligation_ids(source) if key in source_rows
+            )
+            source_voltage_rows.extend(
+                row for row in source.get("obligations") or [] if isinstance(row, dict)
+            )
+        for row in source_voltage_rows:
+            quantity = str(row.get("quantity") or "").casefold()
+            unit = str(row.get("unit") or "").casefold().strip()
+            if (
+                row.get("kind") != "quantitative"
+                or "voltage" not in quantity
+                or not re.search(r"\b(?:input|source|supply|battery|pack|rail)\b", quantity)
+                or unit not in {"v", "mv"}
+            ):
+                continue
+            input_values.extend(
+                value / (1000 if unit == "mv" else 1)
+                for value in (row.get("value"), row.get("minimum"), row.get("maximum"))
+                if isinstance(value, (int, float)) and not isinstance(value, bool)
+            )
+        current_values = []
+        for row in owned:
+            if row.get("kind") != "quantitative":
+                continue
+            quantity = str(row.get("quantity") or "").casefold()
+            unit = str(row.get("unit") or "").casefold().strip()
+            values = [value for value in (row.get("value"), row.get("minimum"), row.get("maximum"))
+                      if isinstance(value, (int, float)) and not isinstance(value, bool)]
+            if "current" in quantity and unit in {"a", "ma"}:
+                current_values.extend(value / (1000 if unit == "ma" else 1) for value in values)
+            if "input" in quantity and "voltage" in quantity and unit in {"v", "mv"}:
+                input_values.extend(value / (1000 if unit == "mv" else 1) for value in values)
+            if "output" in quantity and "voltage" in quantity and unit in {"v", "mv"}:
+                output_values.extend(value / (1000 if unit == "mv" else 1) for value in values)
+        inputs = [float(value) for value in input_values if isinstance(value, (int, float)) and not isinstance(value, bool)]
+        outputs = [float(value) for value in output_values if isinstance(value, (int, float)) and not isinstance(value, bool)]
+        if not inputs or not outputs or not current_values:
+            continue
+        vin, vout, current = max(inputs), min(outputs), max(current_values)
+        loss = max(0.0, vin - vout) * current
+        if loss > float(limit) + 1e-9:
+            evidence = (
+                f"requirement {requirement.get('id')!r}: ({vin:g} V - {vout:g} V) × "
+                f"{current:g} A = {loss:g} W; {record.identity} absolute limit {limit:g} W"
+            )
+            diagnostics.append(_diag(
+                "architecture_linear_regulator_dissipation_exceeded", "repair_required",
+                "The required linear-regulator loss exceeds its reviewed absolute dissipation limit. "
+                "A value below that limit alone would not establish thermal qualification.",
+                [evidence],
+            ))
+    return diagnostics
+
+
 def architecture_power_requirement_diagnostics(
     upstream: dict, candidate: dict
 ) -> list[StageDiagnostic]:
@@ -1621,7 +1770,7 @@ def architecture_power_requirement_diagnostics(
     rails = candidate.get("rail_voltages") or {}
     declared_rails = _architecture_rail_voltages(candidate)
     conversions = _conversion_source_obligations(upstream)
-    diagnostics = []
+    diagnostics = _linear_regulator_dissipation_diagnostics(upstream, candidate)
     for requirement in requirements:
         diagnostics.extend(_onboard_relay_supply_diagnostics(requirement, declared_rails))
         family = _norm_token(requirement.get("family") or "")

@@ -224,12 +224,13 @@ MAX3485_RS485_NODE = _recipe(
 )
 
 DRV8833_DUAL_MOTOR = _recipe(
-    recipe="drv8833-dual-motor@2",
+    recipe="drv8833-dual-motor@3",
     family="dual-dc-motor-driver",
     exact="DRV8833PWPR",
     safety=True,
     ports=(
         Port(name="vm", direction="power"),
+        Port(name="logic_vdd", direction="power"),
         Port(name="gnd", direction="power"),
         *(
             Port(name=name, direction="input")
@@ -254,6 +255,7 @@ DRV8833_DUAL_MOTOR = _recipe(
         _passive("vint_cap", "C", "2.2uF"),
         _passive("sense", "R", "0R", 2),
         _passive("control_pulldown", "R", "100k", 5),
+        _passive("fault_pullup", "R", "10k"),
         _part(
             "motor_terminal", "J", "WJ126V-5.0-2P",
             "screw-terminal-5mm-2p:WJ126V-5.0-2P",
@@ -271,6 +273,8 @@ DRV8833_DUAL_MOTOR = _recipe(
         Pin(role="driver", pin="6", net="bisense"),
         Pin(role="driver", pin="7", net="bout1"),
         Pin(role="driver", pin="8", net="fault_n"),
+        Pin(role="fault_pullup", pin="1", net="fault_n"),
+        Pin(role="fault_pullup", pin="2", net="logic_vdd"),
         Pin(role="driver", pin="9", net="bin1"),
         Pin(role="driver", pin="10", net="bin2"),
         Pin(role="driver", pin="11", net="vcp"),
@@ -315,7 +319,7 @@ DRV8833_DUAL_MOTOR = _recipe(
     assertions=(
         Assertion(
             code="motor_current_thermal_bound",
-            message="Motor stall current, sense configuration, copper area, and bulk capacitance require independent review",
+            message="The exposed pad requires grounded thermal copper; this ordinary-fab footprint has no in-pad vias. Motor stall current, sense configuration, copper area, dissipation, and bulk capacitance require independent review; the package current rating is not a board current guarantee",
         ),
     ),
 )

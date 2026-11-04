@@ -1,5 +1,5 @@
 {
-  "content_hash": "sha256:14f9d0316afdd37e5698b552f506f65c9ebcc4c67b80150d224f33271f069874",
+  "content_hash": "sha256:40247be964fd3d00ec2f294f5fbddc7f25f21a82169791c46787777ad1982fb5",
   "datasheet_url": "https://lcsc.com/product-detail/Motor-Drivers_TI_DRV8833PWP_DRV8833PWP_C50506.html",
   "description": "TI DRV8833 \u2014 dual H-bridge motor driver, 2.7-10.8V motor supply, 1.5A continuous per channel (2A peak). TSSOP-16 package. Low RDS(on) ~550m\u03a9 HS+LS.",
   "footprint_name": "TSSOP-16_L5.0-W4.4-P0.65-LS6.4-BL-EP",
@@ -24,5 +24,5 @@
     "h-bridge"
   ],
   "version": "0.1.0",
-  "watch_out_for": "Dual H-bridge: nSLEEP needs a pull-up to enable; AISEN/BISEN to GND (or sense R); 2.7-10.8V motor supply."
+  "watch_out_for": "Dual H-bridge: nSLEEP needs a pull-up to enable; AISEN/BISEN to GND (or sense R); 2.7-10.8V motor supply. The exposed pad has no in-pad thermal holes; connect it to ground copper and assess thermal performance for the actual load. Package current ratings do not establish board current capability."
 }

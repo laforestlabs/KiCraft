@@ -448,6 +448,21 @@ class PhysicalObligation(BaseModel):
         return value.strip().casefold().replace("_", "-") if isinstance(value, str) else value
 
 
+class ExternalInterfaceObligation(BaseModel):
+    """A board-side interface to an external load, not an onboard component."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["external_interface"]
+    original_obligation_id: str = Field(pattern=r"^[a-z][a-z0-9_-]{0,63}$")
+    protocol: str = Field(min_length=1, description="External load interface protocol, e.g. ws2812.")
+
+    @field_validator("protocol", mode="before")
+    @classmethod
+    def _canonical_protocol(cls, value: object) -> object:
+        return value.strip().casefold().replace("_", "-") if isinstance(value, str) else value
+
+
 class QuantityObligation(BaseModel):
     """A required number of independently present implementation items."""
 
@@ -712,6 +727,7 @@ def obligation_requires_requirement_owner(obligation: object) -> bool:
 
 RequirementObligation = Annotated[
     PhysicalObligation
+    | ExternalInterfaceObligation
     | QuantityObligation
     | AdjustabilityObligation
     | ConversionObligation
@@ -1017,6 +1033,17 @@ class Architecture(BaseModel):
 # ---------- Stage 4: BOM ----------
 
 
+class BOMAccessory(BaseModel):
+    """A procured, non-placeable accessory fitted to each owning PCB part."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mpn: str = Field(min_length=1)
+    lcsc: str = Field(min_length=1)
+    quantity: int = Field(default=1, gt=0)
+    datasheet: str | None = None
+
+
 class BomPart(BaseModel):
     """One placeable component."""
 
@@ -1030,6 +1057,8 @@ class BomPart(BaseModel):
     mpn: str | None = None
     datasheet: str | None = None
     sourcing_note: str | None = None
+    # Quantity is per owning part; accessories are procured, not placed on the PCB.
+    accessories: tuple[BOMAccessory, ...] = ()
     # Which copper side the part mounts on. "back" places it on B.Cu (the
     # footprint is flipped at stamp time); None/"front" is the default F.Cu.
     # Set "back" for back-mounted parts (e.g. a "header on the back side").

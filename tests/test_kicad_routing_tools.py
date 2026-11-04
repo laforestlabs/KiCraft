@@ -710,8 +710,29 @@ assert (600, 200) in c.vias       # authored keepout survives
     via.SetNetCode(1)
     board.Add(via)
     board.Save(str(staged))
-    with pytest.raises(RuntimeError, match="Via drill intersects assembly mask"):
-        rb._reject_vias_in_assembly_openings(staged)
+    with pytest.raises(RuntimeError, match="Drill intersects assembly mask or paste"):
+        rb._reject_drills_in_assembly_openings(staged)
+
+
+def test_assembly_drill_guard_rejects_footprint_hole_in_smd_land(tmp_path):
+    pytest.importorskip("pcbnew")
+    board = tmp_path / "thermal-hole.kicad_pcb"
+    board.write_text("""(kicad_pcb (version 20240108) (generator pcbnew)
+  (general (thickness 1.6))
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal)
+          (36 "B.SilkS" user "b.silkscreen") (37 "F.SilkS" user "f.silkscreen")
+          (38 "B.Mask" user) (39 "F.Mask" user) (35 "F.Paste" user))
+  (net 0 "") (net 1 "GND")
+  (footprint "Test:Driver" (layer "F.Cu") (at 10 10)
+    (property "Reference" "U1" (at 0 0) (layer "F.SilkS"))
+    (property "Value" "Driver" (at 0 0) (layer "F.Fab"))
+    (pad "17" smd rect (at 0 0) (size 2.74 2.74)
+      (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "GND"))
+    (pad "17" thru_hole circle (at 0.5 0.5) (size 0.61 0.61) (drill 0.3)
+      (layers "*.Cu" "*.Mask") (net 1 "GND"))))
+""")
+    with pytest.raises(RuntimeError, match="U1.17 drill -> U1.17"):
+        rb._reject_drills_in_assembly_openings(board)
 
 
 def test_krt_command_passes_configured_grid_step(tmp_path):

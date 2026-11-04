@@ -394,6 +394,30 @@ def test_unowned_enable_jumper_obligation_produces_one_safe_targeted_control_cir
     architecture = derive_architecture(completed)
     assert _requirement(architecture, "buck").ports["enable"] == "BUCK_ENABLE_JUMPER"
 
+def test_misowned_physical_enable_jumper_is_separate_from_converter():
+    from kicraft.design.architecture_intent import complete_architecture_payload
+    from kicraft.design.lowering import lower_requirement
+
+    intent = _hub75_intent()
+    buck = next(row for row in intent["requirements"] if row["id"] == "buck")
+    buck["obligation_ids"] = ["enable", "enable-control"]
+    intent["obligations"] = [
+        {"kind": "physical", "original_obligation_id": "enable", "component_class": "jumper"},
+        {"kind": "adjustability", "original_obligation_id": "enable-control",
+         "parameter": "enable", "mechanism": "jumper"},
+    ]
+    completed = complete_architecture_payload(intent)
+    assert "enable" not in buck["obligation_ids"]
+    architecture = derive_architecture(completed)
+    control = _requirement(architecture, "enable-control")
+    assert {row.original_obligation_id for row in control.obligations} == {"enable", "enable-control"}
+    assert _requirement(architecture, "buck").ports["enable"] == control.ports["signal"]
+    artifact = lower_requirement(control)
+    assert {(pin.role, pin.net) for pin in artifact.pins} >= {
+        ("jumper", control.ports["signal"]), ("jumper", "VBUS"),
+        ("pulldown", "GND"), ("pulldown", control.ports["signal"]),
+    }
+
 
 def _high_voltage_enable_intent() -> dict:
     return {
@@ -4320,3 +4344,82 @@ def test_conditioner_supply_return_cannot_become_an_external_sensor_signal():
         row.requirement_id == "afe" and row.code == "conflicting_port_binding"
         for row in exc.value.diagnostics
     )
+
+def test_external_interface_requires_reviewed_construction_and_bound_ports():
+    intent = _one_part_intent({
+        "id": "strip", "role": "driver", "family": "ws2812-external-strip",
+        "supply": "+5V", "obligation_ids": ["load"],
+    }, signals=[{"name": "DATA", "from": "input.pin3", "to": "strip.data_in"}])
+    intent["obligations"] = [{
+        "kind": "external_interface", "original_obligation_id": "load", "protocol": "ws2812",
+    }]
+    architecture = derive_architecture(intent)
+    assert _requirement(architecture, "strip").ports == {
+        "vdd_5v": "+5V", "gnd": "GND", "data_in": "DATA",
+    }
+    intent["obligations"][0]["protocol"] = "unsupported-protocol"
+    with pytest.raises(ArchitectureIntentError) as exc:
+        derive_architecture(intent)
+    assert any(row.code == "external_interface_unrealized" for row in exc.value.diagnostics)
+
+
+def test_explicit_input_contact_supplies_unsourced_rail_but_ambiguous_inputs_do_not():
+    from kicraft.design.architecture_intent import complete_architecture_payload
+
+    payload = {
+        "power": {"rails": {"VBAT": {"voltage": 7.4, "from": None}}},
+        "requirements": [
+            {"id": "battery", "role": "power_input", "family": "screw-terminal",
+             "ties": {"positive": "VBAT", "negative": "GND"}},
+        ],
+    }
+    completed = complete_architecture_payload(payload)
+    assert completed["power"]["rails"]["VBAT"]["from"] == "battery.positive"
+    completed["power"]["rails"]["VBAT"]["from"] = None
+    completed["requirements"].append({
+        "id": "other", "role": "power_input", "family": "screw-terminal",
+        "ties": {"positive": "VBAT", "negative": "GND"},
+    })
+    assert complete_architecture_payload(completed)["power"]["rails"]["VBAT"]["from"] is None
+
+def test_connector_signal_preserves_source_before_enable_control_is_completed():
+    from kicraft.design.architecture_intent import complete_architecture_payload
+
+    intent = _one_part_intent({
+        "id": "buck", "role": "regulator", "family": "tlv62569-3v3",
+        "supply": "+5V", "obligation_ids": ["enable", "enable-control"],
+    }, signals=[{"name": "HOST", "from": "input.pin1", "to": "buck.input"}])
+    intent["power"]["rails"]["+5V"]["from"] = None
+    intent["obligations"] = [
+        {"kind": "physical", "original_obligation_id": "enable", "component_class": "jumper"},
+        {"kind": "adjustability", "original_obligation_id": "enable-control",
+         "parameter": "enable", "mechanism": "jumper"},
+    ]
+    completed = complete_architecture_payload(intent)
+    assert completed["power"]["rails"]["+5V"]["from"] == "input.pin1"
+    control = next(row for row in completed["requirements"] if row["id"] == "enable-control")
+    assert set(control["obligation_ids"]) == {"enable", "enable-control"}
+    assert any(row["from"] == "enable-control.signal" and row["to"] == "buck.enable"
+               for row in completed["signals"])
+
+
+def test_motor_logic_supply_uses_connected_mcu_rail_not_motor_supply():
+    from kicraft.design.architecture_intent import complete_architecture_payload
+
+    payload = {
+        "power": {"rails": {"VBAT": {"voltage": 6}, "LOGIC": {"voltage": 3.3}}},
+        "requirements": [
+            {"id": "mcu", "sheet": "MCU", "role": "mcu_core",
+             "family": "esp32-s3-wroom-1-module", "supply": "LOGIC"},
+            {"id": "drv", "sheet": "MOTOR", "role": "driver",
+             "family": "dual-dc-motor-driver", "supply": "VBAT"},
+        ],
+        "signals": [{"name": "CMD", "from": "mcu.output_cmd", "to": "drv.ain1"}],
+    }
+    completed = complete_architecture_payload(payload)
+    assert completed["requirements"][1]["supply_bindings"]["logic_vdd"] == "LOGIC"
+    completed["requirements"][1].pop("supply_bindings")
+    completed["requirements"].append({"id": "mcu2", "sheet": "MCU2", "role": "mcu_core",
+                                       "family": "esp32-s3-wroom-1-module", "supply": "VBAT"})
+    completed["signals"].append({"name": "CMD2", "from": "mcu2.output_cmd", "to": "drv.ain2"})
+    assert "logic_vdd" not in complete_architecture_payload(completed)["requirements"][1].get("supply_bindings", {})

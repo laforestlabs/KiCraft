@@ -144,7 +144,8 @@ def test_ambiguous_legacy_architecture_can_be_repaired_without_mutating_saved_st
 
 
 @pytest.mark.parametrize("recipe", [
-    "rp2040-minimal@1", "rp2040-minimal@2", "drv8833-dual-motor@1",
+    "rp2040-minimal@1", "rp2040-minimal@2", "drv8833-dual-motor@1", "drv8833-dual-motor@2",
+    "esp32-c3-mini-1-minimal@1", "esp32-c3-mini-1-h4x-minimal@1",
     "tps54331-adjustable@1", "tps54331-12v-1a@1",
 ])
 @pytest.mark.parametrize("location", ["manifest", "part"])
@@ -1237,6 +1238,31 @@ def _commit_chain_through_arch(tmp_path, capsys) -> Path:
         )
         assert rc == 0, payload
     return state_path
+
+def test_architecture_commit_preserves_constructed_gate_offenders(tmp_path, capsys, monkeypatch):
+    from kicraft.server import stage_contracts
+
+    state_path = tmp_path / "state.json"
+    for stage, data in (("intent", _valid_intent()), ("functional_spec", _valid_functional_spec())):
+        slot = _write_slot(tmp_path, stage, data)
+        rc, result = _run(capsys, "stage-commit", stage, "--slot-file", str(slot),
+                          "--project-stem", "TEST", "--no-archive", str(state_path))
+        assert rc == 0, result
+
+    def reject(*args, **kwargs):
+        raise stage_contracts.StageSchemaError("Constructed circuit violates 9.39", diagnostic={
+            "code": "constructed_circuit_invalid",
+            "findings": [{"gate_codes": ["9.39"],
+                          "evidence": ["E_POWER_TRANSFER 'buck': no path from VIN to VOUT"]}],
+        })
+
+    monkeypatch.setattr(stage_contracts, "_validate_constructed_architecture", reject)
+    slot = _write_slot(tmp_path, "architecture", _valid_architecture())
+    rc, result = _run(capsys, "stage-commit", "architecture", "--slot-file", str(slot),
+                      "--project-stem", "TEST", "--no-archive", str(state_path))
+    assert rc != 0
+    assert result["offenders"] == ["E_POWER_TRANSFER 'buck': no path from VIN to VOUT"]
+
 
 
 def test_stage_commit_bom_rejects_unknown_architecture_sheet(tmp_path, capsys):

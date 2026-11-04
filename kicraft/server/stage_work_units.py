@@ -1316,6 +1316,8 @@ def deterministic_bom_candidate(
                         **({"mpn": group.mpn} if group.mpn else {}),
                         **({"datasheet": group.datasheet} if group.datasheet else {}),
                         **({"sourcing_note": group.sourcing_note} if group.sourcing_note else {}),
+                        **({"accessories": [item.model_dump() for item in group.accessories]}
+                           if group.accessories else {}),
                     }
                     for group in artifact.groups
                 ],
@@ -1645,6 +1647,7 @@ def _compiler_lowerer_matches(group: BomComponentGroup, requirements) -> list[tu
             and candidate.symbol == group.symbol
             and candidate.footprint == group.footprint
             and candidate.mpn == group.mpn
+            and candidate.accessories == group.accessories
             and str(requirement.get("sheet")) == group.sheet
             for candidate in artifact.groups
         ):
@@ -2385,7 +2388,10 @@ def _validate_bom_unit(
                 )
         raise WorkUnitValidationError(unit.unit_id, defects)
     return {
-        "groups": [group.model_dump(exclude_none=True) for group in groups],
+        "groups": [
+            group.model_dump(exclude_none=True, exclude=set() if group.accessories else {"accessories"})
+            for group in groups
+        ],
         "arrays": [array.model_dump(exclude_none=True) for array in arrays],
         "assumptions": list(dict.fromkeys(assumptions)),
         "substitutions": list(payload.get("substitutions") or []),

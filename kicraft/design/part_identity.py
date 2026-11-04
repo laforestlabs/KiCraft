@@ -476,13 +476,12 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
         )
         for count, lcsc in ((2, "C541849"), (4, "C541851"), (8, "C46595973"))
     ),
-    # A fitted Samtec SNT-100-BK-G shunt joins contacts 1 and 2; removing it leaves them open.
-    # The shunt is a hand-fitted accessory, so only its mating header has a PCB footprint and the
-    # lowerer carries the fitted-accessory MPN in its assembly note.
+    # Samtec's SNT shunt drawing specifies TSW mating, 0.64 mm square posts,
+    # and 4.32 mm minimum insertion; TSW -07 supplies a 5.84 mm mating post.
     ReviewedPart(
         identity="tsw-102-07-g-s",
         family="jumper-header",
-        package="Samtec TSW 1x02, 2.54 mm through-hole header for SNT-100-BK-G removable shunt",
+        package="Samtec TSW 1x02, 2.54 mm through-hole header for an SNT removable shunt",
         bundle="kicad-standard",
         symbol="Connector_Generic:Conn_01x02",
         footprint="Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical",
@@ -490,12 +489,13 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
         contacts=("1", "2"),
         manufacturer_sources=(
             "https://www.samtec.com/products/tsw-102-07-g-s",
-            "https://www.samtec.com/products/snt-100-bk-g",
+            "https://www.lcsc.com/datasheet/C6680974.pdf",
         ),
+        lcsc="C7402729",
         port_pins={"signal": "1", "selected_level": "2"},
         support_network={
-            "fitted_accessory_mpn": "SNT-100-BK-G",
-            "fitted_accessory": "removable 2.54 mm shunt; fitted=closed, removed=open",
+            "fitted_accessory_mpn": "SNT-100-BL-G",
+            "fitted_accessory": "Samtec C6680974 blue removable 2.54 mm shunt; fitted=closed, removed=open",
         },
     ),
     ReviewedPart(
@@ -1689,14 +1689,16 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
     ReviewedPart(
         identity="sn74hct245pwr-jsm",
         family="logic-level-translator",
-        package="Texas Instruments SN74HCT245PWR 20-pin TSSOP octal bus transceiver",
+        package="JSMSEMI SN74HCT245PWR-JSM 20-pin TSSOP octal bus transceiver",
         bundle="sn74hct245",
         symbol="sn74hct245:SN74HCT245PWR-JSM",
         footprint="sn74hct245:TSSOP-20_L6.5-W4.4-P0.65-LS6.4-BL",
         physical_features=frozenset({"logic-level-translator", "hct-buffer"}),
         contacts=tuple(str(pin) for pin in range(1, 21)),
-        manufacturer_sources=("https://www.ti.com/lit/ds/symlink/sn74hct245.pdf",),
-        lcsc="C2655",
+        # JSMSEMI V1.0 pp. 3-4: TTL thresholds at VCC 4.5-5.5 V;
+        # p. 8: TSSOP-20, 6.40-6.60 x 4.30-4.50 mm, 0.65 mm pitch.
+        manufacturer_sources=("https://www.lcsc.com/datasheet/C53436288.pdf",),
+        lcsc="C53436288",
         operating_limits={
             "supply_min_v": 4.5, "supply_max_v": 5.5,
             "input_high_min_v": 2.0, "input_low_max_v": 0.8,
@@ -2810,6 +2812,9 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
             "input_voltage_max_v": 6.0,
             "output_voltage_v": 3.3,
             "output_current_a": 0.5,
+            # Microne V14 p. 5 absolute maximum for SOT23; the source
+            # specifies no board/ambient conditions or thermal derating.
+            "dissipated_power_limit_w": 0.3,
             # ME6211 V14, C33 electrical-characteristics test conditions.
             # These qualify nominal voltage, not the typical 500 mA headline.
             "regulated_input_min_v": 4.3,

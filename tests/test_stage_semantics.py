@@ -4186,3 +4186,70 @@ def test_a_class_the_brief_brands_with_a_participle_must_be_recorded():
             candidate=plain,
         )
     }
+
+def test_external_load_intent_is_not_an_onboard_led_and_preserves_source_id():
+    from kicraft.design.stage_semantics import complete_intent_classification
+
+    candidate = {"obligations": [{
+        "kind": "physical", "original_obligation_id": "load",
+        "component_class": "addressable-led-strip",
+    }]}
+    brief = "A driver board for a WS2812 addressable LED strip."
+    completed = complete_intent_classification(brief, candidate)
+    assert completed["obligations"] == [{
+        "kind": "external_interface", "original_obligation_id": "load", "protocol": "ws2812",
+    }]
+    onboard = complete_intent_classification(
+        "A driver board for a WS2812 strip with onboard LEDs.", candidate,
+    )
+    assert onboard["obligations"][0]["kind"] == "physical"
+
+
+def test_physical_enable_jumper_retains_physical_and_control_demands():
+    from kicraft.design.stage_semantics import complete_intent_classification
+
+    completed = complete_intent_classification(
+        "A regulator board with an enable jumper.",
+        {"obligations": [{"kind": "physical", "original_obligation_id": "en",
+                           "component_class": "jumper"}]},
+    )
+    assert completed["obligations"] == [
+        {"kind": "physical", "original_obligation_id": "en", "component_class": "jumper"},
+        {"kind": "adjustability", "original_obligation_id": "en-control",
+         "parameter": "enable", "mechanism": "jumper"},
+    ]
+
+def test_linear_regulator_absolute_dissipation_refuses_proven_overload():
+    from kicraft.design.stage_semantics import architecture_power_requirement_diagnostics
+
+    candidate = {
+        "rail_voltages": {"VIN": 5.0, "VOUT": 3.3},
+        "requirements": [{
+            "id": "reg", "sheet": "POWER", "role": "regulator",
+            "family": "me6211-3v3", "exact_part": "ME6211C33M5G-N",
+            "ports": {"input": "VIN", "output": "VOUT", "gnd": "GND"},
+            "obligations": [{"kind": "quantitative", "original_obligation_id": "current",
+                             "quantity": "output current rating", "relation": "equal",
+                             "value": 0.5, "unit": "A"}],
+        }],
+    }
+    issues = architecture_power_requirement_diagnostics({}, candidate)
+    assert any(issue.code == "architecture_linear_regulator_dissipation_exceeded" for issue in issues)
+    candidate["requirements"][0]["obligations"][0]["value"] = 0.1
+    issues = architecture_power_requirement_diagnostics({}, candidate)
+    assert not any(issue.code == "architecture_linear_regulator_dissipation_exceeded" for issue in issues)
+    candidate["rail_voltages"]["VIN"] = 3.5
+    candidate["requirements"][0]["obligations"][0]["value"] = 0.5
+    candidate["requirements"].append({
+        "id": "source", "sheet": "POWER", "role": "power_input",
+        "family": "pin-header", "ports": {"pin1": "VIN"},
+        "obligations": [{"kind": "quantitative", "original_obligation_id": "vin-range",
+                         "quantity": "input voltage", "relation": "range",
+                         "minimum": 3.5, "maximum": 5.0, "unit": "V"}],
+    })
+    issues = architecture_power_requirement_diagnostics({}, candidate)
+    assert any(issue.code == "architecture_linear_regulator_dissipation_exceeded" for issue in issues)
+    candidate["requirements"][0]["exact_part"] = "TLV62569DBVR"
+    candidate["requirements"][0]["obligations"][0]["value"] = 0.5
+    issues = architecture_power_requirement_diagnostics({}, candidate)
+    assert not any(issue.code == "architecture_linear_regulator_dissipation_exceeded" for issue in issues)

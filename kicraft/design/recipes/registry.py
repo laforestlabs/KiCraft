@@ -160,6 +160,16 @@ def migrate_recipe_selection(value: object) -> RecipeSelection:
         for name, choices in definition.allowed_parameters.items():
             if name in selection.parameters and selection.parameters[name] not in choices:
                 raise ValueError(f"saved {selection.recipe} has unsupported {name!r}")
+        if selection.recipe.startswith("drv8833-dual-motor@"):
+            missing = [
+                port.name for port in definition.ports
+                if port.required and not selection.port_bindings.get(port.name)
+            ]
+            if missing:
+                raise ValueError(
+                    f"saved {selection.recipe} lacks required replacement ports {missing}; "
+                    "regenerate architecture rather than inventing their rails"
+                )
         return selection.model_copy(update={"recipe": replacement})
     if selection.recipe not in {"rp2040-minimal@1", "rp2040-minimal@2"}:
         return selection

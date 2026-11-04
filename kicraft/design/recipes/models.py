@@ -133,6 +133,9 @@ class RecipeDefinition(BaseModel):
         default_factory=dict
     )
     ports: tuple[RecipePort, ...] = ()
+    # Reviewed protocols served by a physical external interface, not merely
+    # by an onboard load or an arbitrary part name.
+    external_interface_protocols: tuple[str, ...] = ()
     # Optional MCU-only mapping for ports whose documented peripheral function
     # is selected only when the architecture binds it.  The allocator reserves
     # these pads only for bound ports, so a muxed ADC/GPIO function can remain

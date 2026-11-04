@@ -2217,3 +2217,40 @@ def test_declared_interface_keeps_exact_flash_variant_not_a_deviation(requested,
         SimpleNamespace(requirements=[requirement]), bom,
     )
     assert result.ok is accepted
+
+def test_external_interface_requires_complete_reviewed_recipe_graph():
+    from kicraft.design.models import CircuitRequirement, ExternalInterfaceObligation, RecipeSelection
+    from kicraft.design.recipes.registry import expand_recipe
+
+    ports = {"vdd_5v": "V5", "gnd": "GND", "data_in": "DATA"}
+    expansion = expand_recipe(RecipeSelection(
+        recipe="ws2812-external-strip-interface@1", instance="strip",
+        sheets={"interface": "STRIP"}, port_bindings=ports, requirement_ids=["strip"],
+    ))
+    requirement = CircuitRequirement(
+        id="strip", sheet="STRIP", role="driver", family="ws2812-external-strip",
+        ports=ports, obligations=[ExternalInterfaceObligation(
+            kind="external_interface", original_obligation_id="load", protocol="ws2812",
+        )],
+    )
+    architecture = SimpleNamespace(requirements=[requirement])
+
+    def candidate(parts, connections):
+        return SimpleNamespace(parts=parts, connections=connections,
+                               no_connect_pins=expansion.no_connect_pins,
+                               recipe_ownership=[expansion.ownership])
+
+    check = validation.check_requirement_physical_realization
+    assert check(architecture, candidate(expansion.parts, expansion.connections)).ok
+    missing_resistor = [part for part in expansion.parts if part.recipe_role != "series_resistor"]
+    assert not check(architecture, candidate(missing_resistor, expansion.connections)).ok
+    wrong_binding = requirement.model_copy(update={"ports": {**ports, "data_in": "OTHER"}})
+    assert not check(SimpleNamespace(requirements=[wrong_binding]),
+                     candidate(expansion.parts, expansion.connections)).ok
+    from kicraft.design.models import PhysicalObligation
+    onboard = requirement.model_copy(update={"obligations": [
+        PhysicalObligation(kind="physical", original_obligation_id="onboard-led",
+                           component_class="addressable-led")
+    ]})
+    assert not check(SimpleNamespace(requirements=[onboard]),
+                     candidate(expansion.parts, expansion.connections)).ok

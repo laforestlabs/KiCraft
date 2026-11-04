@@ -690,8 +690,8 @@ if removed:
     run_pcbnew_script(script)
 
 
-def _reject_vias_in_assembly_openings(board_path: Path) -> None:
-    """Guard against router passes that bypass staged via rule areas."""
+def _reject_drills_in_assembly_openings(board_path: Path) -> None:
+    """Reject via and footprint drills through ordinary assembly openings."""
     from kicraft.autoplacer.routing_board import run_pcbnew_script
 
     script = f"""
@@ -718,10 +718,38 @@ for item in board.GetTracks():
                 for layer in (pcbnew.F_Mask, pcbnew.B_Mask)
                 if pad.IsOnLayer(layer)
             ]
-            if expansions and pad.HitTest(item.GetPosition(), radius + max(0, *expansions)):
+            has_paste = any(pad.IsOnLayer(layer) for layer in (pcbnew.F_Paste, pcbnew.B_Paste))
+            if (expansions or has_paste) and pad.HitTest(
+                item.GetPosition(), radius + max([0] + expansions)
+            ):
                 violations.append(fp.GetReference() + "." + pad.GetNumber())
+for hole_fp in board.Footprints():
+    for hole in hole_fp.Pads():
+        drill = hole.GetDrillSize()
+        if drill.x <= 0 and drill.y <= 0:
+            continue
+        # A circumscribing circle is conservative for slotted drills.
+        radius = (max(drill.x, drill.y) + 1) // 2
+        for fp in board.Footprints():
+            for pad in fp.Pads():
+                if pad.GetAttribute() not in (pcbnew.PAD_ATTRIB_SMD, pcbnew.PAD_ATTRIB_CONN):
+                    continue
+                if (hole.GetNetCode() != 0 and hole.GetNetCode() == pad.GetNetCode()
+                        and _authorized_thermal_pad(fp, pad)):
+                    continue
+                layers = (pcbnew.F_Mask, pcbnew.B_Mask)
+                expansions = [pad.GetSolderMaskExpansion(layer) for layer in layers
+                              if pad.IsOnLayer(layer)]
+                has_paste = any(pad.IsOnLayer(layer) for layer in (pcbnew.F_Paste, pcbnew.B_Paste))
+                if (expansions or has_paste) and pad.HitTest(
+                    hole.GetPosition(), radius + max([0] + expansions)
+                ):
+                    violations.append(
+                        hole_fp.GetReference() + "." + hole.GetNumber() + " drill -> "
+                        + fp.GetReference() + "." + pad.GetNumber()
+                    )
 if violations:
-    raise RuntimeError("Via drill intersects assembly mask opening(s): " + ", ".join(violations))
+    raise RuntimeError("Drill intersects assembly mask or paste opening(s): " + ", ".join(violations))
 """
     run_pcbnew_script(script)
 
@@ -788,6 +816,7 @@ def route_with_kicad_routing_tools(
     pad_via_keepouts = None
     pad_via_zone_name = f"{_PAD_VIA_KEEPOUT_ZONE_NAME} {uuid.uuid4().hex}"
     if _board_has_assembly_pads(router_input):
+        _reject_drills_in_assembly_openings(router_input)
         pad_via_keepouts = _stamp_pad_via_keepouts(router_input, pad_via_zone_name)
         _propagate_sibling_project_rules(
             str(source_project.with_suffix(".kicad_pcb")), str(router_input)
@@ -855,7 +884,7 @@ def route_with_kicad_routing_tools(
         )
 
     if pad_via_keepouts is not None:
-        _reject_vias_in_assembly_openings(output_board)
+        _reject_drills_in_assembly_openings(output_board)
 
     output_copper = import_routed_copper(str(output_board))
     preservation = {

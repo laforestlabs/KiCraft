@@ -4323,6 +4323,13 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
             print(json.dumps({
                 "ok": False,
                 "errors": [str(exc)],
+                "offenders": [
+                    evidence
+                    for finding in (exc.diagnostic or {}).get("findings", [])
+                    if isinstance(finding, dict)
+                    for evidence in finding.get("evidence", [])
+                    if isinstance(evidence, str)
+                ],
                 "diagnostics": [exc.diagnostic] if exc.diagnostic else [],
             }, indent=2))
             return 3
@@ -4630,6 +4637,12 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
             named_parts=tuple(getattr(state.intent, "named_parts", ()) or ()),
             brief=brief_text,
         )
+        from kicraft.design.sourcing_policy import validate_bom_accessories
+
+        accessory_bad, accessory_receipt = validate_bom_accessories(
+            state.bom, state.architecture)
+        bad_mpn.extend(accessory_bad)
+        sourcing_receipt.extend(accessory_receipt)
         if bad_mpn:
             print(
                 json.dumps(

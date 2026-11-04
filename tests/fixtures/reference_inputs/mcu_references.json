@@ -4343,7 +4343,7 @@
               {
                 "kind": "artifact",
                 "source_url": "kicraft/design/recipes/wave_c_interfaces.py",
-                "section": "drv8833-dual-motor@1 (family dual-dc-motor-driver, exact DRV8833PWPR) is the reviewed recipe for both motor-driver requirements drv1 and drv2",
+                "section": "drv8833-dual-motor@3 (family dual-dc-motor-driver, exact DRV8833PWPR) is the reviewed recipe for both motor-driver requirements drv1 and drv2",
                 "path": "kicraft/design/recipes/wave_c_interfaces.py"
               },
               {
@@ -4817,10 +4817,11 @@
               "role": "driver",
               "family": "dual-dc-motor-driver",
               "parameters": {
-                "expected_recipe": "drv8833-dual-motor@1"
+                "expected_recipe": "drv8833-dual-motor@3"
               },
               "ports": {
                 "vm": "VBAT",
+                "logic_vdd": "3V3",
                 "gnd": "GND",
                 "ain1": "M1_AIN1",
                 "ain2": "M1_AIN2",
@@ -4845,10 +4846,11 @@
               "role": "driver",
               "family": "dual-dc-motor-driver",
               "parameters": {
-                "expected_recipe": "drv8833-dual-motor@1"
+                "expected_recipe": "drv8833-dual-motor@3"
               },
               "ports": {
                 "vm": "VBAT",
+                "logic_vdd": "3V3",
                 "gnd": "GND",
                 "ain1": "M2_AIN1",
                 "ain2": "M2_AIN2",
@@ -6202,7 +6204,7 @@
               "role": "mcu_core",
               "family": "esp32-c3-mini-1-module",
               "parameters": {
-                "expected_recipe": "esp32-c3-mini-1-minimal@1",
+                "expected_recipe": "esp32-c3-mini-1-minimal@2",
                 "native_usb": true
               },
               "ports": {
@@ -6428,7 +6430,7 @@
           "arrays": [],
           "substitutions": [],
           "assumptions": [
-            "Every part is owned deterministically: esp32-c3-mini-1-minimal@1 supplies the ESP32-C3-MINI-1-N4 module (flash in package) with its bulk/local/EN decoupling, the EN pull-up and the BOOT/RESET controls; tlv62569-3v3@1 supplies the TLV62569DBVR 2.5-5.5 V to 3.3 V/2 A buck with its 4.7 uH switch inductor, 10 uF input and 22 uF output capacitors and the 100k/22k feedback divider; usb-c-usb2-device@1 supplies the TYPE-C-31-M-12 receptacle with the 5.1k CC pulldowns, the USBLC6-2SC6 ESD array and the 22R USB series pair; pin-header@1 lowers the 2x10 0.1-inch GPIO header. The model authors no groups, and the wiring stage assigns no model-owned pins."
+            "Every part is owned deterministically: esp32-c3-mini-1-minimal@2 supplies the ESP32-C3-MINI-1-N4 module (flash in package) with its bulk/local/EN decoupling, the EN pull-up and the BOOT/RESET controls; tlv62569-3v3@1 supplies the TLV62569DBVR 2.5-5.5 V to 3.3 V/2 A buck with its 4.7 uH switch inductor, 10 uF input and 22 uF output capacitors and the 100k/22k feedback divider; usb-c-usb2-device@1 supplies the TYPE-C-31-M-12 receptacle with the 5.1k CC pulldowns, the USBLC6-2SC6 ESD array and the 22R USB series pair; pin-header@1 lowers the 2x10 0.1-inch GPIO header. The model authors no groups, and the wiring stage assigns no model-owned pins."
           ]
         },
         "wiring_candidate": {

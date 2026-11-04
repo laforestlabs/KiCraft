@@ -14,8 +14,8 @@ from typing import Callable, Literal, Mapping
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from kicraft.design.models import CircuitRequirement, JsonScalar, RequirementObligation
-from kicraft.design.part_identity import reviewed_part
+from kicraft.design.models import BOMAccessory, CircuitRequirement, JsonScalar, RequirementObligation
+from kicraft.design.part_identity import quantity_subject_binds, reviewed_part
 
 
 class LoweringArray(BaseModel):
@@ -52,6 +52,8 @@ class LoweringGroup(BaseModel):
     mpn: str | None = None
     datasheet: str | None = None
     sourcing_note: str | None = None
+    # Hand-fitted, non-PCB items purchased with each instance of this part.
+    accessories: tuple[BOMAccessory, ...] = ()
     # Board-fabricated copper features remain on the PCB but are omitted from
     # assembly BOM and position exports.
     assembly: bool = True
@@ -1345,25 +1347,29 @@ def _connector(
             _, mpn, symbol, footprint = selected
             value = mpn
         else:
-            # Generic terminals use reviewed, orderable blocks, never an
-            # unbound stock land pattern as if it were a supplier identity.
-            default_identity = (
-                "WJ126V-5.0-02P-14-00A" if count % 2 == 0
-                else "WJ126V-5.0-03P-14-00A" if count % 3 == 0
-                else None
+            # A quantity obligation counts positions, not housings. Preserve any
+            # contacts without declared nets as explicit no-connects rather than
+            # inventing signals. The exact-part branch above never substitutes a
+            # different housing for a pinned ordering code.
+            positions = max(
+                (row.minimum for row in requirement.obligations
+                 if row.kind == "quantity"
+                 and quantity_subject_binds(row.subject, _SCREW_TERMINAL_FAMILY)),
+                default=count,
             )
-            selected = _reviewed_terminal_part(default_identity) if default_identity else None
-            if selected is not None:
-                block_contacts, mpn, symbol, footprint = selected
-                blocks = count // block_contacts
-                value = mpn
-            else:
-                symbol = f"Connector:Screw_Terminal_01x{count:02d}"
-                footprint = (
-                    f"TerminalBlock_Phoenix:TerminalBlock_Phoenix_MKDS-1,5-{count}_1x{count:02d}"
-                    "_P5.00mm_Horizontal"
-                )
-                value = f"ScrewTerminal_1x{count:02d}"
+            positions = max(count, positions)
+            default_identity = (
+                "WJ126V-5.0-03P-14-00A" if positions % 3 == 0 and positions % 2
+                else "WJ126V-5.0-02P-14-00A"
+            )
+            selected = _reviewed_terminal_part(default_identity)
+            if selected is None:
+                raise ValueError("the reviewed generic screw terminal is unavailable")
+            block_contacts, mpn, symbol, footprint = selected
+            blocks = -(-positions // block_contacts)
+            if blocks > 500:
+                raise ValueError("the screw-terminal bank exceeds 500 housings")
+            value = mpn
     else:
         gender = str(requirement.parameters.get("gender", "male")).lower()
         if gender not in ("male", "female"):
@@ -2326,8 +2332,12 @@ def _switch_input(requirement: CircuitRequirement) -> LoweringArtifact | None:
             symbol=record.symbol,
             footprint=record.footprint,
             mpn=identity,
+            accessories=(BOMAccessory(
+                mpn="SNT-100-BL-G", lcsc="C6680974", quantity=1,
+                datasheet="https://www.lcsc.com/datasheet/C6680974.pdf",
+            ),),
             sourcing_note=(
-                "Fit Samtec SNT-100-BK-G removable shunt for enabled state; leave shunt off "
+                "Fit Samtec SNT-100-BL-G removable shunt for enabled state; leave shunt off "
                 "for disabled state"
             ),
         )
@@ -2343,7 +2353,7 @@ def _switch_input(requirement: CircuitRequirement) -> LoweringArtifact | None:
                 LoweringPin(role=pull_role, pin="2", net=ports["signal"]),
             ),
             assumptions=(
-                f"SNT-100-BK-G fitted on {identity}: {ports['signal']}={active_net}; removed: "
+                f"SNT-100-BL-G fitted on {identity}: {ports['signal']}={active_net}; removed: "
                 f"{ports['signal']}={idle_net} through the {pull.value} {pull_role}",
             ),
         )
@@ -4233,7 +4243,8 @@ for _lowerer in (
         frozenset({"screw-terminal", "screw_terminal"}),
         _screw_terminal,
         ("rows",),
-        ("<contiguous pinN/pN contacts, positive/negative, or positive/common/negative>",),
+        ("<contiguous pinN/pN contacts, positive/negative, or positive/common/negative; "
+         "generic terminals may use multiple reviewed housings, with undeclared positions unconnected>",),
         parameter_choices=(("rows", (1,)),),
         port_patterns=((r"(?:pin|p)[1-9][0-9]*|positive|common|negative", "bidirectional"),),
     ),

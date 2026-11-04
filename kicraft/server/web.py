@@ -1582,6 +1582,22 @@ def _inspector_spec(stage: str, sj: dict, run_status: dict, project_dir: Path | 
                  "rows": rows,
                  "foot": [["", "TOTAL (est.)", total_txt, "", "", "", "", ""]],
                  "note": note}]
+        accessories = [
+            [part.get("ref"), accessory.get("quantity"), accessory.get("mpn"),
+             accessory.get("lcsc")]
+            for part in parts for accessory in (part.get("accessories") or ())
+        ]
+        if accessories:
+            secs[1]["foot"][0][1] = "PCB TOTAL (est.)"
+            secs[1]["note"] += (
+                "; hand-fitted accessories are listed separately and are not "
+                "included in the PCB price estimate")
+            secs.append({
+                "type": "table", "title": "Hand-fitted procurement accessories",
+                "columns": ["owner ref", "quantity", "MPN", "LCSC"],
+                "rows": accessories,
+                "note": "Procure and fit these non-PCB items; see accessories.csv in the package.",
+            })
         return secs
 
     if stage == "wiring":
@@ -6205,6 +6221,11 @@ def _render_bom_table(state) -> None:
                 ui.label(str(prt.get("mpn") or prt.get("sourcing_note") or "")) \
                     .classes("flex-grow font-mono").style("color:#94a3b8")
                 ui.label(str(prt.get("sheet") or "")).style("width:120px;color:#64748b")
+            for accessory in prt.get("accessories") or ():
+                ui.label(
+                    f"Hand-fit for {prt.get('ref')}: {accessory.get('quantity')} × "
+                    f"{accessory.get('mpn')} ({accessory.get('lcsc')})"
+                ).classes("text-xs pl-4").style("color:#94a3b8")
 
 
 @ui.page("/samples")
@@ -8149,8 +8170,18 @@ def index(prompt: str = "", project: str = ""):
                 state.get("project_id"))
 
         def _paint_summary(pres: dict) -> None:
-            """Repaint the always-on summary -- only when a fact actually changed."""
+            """Refresh the clock, then repaint execution facts only when changed."""
             act = state.get("activity") or {}
+            # Time passes even when execution facts do not. Keep the live clock
+            # and last-event age fresh without inferring an execution outcome.
+            elapsed = ""
+            if act.get("started_at"):
+                elapsed = f"elapsed {_fmt_duration(_attempt_elapsed_s(act))}"
+            age = _relative_age(pres["last_event_at"])
+            clock = "  ·  ".join(
+                part for part in (elapsed, f"updated {age}" if age else "") if part)
+            if summary_age.text != clock:
+                summary_age.text = clock
             planned = set(act.get("planned_units") or ())
             units = (f"{len(set(act.get('completed_units') or ()) & planned)}/"
                      f"{len(planned)} units") if planned else ""
@@ -8176,14 +8207,6 @@ def index(prompt: str = "", project: str = ""):
             code = state.get("board_code")
             summary_code.text = code or ""
             summary_code.set_visibility(bool(code))
-            # Elapsed (from the attempt's own start) + the actual age of the last
-            # event -- never an inferred failure for a quiet period.
-            elapsed = ""
-            if act.get("started_at"):
-                elapsed = f"elapsed {_fmt_duration(_attempt_elapsed_s(act))}"
-            age = _relative_age(pres["last_event_at"])
-            summary_age.text = "  ·  ".join(
-                part for part in (elapsed, f"updated {age}" if age else "") if part)
             summary_headline.text = pres["headline"]
             # The detail earns its line only when it adds something: repeating the
             # headline (a failure's own cause often IS both) prints noise.

@@ -879,18 +879,98 @@ def test_enable_jumper_is_real_hardware_with_deterministic_fitted_and_removed_st
     jumper = next(group for group in artifact.groups if group.role == "jumper")
     assert jumper.mpn == "TSW-102-07-G-S"
     assert jumper.symbol == "Connector_Generic:Conn_01x02"
-    assert jumper.sourcing_note == (
-        "Fit Samtec SNT-100-BK-G removable shunt for enabled state; leave shunt off "
-        "for disabled state"
-    )
     assert {(pin.role, pin.pin): pin.net for pin in artifact.pins} == {
         ("jumper", "1"): "REG_EN",
         ("jumper", "2"): active_net,
         (pull_role, "1"): idle_net,
         (pull_role, "2"): "REG_EN",
     }
-    assert f"fitted on TSW-102-07-G-S: REG_EN={active_net}" in artifact.assumptions[0]
-    assert f"removed: REG_EN={idle_net}" in artifact.assumptions[0]
+
+
+def test_enable_jumper_accessory_is_qualified_and_exported_without_a_pcb_part(tmp_path, monkeypatch):
+    import csv
+    from types import SimpleNamespace
+    import zipfile
+    from kicraft.eval.artifact_evidence import (
+        _bom_parts_digest, _reconcile_inventory, _verified_export_paths,
+    )
+    from kicraft.design.models import BOM, BomPart
+    from kicraft.design.sourcing_policy import validate_bom_accessories
+    from kicraft.design.synthesis.fab_export import _write_accessories_csv, _write_bom_csv
+    from kicraft.parts_library import jlcparts
+
+    requirement = CircuitRequirement(
+        id="enable", sheet="POWER", role="user_io", family="switch-input",
+        parameters={"pull_policy": "external", "active_level": "high"},
+        ports={"signal": "EN", "gnd": "GND", "vdd": "+3V3"},
+        obligations=[{"kind": "adjustability", "original_obligation_id": "enable",
+                      "parameter": "enable", "mechanism": "jumper"}],
+    )
+    artifact = lower_requirement(requirement)
+    group = next(g for g in artifact.groups if g.role == "jumper")
+    part = BomPart(
+        ref="J1", sheet="POWER", value=group.value, symbol=group.symbol,
+        footprint=group.footprint, mpn=group.mpn, accessories=group.accessories,
+        resolution_source="lowerer", resolution_id=artifact.lowerer_id,
+        lowering_requirement_id="enable", lowering_role="jumper", lowering_index=0,
+    )
+    bom = BOM(parts=[part])
+    architecture = SimpleNamespace(requirements=[requirement])
+    monkeypatch.setattr(jlcparts, "lookup", lambda cid: {
+        "model": "SNT-100-BL-G", "stock": 1,
+    } if cid == "C6680974" else None)
+    errors, receipt = validate_bom_accessories(bom, architecture)
+    assert errors == []
+    assert [(row["exact_lcsc"], row["quantity"]) for row in receipt] == [("C6680974", 1)]
+    facts = {
+        "board_footprints": {"J1": part.footprint},
+        "board_pad_observations": [
+            {"footprint_pad": "J1.1"}, {"footprint_pad": "J1.2"},
+        ],
+        "bom_parts": [part.model_dump()], "all_bom_parts": [part.model_dump()],
+        "sourcing_validation": {
+            "schema_version": 1, "parts_digest": _bom_parts_digest([part.model_dump()]),
+            "parts": receipt,
+        },
+    }
+    _reconcile_inventory(facts)
+    assert "J1:A1" not in facts["unqualified_source_refs"]
+    facts["bom_parts"] = [part.model_dump()]
+    facts["sourcing_validation"]["parts"] = []
+    _reconcile_inventory(facts)
+    assert "J1:A1" in facts["unqualified_source_refs"]
+
+    pcb_csv, accessories_csv = tmp_path / "bom.csv", tmp_path / "accessories.csv"
+    _write_bom_csv(pcb_csv, [part.model_dump()])
+    assert _write_accessories_csv(accessories_csv, [part.model_dump()])
+    with pcb_csv.open(newline="") as stream:
+        assert [row["ref"] for row in csv.DictReader(stream)] == ["J1"]
+    with accessories_csv.open(newline="") as stream:
+        row = next(csv.DictReader(stream))
+    assert (row["owner_ref"], row["quantity"], row["mpn"], row["lcsc"]) == (
+        "J1", "1", "SNT-100-BL-G", "C6680974",
+    )
+
+    archive = tmp_path / "board.zip"
+    with zipfile.ZipFile(archive, "w") as package:
+        package.writestr("board.gbrjob", "{}")
+        package.writestr("board.drl", "")
+        package.writestr("board.gtl", "")
+        package.write(accessories_csv, "accessories.csv")
+    assert _verified_export_paths(tmp_path, [archive], [part.model_dump()]) == ["board.zip"]
+    with zipfile.ZipFile(archive, "w") as package:
+        package.writestr("board.gbrjob", "{}")
+        package.writestr("board.drl", "")
+        package.writestr("board.gtl", "")
+    assert not _verified_export_paths(tmp_path, [archive], [part.model_dump()])
+
+    part.accessories = ()
+    errors, _ = validate_bom_accessories(bom, architecture)
+    assert any("required lowerer accessories" in error for error in errors)
+    part.accessories = group.accessories
+    monkeypatch.setattr(jlcparts, "lookup", lambda cid: {"model": "SNT-100-BL-G", "stock": 0})
+    errors, _ = validate_bom_accessories(bom, architecture)
+    assert any("stock 0" in error for error in errors)
 
 
 def test_enable_jumper_refuses_an_internal_pull_or_unbounded_raw_supply():
@@ -2195,6 +2275,64 @@ def test_a_connector_refusal_names_the_shape_it_needs():
     # No reviewed block carries more than twelve positions, so a bigger demand is a
     # composition; the refusal names that shape instead of an unreachable single block.
     assert "split the demand across several terminal requirements" in too_many
+
+
+def test_generic_terminal_bank_maps_contacts_and_reserves_quantity():
+    def build(ports, minimum):
+        return lower_requirement(CircuitRequirement(
+            id="terminals", sheet="MAIN", role="connector", family="screw-terminal",
+            parameters={"rows": 1}, ports=ports,
+            obligations=[{"kind": "quantity", "original_obligation_id": "terminal_count",
+                          "subject": "screw-terminal", "minimum": minimum}],
+        ))
+
+    bank = build({"pin1": "A", "pin2": "B", "pin3": "C", "pin4": "D"}, 4)
+    assert bank.groups[0].quantity == 2
+    assert bank.groups[0].mpn == "WJ126V-5.0-02P-14-00A"
+    assert [(p.index, p.pin, p.net) for p in bank.pins] == [
+        (0, "1", "A"), (0, "2", "B"), (1, "1", "C"), (1, "2", "D"),
+    ]
+    assert not bank.no_connects
+
+    reserved = build({"pin1": "OUT", "pin2": "GND"}, 4)
+    assert reserved.groups[0].quantity == 2
+    assert [(p.index, p.pin, p.net) for p in reserved.pins] == [
+        (0, "1", "OUT"), (0, "2", "GND"),
+    ]
+    assert [(p.index, p.pin) for p in reserved.no_connects] == [(1, "1"), (1, "2")]
+
+    odd = build({f"pin{i}": f"N{i}" for i in range(1, 6)}, 5)
+    assert odd.groups[0].quantity == 3
+    assert [(p.index, p.pin, p.net) for p in odd.pins][-1] == (2, "1", "N5")
+    assert [(p.index, p.pin) for p in odd.no_connects] == [(2, "2")]
+
+    # The same partition must survive BOM group expansion and deterministic wiring.
+    from kicraft.design.synthesis.symbol_pinout import lookup_pins
+
+    requirement = CircuitRequirement(
+        id="terminals", sheet="MAIN", role="connector", family="screw-terminal",
+        ports={"pin1": "A", "pin2": "B", "pin3": "C", "pin4": "D"},
+    )
+    state = _state(requirement)
+    (bom_unit,) = plan_stage_work_units("bom", state, {})
+    candidate = deterministic_bom_candidate(bom_unit, state)
+    assert candidate["groups"][0]["quantity"] == 2
+    group = bank.groups[0]
+    state["bom"]["parts"] = [
+        {"ref": f"J{i + 1}", "sheet": "MAIN", "symbol": group.symbol,
+         "footprint": group.footprint, "resolution_source": "lowerer",
+         "resolution_id": bank.lowerer_id, "lowering_requirement_id": requirement.id,
+         "lowering_role": "connector", "lowering_index": i}
+        for i in range(2)
+    ]
+    symbol = lookup_pins(group.symbol, all_units=True)
+    extras = {"symbol_pinouts": {"J1": symbol, "J2": symbol}}
+    (unit,) = plan_stage_work_units("wiring", state, extras)
+    wiring = deterministic_wiring_candidate(unit, state, extras)
+    assert {(p["ref"], p["pin"]): p["net"] for p in wiring["pins"]} == {
+        ("J1", "1"): "A", ("J1", "2"): "B",
+        ("J2", "1"): "C", ("J2", "2"): "D",
+    }
 
 
 def test_a_terminal_demand_wider_or_narrower_than_its_pinned_block_composes():

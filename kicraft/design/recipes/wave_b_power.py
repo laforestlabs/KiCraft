@@ -678,7 +678,7 @@ def _three_pin_ldo(
     extra_assertions: tuple[Assertion, ...] = (),
 ) -> RecipeDefinition:
     no_connects = (NoConnect(role="regulator", pin=extra_nc),) if extra_nc else ()
-    enable = (Pin(role="regulator", pin=enable_pin, net="input"),) if enable_pin else ()
+    enable = (Pin(role="regulator", pin=enable_pin, net="enable"),) if enable_pin else ()
     return _power_recipe(
         recipe=recipe,
         family=family,
@@ -688,6 +688,8 @@ def _three_pin_ldo(
             Port(name="input", direction="power"),
             Port(name="gnd", direction="power"),
             Port(name="output", direction="power"),
+            *((Port(name="enable", direction="input", required=False, default_tie="input"),)
+              if enable_pin else ()),
         ),
         internal_nets=(),
         parts=(

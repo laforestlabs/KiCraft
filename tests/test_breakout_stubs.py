@@ -95,6 +95,18 @@ def test_via_at_end_adds_locked_via(tmp_path):
     assert len(vias) == 1 and vias[0].GetNetname() == "CC2"
 
 
+def test_explicit_via_cannot_drill_same_net_smd_land(tmp_path):
+    path = str(tmp_path / "same-net.kicad_pcb")
+    _board(path, (5.0, 10.0), {
+        "1": ("GND", 8.0, 10.0),
+        "2": ("GND", 10.0, 10.0),
+    })
+    spec = BreakoutSpec(ref="J1", pad="1", waypoints=[(10.0, 10.0)], via_at_end=True)
+    result = add_breakout_stubs(path, [spec])
+    assert result["stubs"] == result["vias"] == 0
+    assert not any(isinstance(item, pcbnew.PCB_VIA) for item in pcbnew.LoadBoard(path).GetTracks())
+
+
 def test_missing_pad_and_unnetted_pad_are_skipped(tmp_path):
     path = str(tmp_path / "b.kicad_pcb")
     _board(path, (5.0, 10.0), {"B5": ("CC2", 8.0, 10.0), "B6": ("", 8.0, 11.0)})
@@ -647,14 +659,10 @@ def test_shield_tie_prefers_smd_same_net_pad(tmp_path):
         ("4", (11.2, 10.8)),
         ("3", (11.2, 10.8)),
     }
-    # A stitching via at the shared SMD end bonds the shield island to the
-    # B.Cu GND plane (the parent pour cannot reach the connector area). Both
-    # ties end on the SAME pad, so only ONE via lands -- the second would be
-    # a coincident drill (a hole-to-hole violation) and is skipped as
-    # redundant, while its track still stamps.
-    assert all(s.via_at_end for s in specs)
+    # Each shield leg already spans the board. Do not drill the SMD land.
+    assert not any(s.via_at_end for s in specs)
     res = add_breakout_stubs(path, specs)
-    assert res["stubs"] == 2 and res["vias"] == 1
+    assert res["stubs"] == 2 and res["vias"] == 0
     routed = pcbnew.LoadBoard(path)
     segs = [
         t
@@ -671,6 +679,23 @@ def test_shield_tie_respects_disable_and_max_distance(tmp_path):
     assert shield_tie_specs(board, {"shield_tie_enabled": False}) == []
     assert shield_tie_specs(board, {"shield_tie_max_mm": 1.0}) == []
     assert shield_tie_specs(board, {"shield_tie_exclude_refs": ["J2"]}) == []
+
+
+def test_shield_tie_does_not_drill_thermal_land(tmp_path):
+    path = str(tmp_path / "thermal.kicad_pcb")
+    _shield_board(path)
+    board = pcbnew.LoadBoard(path)
+    fp = next(iter(board.GetFootprints()))
+    pads = list(fp.Pads())
+    land = next(p for p in pads if p.GetNumber() == "A1")
+    hole = next(p for p in pads if p.GetNumber() == "4")
+    land.SetPosition(hole.GetPosition())
+    land.SetSize(pcbnew.VECTOR2I(_mm(2.74), _mm(2.74)))
+    board.Save(path)
+    specs = shield_tie_specs(pcbnew.LoadBoard(path))
+    assert not any(s.pad in {"3", "4"} for s in specs)
+    result = add_breakout_stubs(path, specs)
+    assert result["vias"] == 0
 
 
 # ---------------------------------------------------------------------------

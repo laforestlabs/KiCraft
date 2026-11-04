@@ -4107,6 +4107,41 @@ def _declared_pin_reaches_port_net(
     return False
 
 
+def _external_interface_has_recipe_witness(requirement, bom, protocol: str) -> bool:
+    """Prove an external interface from a matching, fully wired recipe expansion."""
+    from kicraft.design.recipes.registry import get_recipe
+
+    for manifest in getattr(bom, "recipe_ownership", ()) or ():
+        if requirement.id not in (getattr(manifest, "requirement_ids", ()) or ()):
+            continue
+        try:
+            definition = get_recipe(str(getattr(manifest, "recipe", "") or ""))
+        except (KeyError, ValueError):
+            continue
+        if protocol not in definition.external_interface_protocols:
+            continue
+        if definition.family != requirement.family:
+            continue
+        if requirement.exact_part and (
+            str(definition.exact_part or "").casefold() != requirement.exact_part.casefold()
+        ):
+            continue
+        bindings = getattr(manifest, "port_bindings", {}) or {}
+        required = [port.name for port in definition.ports if port.required]
+        wired = {pin.net for pin in definition.pins}
+        if not required or not set(required) <= wired:
+            continue
+        if not all(
+            requirement.ports.get(port)
+            and bindings.get(port) == requirement.ports[port]
+            for port in required
+        ):
+            continue
+        if _has_trusted_recipe_topology_witness(requirement, bom, None, manifest=manifest):
+            return True
+    return False
+
+
 def check_requirement_physical_realization(
     architecture, bom, *, declared_interface_scope: str = "all"
 ) -> CheckResult:
@@ -4181,6 +4216,15 @@ def check_requirement_physical_realization(
     bad: list[str] = []
     aggregate_demands: dict[tuple[str, str], list[tuple[str, int]]] = defaultdict(list)
     for requirement in architecture.requirements:
+        for obligation in requirement.obligations:
+            if (
+                obligation.kind == "external_interface"
+                and not _external_interface_has_recipe_witness(requirement, bom, obligation.protocol)
+            ):
+                bad.append(
+                    f"E_EXTERNAL_INTERFACE {requirement.id!r}: no complete reviewed recipe "
+                    f"and wired port witness for external protocol {obligation.protocol!r}"
+                )
         requirement_parts = _physical_requirement_parts(
             requirement,
             bom,

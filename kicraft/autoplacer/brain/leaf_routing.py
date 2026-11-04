@@ -1570,7 +1570,14 @@ def _stamp_trivial_leaf(
     )
     route_timing["stamp_pre_route_board_s"] = round(max(0.0, time.monotonic() - stamp_start), 3)
 
-    from kicraft.autoplacer.kicad_routing_tools import _propagate_sibling_project_rules
+    from kicraft.autoplacer.kicad_routing_tools import (
+        _board_has_assembly_pads,
+        _propagate_sibling_project_rules,
+        _reject_drills_in_assembly_openings,
+    )
+
+    if _board_has_assembly_pads(pre_route_board):
+        _reject_drills_in_assembly_openings(pre_route_board)
 
     # No autorouter is needed, but unrouted copper still has to pass real DRC.
     _propagate_sibling_project_rules(str(source_pcb), str(pre_route_board))

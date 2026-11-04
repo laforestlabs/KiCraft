@@ -721,15 +721,35 @@ The exact Samsung CL10A105KA8NNNC / C5673 record covers its nominal 1 µF,
 25 V X5R 0603 pair; those ratings do not guarantee effective capacitance under bias.
 Reopened run durations stop at the attempt's terminal timestamp, and a retained
 uncommitted stage draft is not presented as an active writer after it stops.
+Live elapsed time and last-event age refresh even when no new execution event
+arrives; a quiet period never changes a run's status. Concept diagrams retain
+their deterministic coordinates on finite hidden axes, avoiding singular graph
+view transforms during tab transitions without stretching component symbols.
+
+An `external_interface` obligation describes the board-side connection to a
+named external protocol/load, not an onboard copy of that load. It requires a
+reviewed construction and every required physical port binding. An external
+strip connector cannot satisfy an onboard addressable-LED requirement.
+Physical enable-jumper hardware and its control behavior remain separate
+obligations. A fitted shunt is a qualified procured accessory, not merely an
+assembly note; its separate procurement CSV ships in the fabrication package.
+
+Exact linear-regulator dissipation limits reject clearly excessive calculated
+loss. Passing that absolute-limit check is not board thermal qualification.
+The DRV8833 land no longer contains unspecified in-pad plated thermal holes;
+ordinary-process assembly does not imply a guaranteed motor stall/current rating.
 
 ## Saved recipe and spend safety
 
 Saved selections migrate explicitly to the current recipe contract:
-`rp2040-minimal@1/@2` → `@3`, and the DRV8833/TPS54331 `@1` recipes → `@2`.
-Migration preserves known programming, GPIO and net-binding intent; ambiguous
-legacy parameters are refused rather than guessed. Derived BOMs carrying obsolete
-ownership must be regenerated upstream. Changing their recipe labels is not a
-migration of the electrical graph.
+`rp2040-minimal@1/@2` → `@3`, DRV8833 `@1/@2` → `@3`, TPS54331 `@1` → `@2`,
+and the changed C3 native-USB minimal recipes `@1` → `@2`. The already-qualified
+H4X UART recipe remains `@1`. DRV8833's fault pull-up uses an explicit MCU logic
+supply, never the motor rail; a legacy selection without the required bindings
+must regenerate architecture. Migration preserves known programming, GPIO and
+net-binding intent; ambiguous legacy parameters are refused rather than guessed.
+Derived BOMs carrying obsolete ownership must be regenerated upstream.
+Changing their recipe labels is not a migration of the electrical graph.
 
 Provider admission reserves conservative full-request exposure before dispatch.
 Verified receipt cost is billed spend; failed, cancelled or missing-cost responses

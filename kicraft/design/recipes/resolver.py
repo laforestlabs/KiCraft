@@ -43,7 +43,7 @@ _PROGRAMMING_PEER_PORTS = {
 
 _ROM_UART_VARIANTS = {
     "esp32-s3-mini-1u-n4r2-minimal@1": "esp32-s3-mini-1u-n4r2-uart-minimal@1",
-    "esp32-c3-mini-1-h4x-minimal@1": "esp32-c3-mini-1-h4x-uart-minimal@1",
+    "esp32-c3-mini-1-h4x-minimal@2": "esp32-c3-mini-1-h4x-uart-minimal@1",
 }
 
 

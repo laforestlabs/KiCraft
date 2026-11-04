@@ -122,6 +122,7 @@ class BomComponentGroup(BaseModel):
     mpn: str | None = None
     datasheet: str | None = None
     sourcing_note: str | None = None
+    accessories: tuple[models.BOMAccessory, ...] = ()
     side: Literal["front", "back"] | None = None
 
 
@@ -186,6 +187,7 @@ def _requirement_owns_protected_group(group: BomComponentGroup, requirements) ->
             and candidate.symbol == value(group, "symbol")
             and candidate.footprint == value(group, "footprint")
             and candidate.mpn == value(group, "mpn")
+            and candidate.accessories == tuple(value(group, "accessories") or ())
             for candidate in artifact.groups
         )
 
@@ -1804,6 +1806,11 @@ def _normalize_stage_response(
             payload = restore_source_obligations(
                 payload, prompt_state, stage=stage, replace=intent_shaped
             )
+            if intent_shaped:
+                # Deterministically construct safe support ownership before the
+                # retention gate asks whether every source obligation has an owner.
+                from kicraft.design.architecture_intent import complete_architecture_payload
+                payload = complete_architecture_payload(payload)
         elif stage == "functional_spec":
             # The spec's own `obligations` are the committed intent set, written here rather than
             # copied by the model; only the block→obligation ownership is the draft's.

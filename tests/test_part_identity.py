@@ -794,7 +794,7 @@ def test_reviewed_jumper_header_has_the_real_shunt_contact_map():
     assert jumper.physical_features >= {"jumper", "jumper-header"}
     assert jumper.contacts == ("1", "2")
     assert jumper.port_pins == {"signal": "1", "selected_level": "2"}
-    assert jumper.support_network["fitted_accessory_mpn"] == "SNT-100-BK-G"
+    assert jumper.support_network["fitted_accessory_mpn"] == "SNT-100-BL-G"
     assert "fitted=closed, removed=open" in jumper.support_network["fitted_accessory"]
     assert canonical_physical_features("removable jumper") == {"jumper"}
     assert jumper.manufacturer_sources

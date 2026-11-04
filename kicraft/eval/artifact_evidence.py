@@ -12,6 +12,8 @@ from kicraft.design.part_identity import (
 from kicraft.design.synthesis.symbol_pinout import SymbolNotFoundError, lookup_pins
 from . import electrical_artifact_evidence
 from .geometry_artifact_evidence import extract_geometry_facts
+import csv
+import io
 import hashlib
 import json
 from collections.abc import Mapping
@@ -313,6 +315,38 @@ def _reconcile_inventory(facts: dict[str, Any]) -> None:
                 source_unverified.append(ref)
         elif row.get("verdict") != "excluded_not_orderable":
             source_unverified.append(ref)
+    # Accessories are procurement items, not extra PCB footprints. Verify their
+    # receipt separately so they cannot overwrite an owner's PCB-part evidence.
+    expected_accessories: dict[tuple[str, str], list[tuple[str, str, int]]] = {}
+    for part in facts.get("all_bom_parts", []):
+        if not isinstance(part, Mapping):
+            continue
+        ref = str(part.get("ref") or "")
+        for index, item in enumerate(part.get("accessories") or (), 1):
+            if not isinstance(item, Mapping):
+                source_unverified.append(f"{ref}:A{index}")
+                continue
+            key = (str(item.get("lcsc") or "").upper(), str(item.get("mpn") or "").casefold())
+            expected_accessories.setdefault(key, []).append(
+                (f"{ref}:A{index}", ref, int(item.get("quantity") or 0))
+            )
+    for key, expected in expected_accessories.items():
+        rows = [
+            row for row in receipt_rows or []
+            if isinstance(row, Mapping) and row.get("kind") == "accessory"
+            and str(row.get("exact_lcsc") or "").upper() == key[0]
+            and str(row.get("catalog_mpn") or "").casefold() == key[1]
+        ]
+        row = rows[0] if receipt_digest_ok and len(rows) == 1 else {}
+        observed = [
+            (str(item.get("accessory_id") or ""), str(item.get("owner_ref") or ""),
+             item.get("quantity"))
+            for item in row.get("owners", ()) if isinstance(item, Mapping)
+        ]
+        total = sum(item[2] for item in expected)
+        if (sorted(observed) != sorted(expected) or row.get("quantity") != total
+                or not isinstance(row.get("stock"), int) or row["stock"] < total):
+            source_unverified.extend(item[0] for item in expected)
     facts["part_classes"] = dict(classes)
     facts["part_inventory"] = inventory
     facts["part_identities"] = identities
@@ -331,14 +365,36 @@ def _merge_fact_delta(facts: dict[str, Any], delta: Mapping[str, Any]) -> None:
             facts[key] = value
 
 
-def _verified_export_paths(rundir: Path, archives: list[Path]) -> list[str]:
-    """Accept only run-local archives containing Gerbers and a drill export."""
+def _verified_export_paths(rundir: Path, archives: list[Path], parts: list[dict]) -> list[str]:
+    """Accept run-local fabrication archives including every hand-fitted purchase."""
+    expected = Counter(
+        (f"{part.get('ref', '')}:A{index}", str(part.get("ref") or ""),
+         str(item.get("quantity") or ""), str(item.get("mpn") or ""),
+         str(item.get("lcsc") or ""))
+        for part in parts if isinstance(part, Mapping)
+        for index, item in enumerate(part.get("accessories") or (), 1)
+        if isinstance(item, Mapping)
+    )
     verified: list[str] = []
     for archive in archives:
         try:
             with zipfile.ZipFile(archive) as contents:
                 names = [name.lower() for name in contents.namelist()]
-        except (OSError, zipfile.BadZipFile):
+                if expected:
+                    accessory_names = [name for name in contents.namelist()
+                                       if name.lower() == "accessories.csv"]
+                    if len(accessory_names) != 1:
+                        continue
+                    rows = csv.DictReader(io.StringIO(
+                        contents.read(accessory_names[0]).decode("utf-8")
+                    ))
+                    actual = Counter(
+                        (row.get("accessory_id"), row.get("owner_ref"), row.get("quantity"),
+                         row.get("mpn"), row.get("lcsc")) for row in rows
+                    )
+                    if actual != expected:
+                        continue
+        except (OSError, UnicodeError, csv.Error, zipfile.BadZipFile):
             continue
         if (
             any(name.endswith(".gbrjob") for name in names)
@@ -571,7 +627,9 @@ def extract_artifact_facts(rundir: Path, contract: dict[str, Any] | None = None)
     )
     artifacts.extend(_existing(rundir, *archives))
     facts["fab_archive_paths"] = [_relative(rundir, path) for path in archives]
-    facts["verified_export_paths"] = _verified_export_paths(rundir, archives)
+    facts["verified_export_paths"] = _verified_export_paths(
+        rundir, archives, facts.get("all_bom_parts", [])
+    )
     if contract is not None:
         facts["applicable_gates"] = _applicable_gates(contract, facts)
     _manufacturing_verdicts(facts, rundir, artifacts)

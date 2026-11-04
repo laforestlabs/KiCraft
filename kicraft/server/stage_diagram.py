@@ -21,6 +21,7 @@ Design (see docs/plans/stage-concept-diagrams.md):
 """
 from __future__ import annotations
 
+from html import escape
 import math
 
 from ..design.models import is_power_or_ground_name
@@ -73,40 +74,67 @@ _CIRCLE_R = 320  # architecture: sheet-node ring radius
 
 
 def build_graph_option(nodes, edges, categories, *, title, directed=True):
-    """Assemble an ECharts ``graph`` series option from prebuilt nodes/edges.
+    """Render deterministic graph coordinates on finite, hidden Cartesian axes.
 
-    ``nodes``  -- list of dicts: {name, x, y, category (name str), value,
-                  symbol?, symbolSize?, itemStyle?}.
-    ``edges``  -- list of dicts: {source, target, lineStyle?, label?, value?,
-                  edgeSymbol?}.
-    ``categories`` -- list of {name, itemStyle: {color}} driving the legend
-                  and node colour fallback.
-    ``directed`` -- series-level edgeSymbol default (arrow on target).
+    Graph-view transforms become singular when a tab temporarily has zero height.
+    Explicit finite data extents also handle a single node or a horizontal row
+    without stretching symbols. Descriptions remain escaped HTML tooltips.
     """
-    edge_symbol = ["none", "arrow"] if directed else ["none", "none"]
+    plotted = []
+    for node in nodes:
+        plotted.append({
+            **node,
+            "value": [node["x"], node["y"]],
+            "tooltip": {"formatter": (
+                f"{escape(str(node['name']))}<br/>"
+                f"{escape(str(node.get('value', '')))}")},
+        })
+    links = [{
+        **edge,
+        "tooltip": {"formatter": (
+            f"{escape(str(edge['source']))} → {escape(str(edge['target']))}<br/>"
+            f"{escape(str(edge.get('value', '')))}")},
+    } for edge in edges]
+    axes = {}
+    for axis, coordinate, minimum_span in (
+        ("xAxis", "x", _COL_DX), ("yAxis", "y", _ROW_DY),
+    ):
+        values = [node[coordinate] for node in nodes] or [0]
+        span = max(max(values) - min(values), minimum_span)
+        axes[axis] = {
+            "type": "value", "show": False,
+            "min": min(values) - span * 0.1,
+            "max": max(values) + span * 0.1,
+            "inverse": axis == "yAxis",
+        }
     return {
         "backgroundColor": "transparent",
         "title": {"text": title, "textStyle": _TITLE},
-        "tooltip": {"trigger": "item", "formatter": "{b}<br/>{c}"},
+        "tooltip": {"trigger": "item"},
         "legend": [{
             "top": 24,
             "textStyle": {"color": "#94a3b8", "fontSize": 10},
-            "data": [c["name"] for c in categories],
+            "data": [category["name"] for category in categories],
+        }],
+        "grid": {"left": "10%", "right": "10%", "top": 60, "bottom": 30},
+        **axes,
+        "dataZoom": [{
+            "type": "inside", "xAxisIndex": [0], "yAxisIndex": [0],
+            "filterMode": "none",
         }],
         "series": [{
             "type": "graph",
             "layout": "none",
-            "roam": True,
+            "coordinateSystem": "cartesian2d",
             "label": {"show": True, "color": "#e2e8f0", "fontSize": 11},
             "labelLayout": {"hideOverlap": True},
-            "edgeSymbol": edge_symbol,
+            "edgeSymbol": ["none", "arrow"] if directed else ["none", "none"],
             "edgeSymbolSize": [0, 9],
             "categories": categories,
-            "data": nodes,
-            "links": edges,
+            "data": plotted,
+            "links": links,
             "lineStyle": {"color": "#64748b", "width": 1.5, "curveness": 0.12},
-            "emphasis": {"focus": "adjacency",
-                         "label": {"show": True}},
+            "emphasis": {"focus": "adjacency", "label": {"show": True}},
         }],
     }
 

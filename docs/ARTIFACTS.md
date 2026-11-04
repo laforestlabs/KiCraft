@@ -126,6 +126,14 @@ footprint transforms; matching reference counts cannot detect a shifted, floatin
 or PCB-penetrating body. Correct source model frames, preserve the failed package,
 and publish a fresh byte-bound export rather than patching the delivered STEP.
 
+Hand-fitted non-PCB items, such as a removable enable shunt, are typed
+accessories of their owning BOM part. Their exact order codes, quantities and
+positive-stock qualification are included in the sourcing receipt and its BOM
+digest. The fabrication ZIP includes a separate `accessories.csv` procurement
+list with unique accessory IDs and owner references. These items do not become
+fake PCB footprints, netlist components, placement rows or PCB assembly-BOM rows.
+Missing or changed accessory procurement evidence invalidates its product proof.
+
 ## Invariants (do not break)
 
 - **Provenance lives only in JSON sidecars — never inside a `.kicad_pcb`.**

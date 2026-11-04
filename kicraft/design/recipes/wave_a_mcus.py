@@ -514,7 +514,7 @@ ESP32_WROOM_32E_MINIMAL = _module_recipe(
 )
 
 ESP32_C3_MINI_1_MINIMAL = _module_recipe(
-    recipe="esp32-c3-mini-1-minimal@1",
+    recipe="esp32-c3-mini-1-minimal@2",
     family="esp32-c3-mini-1-module",
     exact_part="ESP32-C3-MINI-1-N4",
     aliases=("ESP32-C3-MINI-1-N4", "esp32-c3-mini-1-n4:ESP32-C3-MINI-1-N4"),
@@ -568,6 +568,30 @@ ESP32_C3_MINI_1_MINIMAL = _module_recipe(
         "35",
     ),
 )
+# Both same-value capacitors must fit together within the module's 3 mm
+# supply/return bounds. These reviewed 0402 parts are shared by the C3
+# variants, whose module land and bypass requirements are identical.
+_C3_LOCAL_SUPPORT = {
+    "bulk_decoupling": (
+        "GRM155R61A106ME11D",
+        "https://jlcpcb.com/api/file/downloadByFileSystemAccessId/8588893771849748480",
+    ),
+    "local_decoupling": (
+        "CL05A104KA5NNNC",
+        "https://product.samsungsem.com/mlcc/CL05A104KA5NNN.do",
+    ),
+}
+ESP32_C3_MINI_1_MINIMAL = ESP32_C3_MINI_1_MINIMAL.model_copy(update={
+    "parts": tuple(
+        part.model_copy(update={
+            "mpn": _C3_LOCAL_SUPPORT[part.role][0],
+            "footprint": "Capacitor_SMD:C_0402_1005Metric",
+            "datasheet": _C3_LOCAL_SUPPORT[part.role][1],
+        }) if part.role in _C3_LOCAL_SUPPORT else part
+        for part in ESP32_C3_MINI_1_MINIMAL.parts
+    ),
+})
+
 
 # The two supply capacitors belong to this module, not any other 3V3 load.
 # Espressif's schematic checklist calls for local supply decoupling.
@@ -586,7 +610,7 @@ ESP32_C3_MINI_1_MINIMAL = ESP32_C3_MINI_1_MINIMAL.model_copy(update={
 # numbered pins and 0.8 mm-pitch 0.4 x 0.8 mm perimeter lands match the
 # Espressif pin table and figure 11-1. RF performance and assembly remain
 # product-level obligations.
-_C3_H4X_RECIPE = "esp32-c3-mini-1-h4x-minimal@1"
+_C3_H4X_RECIPE = "esp32-c3-mini-1-h4x-minimal@2"
 ESP32_C3_MINI_1_H4X_MINIMAL = ESP32_C3_MINI_1_MINIMAL.model_copy(
     update={
         "recipe": _C3_H4X_RECIPE,
@@ -701,32 +725,8 @@ ESP32_S3_MINI_1U_N4R2_UART = _rom_uart_variant(
 ESP32_C3_MINI_1_H4X_UART = _rom_uart_variant(
     ESP32_C3_MINI_1_H4X_MINIMAL, "esp32-c3-mini-1-h4x-uart-minimal@1",
     "31", "30", ("26", "27"),
-)
+).model_copy(update={"maturity": "production"})
 
-# These same-value supports jointly fit the RF-edge owner's unchanged 3 mm
-# supply/return bounds; two 0603 courtyards do not. Independent native, cold-route,
-# full-DRC and fabrication review qualifies this bounded UART construction only.
-_C3_UART_LOCAL_SUPPORT = {
-    "bulk_decoupling": (
-        "GRM155R61A106ME11D",
-        "https://jlcpcb.com/api/file/downloadByFileSystemAccessId/8588893771849748480",
-    ),
-    "local_decoupling": (
-        "CL05A104KA5NNNC",
-        "https://product.samsungsem.com/mlcc/CL05A104KA5NNN.do",
-    ),
-}
-ESP32_C3_MINI_1_H4X_UART = ESP32_C3_MINI_1_H4X_UART.model_copy(update={
-    "maturity": "production",
-    "parts": tuple(
-        part.model_copy(update={
-            "mpn": _C3_UART_LOCAL_SUPPORT[part.role][0],
-            "footprint": "Capacitor_SMD:C_0402_1005Metric",
-            "datasheet": _C3_UART_LOCAL_SUPPORT[part.role][1],
-        }) if part.role in _C3_UART_LOCAL_SUPPORT else part
-        for part in ESP32_C3_MINI_1_H4X_UART.parts
-    ),
-})
 
 
 

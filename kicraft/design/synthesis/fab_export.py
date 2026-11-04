@@ -129,6 +129,22 @@ def _write_bom_csv(path: Path, parts: list[dict[str, Any]]) -> None:
                 ]
             )
 
+def _write_accessories_csv(path: Path, parts: list[dict[str, Any]]) -> bool:
+    """List hand-fitted purchases separately from the PCB assembly BOM and CPL."""
+    rows = [
+        (f"{part.get('ref', '')}:A{index}", part.get("ref", ""), item["quantity"],
+         item["mpn"], item["lcsc"], item.get("datasheet") or "")
+        for part in parts for index, item in enumerate(part.get("accessories", ()), 1)
+    ]
+    if not rows:
+        return False
+    with open(path, "w", newline="") as stream:
+        writer = csv.writer(stream)
+        writer.writerow(["accessory_id", "owner_ref", "quantity", "mpn", "lcsc", "datasheet"])
+        writer.writerows(rows)
+    return True
+
+
 
 def _export_fab(
     pcb_path: str,
@@ -207,6 +223,9 @@ def _export_fab(
     if bom_parts:
         bom_csv = fab / "bom.csv"
         _write_bom_csv(bom_csv, bom_parts)
+    accessories_csv: Path | None = None
+    if bom_parts and _write_accessories_csv(fab / "accessories.csv", bom_parts):
+        accessories_csv = fab / "accessories.csv"
 
     step_path: Path | None = None
     render_path: Path | None = None
@@ -316,6 +335,7 @@ def _export_fab(
         "zip": str(zip_path),
         "files": files,
         "bom_csv": str(bom_csv) if bom_csv else None,
+        "accessories_csv": str(accessories_csv) if accessories_csv else None,
         "step": str(step_path) if step_path else None,
         "board_3d_png": str(render_path) if render_path else None,
         "step_model_coverage": step_coverage,
@@ -352,7 +372,7 @@ def export_fab(
         for source in sorted(staging.iterdir()):
             if source.is_file():
                 source.replace(out / source.relative_to(staging))
-        for key in ("fab_dir", "zip", "bom_csv", "step", "board_3d_png"):
+        for key in ("fab_dir", "zip", "bom_csv", "accessories_csv", "step", "board_3d_png"):
             if result[key] is not None:
                 result[key] = str(out / Path(result[key]).relative_to(staging))
         return result

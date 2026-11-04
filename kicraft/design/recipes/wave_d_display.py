@@ -49,7 +49,7 @@ WS2812_EXTERNAL_STRIP = _recipe(
     ports=(Port(name="vdd_5v", direction="power"), Port(name="gnd", direction="power"), Port(name="data_in", direction="input")),
     internal=("data_shifted", "data_series"),
     parts=(
-        _part("connector", "J", "WS2812 STRIP", "Connector_Generic:Conn_01x03", "Connector_PinHeader_2.54mm:PinHeader_1x03_P2.54mm_Vertical"),
+        _part("connector", "J", "WJ126V-5.0-3P", "screw-terminal-5mm-3p:WJ126V-5.0-3P", "screw-terminal-5mm-3p:CONN-TH_3P-P5.00_WJ126V-5.0-3P", mpn="WJ126V-5.0-03P-14-00A"),
         _part("level_shifter", "U", "SN74HCT245PWR-JSM", "sn74hct245:SN74HCT245PWR-JSM", "sn74hct245:TSSOP-20_L6.5-W4.4-P0.65-LS6.4-BL", mpn="SN74HCT245PWR-JSM"),
         _passive("series_resistor", "R", "330R"), _passive("bulk", "C", "100nF"),
     ),
@@ -63,7 +63,7 @@ WS2812_EXTERNAL_STRIP = _recipe(
     source=Source(url="https://datasheet.lcsc.com/datasheet/pdf/bc8264a6d62c958a89e25ec8cc82b690.pdf?productCode=C2761795", title="Worldsemi WS2812B V5", revision="V5", reviewed_date="2026-10-11", sections=("Typical Application Circuit", "Cascade Method", "Electrical Characteristics")),
     assertions=(Assertion(code="ws2812_external_strip_output", message="J1 pin 2 is the only level-controlled DIN output; J1 pin 1 is a 5 V strip supply and pin 3 is its return. Supply current, cable EMI, and strip-side injection remain unmeasured."),),
     default=True,
-)
+).model_copy(update={"external_interface_protocols": ("ws2812",)})
 
 
 # AL8860 typical buck loop: VIN -> 0.100 ohm sense resistor -> LED anode ->

@@ -730,23 +730,19 @@ def shield_tie_specs(
             )
             mp = mate.GetPosition()
             d_mm = ((pcbnew.ToMM(mp.x - p.x)) ** 2 + (pcbnew.ToMM(mp.y - p.y)) ** 2) ** 0.5
-            # Touching pads are already connected; a far mate means this is not
-            # the shield-leg shape and a straight tie would cross the part.
-            if d_mm < 0.1 or d_mm > max_mm:
+            # A plated hole already inside its same-net SMD land is connected;
+            # in particular, thermal-pad holes are not connector shield legs.
+            if mate.HitTest(p, 0) or d_mm < 0.1 or d_mm > max_mm:
                 continue
-            # The tie joins the legs to the SMD pad, but on the PARENT that
-            # whole cluster can still be an island: the F.Cu pour is
-            # clearance-walled out of the connector area and the B.Cu plane
-            # loses its spokes to the slot holes -- the round then burns on
-            # 1-3 GND ratlines until the build clock dies. A via at the SMD
-            # end bonds the island straight down to the B.Cu plane. (Never on
-            # a PTH mate: that would drill into the mate's own hole.)
+            # The starting PTH already bonds the tie to both copper faces.
+            # Drilling a second via at an SMD mate would put the drill through
+            # its assembly mask opening.
             specs.append(
                 BreakoutSpec(
                     ref=ref,
                     pad=pad.GetNumber(),
                     waypoints=[(pcbnew.ToMM(mp.x), pcbnew.ToMM(mp.y))],
-                    via_at_end=bool(smd) and bool(cfg.get("shield_tie_via", True)),
+                    via_at_end=False,
                 )
             )
     return specs
@@ -935,18 +931,19 @@ def add_breakout_stubs(
             )
 
         def _via_fits(xy: tuple[float, float]) -> bool:
-            if spec.via_outside_smd_pads:
-                from kicraft.autoplacer.brain.gnd_pour import (
-                    _via_clears_board_edge,
-                    _via_hits_smd_pad,
-                )
+            from kicraft.autoplacer.brain.gnd_pour import (
+                _via_clears_board_edge,
+                _via_hits_smd_pad,
+            )
 
-                point = _pt(xy)
-                radius = int(pcbnew.FromMM(via_r_mm))
-                if not _via_clears_board_edge(
-                    point.x, point.y, edge_geometry=via_edge_geometry, via_radius_iu=radius
-                ) or _via_hits_smd_pad(board, point, radius):
-                    return False
+            point = _pt(xy)
+            radius = int(pcbnew.FromMM(via_r_mm))
+            if _via_hits_smd_pad(board, point, radius, authorized_net=net_code):
+                return False
+            if spec.via_outside_smd_pads and not _via_clears_board_edge(
+                point.x, point.y, edge_geometry=via_edge_geometry, via_radius_iu=radius
+            ):
+                return False
             if not _point_clears_obstacles(via_obs, xy[0], xy[1]):
                 return False
             for o_net, o_a, o_b, o_hw, o_cl, _o_layer in stamped:

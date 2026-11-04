@@ -2455,8 +2455,16 @@ def test_a_multi_position_terminal_realizes_one_terminal_per_contact():
         "declared-interface-unrealized": [],
     }
 
-    # Eight contacts are one short; rejection is independent of supplier-specific wording.
-    eight_group = _lowered_terminal_group(_terminal_requirement(8, 9))
+    from kicraft.server.stage_work_units import _group_realization_units
+    four_group = _lowered_terminal_group(_terminal_requirement(4, 4))
+    assert four_group.quantity == 2
+    assert _group_realization_units(four_group, "screw-terminal") == 4
+    reserved_group = _lowered_terminal_group(_terminal_requirement(8, 9))
+    assert _group_realization_units(reserved_group, "screw-terminal") >= 9
+
+    # Construct a genuinely eight-position bank: a nine-position obligation now
+    # reserves the extra position instead of silently building too few contacts.
+    eight_group = _lowered_terminal_group(_terminal_requirement(8, 8))
     defects = _requirement_obligation_defects([payload], [eight_group])
     assert (defects == {
         "physical-obligation-unfulfilled": [],

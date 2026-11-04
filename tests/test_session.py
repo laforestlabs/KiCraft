@@ -177,7 +177,8 @@ def test_legacy_compiler_only_graph_needs_committed_wiring_status():
 
 
 @pytest.mark.parametrize("recipe", [
-    "rp2040-minimal@1", "rp2040-minimal@2", "drv8833-dual-motor@1",
+    "rp2040-minimal@1", "rp2040-minimal@2", "drv8833-dual-motor@1", "drv8833-dual-motor@2",
+    "esp32-c3-mini-1-minimal@1", "esp32-c3-mini-1-h4x-minimal@1",
     "tps54331-adjustable@1", "tps54331-12v-1a@1",
 ])
 @pytest.mark.parametrize("ownership", ["manifest", "part"])

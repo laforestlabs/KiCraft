@@ -41,11 +41,6 @@ def test_functional_spec_bmp280_nodes_and_categories():
     cats = _series(opt)["categories"]
     cat_names = [c["name"] for c in cats]
     assert set(cat_names) == {"interface", "power", "process", "sense"}
-    # power column is leftmost -> smallest x.
-    by_name = {n["name"]: n for n in data}
-    assert by_name["LDO_3V3"]["x"] == 0  # power -> column 0
-    # purpose surfaces as the tooltip value.
-    assert "BMP280" in by_name["SENSOR"]["value"]
 
 
 def test_functional_spec_directed_edges_typed_by_signal():

@@ -868,7 +868,10 @@ def test_raw_legacy_recipe_ids_identify_artifacts_needing_regeneration():
 
 
 @pytest.mark.parametrize(("old", "new"), [
-    ("drv8833-dual-motor@1", "drv8833-dual-motor@2"),
+    ("drv8833-dual-motor@1", "drv8833-dual-motor@3"),
+    ("drv8833-dual-motor@2", "drv8833-dual-motor@3"),
+    ("esp32-c3-mini-1-minimal@1", "esp32-c3-mini-1-minimal@2"),
+    ("esp32-c3-mini-1-h4x-minimal@1", "esp32-c3-mini-1-h4x-minimal@2"),
     ("tps54331-adjustable@1", "tps54331-adjustable@2"),
     ("tps54331-12v-1a@1", "tps54331-12v-1a@2"),
 ])
@@ -887,9 +890,26 @@ def test_electrical_fix_versions_migrate_saved_selection_without_mutation(old, n
     with pytest.raises(ValueError, match="unknown parameters"):
         migrate_recipe_selection(saved.model_copy(update={"parameters": {"unexpected": 1}}))
 
+@pytest.mark.parametrize("old", ["drv8833-dual-motor@1", "drv8833-dual-motor@2"])
+def test_legacy_motor_without_logic_supply_requires_architecture_regeneration(old):
+    from kicraft.design.stage_state import legacy_recipe_resume_stage
+
+    definition = get_recipe("drv8833-dual-motor@3")
+    selection = RecipeSelection(
+        recipe=old, instance="motor", sheets={"interface": "MOTOR"},
+        port_bindings={port.name: port.name.upper() for port in definition.ports
+                       if port.required and port.name != "logic_vdd"},
+    )
+    with pytest.raises(ValueError, match="logic_vdd"):
+        migrate_recipe_selection(selection)
+    assert legacy_recipe_resume_stage({
+        "architecture": {"recipe_selections": [selection.model_dump()]},
+        "bom": {"parts": []},
+    }) == "architecture"
+
 
 def test_drv8833_charge_pump_capacitor_is_between_vcp_and_vm():
-    definition = get_recipe("drv8833-dual-motor@2")
+    definition = get_recipe("drv8833-dual-motor@3")
     selection = RecipeSelection(
         recipe=definition.recipe, instance="motor", sheets={"interface": "MOTOR"},
         port_bindings={port.name: port.name.upper() for port in definition.ports if port.required},
@@ -904,6 +924,26 @@ def test_drv8833_charge_pump_capacitor_is_between_vcp_and_vm():
     assert nets[capacitor, "1"] == nets[driver, "11"]
     assert nets[capacitor, "2"] == nets[driver, "12"] == "VM"
     assert nets[capacitor, "1"] != nets[capacitor, "2"]
+    pullup = next(part.ref for part in expansion.parts if part.recipe_role == "fault_pullup")
+    assert nets[pullup, "1"] == nets[driver, "8"] == "FAULT_N"
+    assert nets[pullup, "2"] == "LOGIC_VDD"
+    assert nets[pullup, "2"] != nets[driver, "12"]
+
+@pytest.mark.parametrize(("binding", "expected"), [(None, "VIN"), ("CONTROL", "CONTROL")])
+def test_me6211_enable_binding_or_default_tracks_pin_three(binding, expected):
+    ports = {"input": "VIN", "gnd": "GND", "output": "VOUT"}
+    if binding is not None:
+        ports["enable"] = binding
+    expansion = expand_recipe(RecipeSelection(
+        recipe="me6211-3v3@1", instance="ldo",
+        sheets={"power": "POWER"}, port_bindings=ports,
+    ))
+    regulator = next(part.ref for part in expansion.parts if part.recipe_role == "regulator")
+    nets = {
+        (pin.ref, pin.pin): connection.net_name
+        for connection in expansion.connections for pin in connection.endpoints
+    }
+    assert nets[regulator, "3"] == expected
 
 
 def test_tps54331_external_enable_is_connected_without_local_shunt():
@@ -2793,7 +2833,7 @@ def test_fixed_programming_uart_is_not_reallocated_as_an_application_interface()
     from kicraft.design.models import CircuitRequirement
     from kicraft.design.recipes.pin_allocator import allocate_requirement_pins
 
-    definition = get_recipe("esp32-c3-mini-1-minimal@1")
+    definition = get_recipe("esp32-c3-mini-1-minimal@2")
     requirement = CircuitRequirement(
         id="core",
         sheet="MCU",
@@ -2818,7 +2858,7 @@ def test_pin_allocator_honors_explicit_gpio_number_ports():
     from kicraft.design.models import CircuitRequirement
     from kicraft.design.recipes.pin_allocator import allocate_requirement_pins
 
-    definition = get_recipe("esp32-c3-mini-1-minimal@1")
+    definition = get_recipe("esp32-c3-mini-1-minimal@2")
     requirement = CircuitRequirement(
         id="mcu_core",
         sheet="MCU",
@@ -2883,7 +2923,7 @@ def test_explicit_gpio_and_adc_on_same_net_cannot_move_to_a_capable_neighbor():
     [
         "esp32-s3-wroom-1-minimal@1",
         "esp32-wroom-32e-minimal@1",
-        "esp32-c3-mini-1-minimal@1",
+        "esp32-c3-mini-1-minimal@2",
         "stm32f103c8t6-minimal@1",
         "attiny402-updi-minimal@1",
         "attiny412-updi-minimal@1",
@@ -2894,7 +2934,7 @@ def test_explicit_gpio_and_adc_on_same_net_cannot_move_to_a_capable_neighbor():
     ],
 )
 def test_wave_a_mcu_recipes_expand_with_complete_ownership(recipe):
-    native_usb_recipes = {"esp32-s3-wroom-1-minimal@1", "esp32-c3-mini-1-minimal@1"}
+    native_usb_recipes = {"esp32-s3-wroom-1-minimal@1", "esp32-c3-mini-1-minimal@2"}
     definition = get_recipe(recipe)
     bindings = {"vdd": "+3V3", "gnd": "GND"}
     if recipe in native_usb_recipes:
@@ -3932,7 +3972,7 @@ def test_c3_typed_uart_bridge_uses_fixed_pins_and_preserves_all_ten_gpios(
 def test_esp32_auto_reset_expansion_has_reference_electrical_truth_table(dtr, rts, en, boot):
     expansion = expand_recipe(
         RecipeSelection(
-            recipe="esp32-c3-mini-1-minimal@1",
+            recipe="esp32-c3-mini-1-minimal@2",
             instance="auto",
             sheets={"mcu": "MCU"},
             parameters={"auto_reset": True},
@@ -3985,7 +4025,7 @@ def test_esp32_auto_reset_expansion_has_reference_electrical_truth_table(dtr, rt
 def test_unused_fixed_programming_ports_are_private_and_add_no_support_parts():
     selections = [
         RecipeSelection(
-            recipe="esp32-c3-mini-1-minimal@1",
+            recipe="esp32-c3-mini-1-minimal@2",
             instance=instance,
             sheets={"mcu": "MCU"},
             port_bindings={
@@ -4141,7 +4181,7 @@ def test_direct_expansion_rejects_incomplete_disabled_or_aliased_auto_reset(enab
     with pytest.raises(ValueError):
         expand_recipe(
             RecipeSelection(
-                recipe="esp32-c3-mini-1-minimal@1",
+                recipe="esp32-c3-mini-1-minimal@2",
                 instance="invalid",
                 sheets={"mcu": "MCU"},
                 parameters={"auto_reset": enabled},
@@ -5660,9 +5700,9 @@ def test_usb_uart_recipes_expose_header_and_refuse_unbound_modem_contacts():
 @pytest.mark.parametrize(
     ("recipe", "gpio", "expected_pin"),
     [
-        ("esp32-c3-mini-1-minimal@1", 0, "12"),
-        ("esp32-c3-mini-1-minimal@1", 5, None),
-        ("esp32-c3-mini-1-minimal@1", 6, None),
+        ("esp32-c3-mini-1-minimal@2", 0, "12"),
+        ("esp32-c3-mini-1-minimal@2", 5, None),
+        ("esp32-c3-mini-1-minimal@2", 6, None),
         ("esp32-wroom-32e-minimal@1", 16, None),
         ("esp32-wroom-32e-minimal@1", 34, "6"),
         ("esp32-s3-wroom-1-minimal@1", 14, "22"),
@@ -5858,13 +5898,13 @@ def test_exact_c3_n4_identity_is_not_replaced_by_stocked_family_variant():
     result = resolve_architecture_recipes(explicit)
     assert not result.blocking
     core = next(row for row in result.selections if "mcu_core" in row.requirement_ids)
-    assert core.recipe == "esp32-c3-mini-1-minimal@1"
+    assert core.recipe == "esp32-c3-mini-1-minimal@2"
 
 
 @pytest.mark.parametrize("missing", ("usb_dm", "usb_dp"))
 def test_c3_h4x_requires_both_native_usb_ports(missing):
     selection = RecipeSelection(
-        recipe="esp32-c3-mini-1-h4x-minimal@1",
+        recipe="esp32-c3-mini-1-h4x-minimal@2",
         instance="main",
         sheets={"mcu": "MCU"},
         port_bindings={"vdd": "+3V3", "gnd": "GND", "usb_dm": "DM", "usb_dp": "DP"},
@@ -5981,8 +6021,8 @@ def test_explicit_uart_rejects_native_usb_contract(architecture_factory, recipe)
 
 @pytest.mark.parametrize("mcu_recipe", [
     "esp32-s3-mini-1u-n4r2-minimal@1",
-    "esp32-c3-mini-1-minimal@1",
-    "esp32-c3-mini-1-h4x-minimal@1",
+    "esp32-c3-mini-1-minimal@2",
+    "esp32-c3-mini-1-h4x-minimal@2",
 ])
 def test_reviewed_recipe_supply_locality_rejects_swapped_owned_roles(mcu_recipe):
     from kicraft.design.synthesis.autoplacer import _recipe_local_bypasses
@@ -6007,3 +6047,20 @@ def test_reviewed_recipe_supply_locality_rejects_swapped_owned_roles(mcu_recipe)
     cap.recipe_role = "bulk_decoupling"
     with pytest.raises(ValueError, match="recipe role"):
         _recipe_local_bypasses(SimpleNamespace(recipe_selections=selections), bom)
+
+@pytest.mark.parametrize("recipe", [
+    "esp32-c3-mini-1-minimal@2", "esp32-c3-mini-1-h4x-minimal@2",
+])
+def test_c3_bypass_expansion_keeps_both_caps_on_mcu_supply_and_return(recipe):
+    expansion = expand_recipe(RecipeSelection(
+        recipe=recipe, instance="core", sheets={"mcu": "MCU"},
+        port_bindings={"vdd": "LOGIC", "gnd": "GND", "usb_dm": "DM", "usb_dp": "DP"},
+    ))
+    nets = {
+        (pin.ref, pin.pin): connection.net_name
+        for connection in expansion.connections for pin in connection.endpoints
+    }
+    for role in ("local_decoupling", "bulk_decoupling"):
+        capacitor = next(part for part in expansion.parts if part.recipe_role == role)
+        assert capacitor.footprint == "Capacitor_SMD:C_0402_1005Metric"
+        assert {nets[capacitor.ref, "1"], nets[capacitor.ref, "2"]} == {"LOGIC", "GND"}

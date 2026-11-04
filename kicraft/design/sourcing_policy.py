@@ -339,3 +339,75 @@ def decide(
     )
 
 
+def validate_bom_accessories(bom, architecture) -> tuple[list[str], list[dict]]:
+    """Qualify non-PCB purchases and retain the lowerer's required accessories.
+
+    Quantities are per owner, and catalog identity must match exactly: a shunt
+    cannot be inferred from the header's MPN or silently disappear from its BOM.
+    """
+    from kicraft.design.lowering import lower_requirement
+    from kicraft.parts_library import jlcparts
+
+    requirements = {row.id: row for row in (getattr(architecture, "requirements", ()) or ())}
+    errors: list[str] = []
+    totals: dict[tuple[str, str], int] = {}
+    owners: dict[tuple[str, str], list[dict]] = {}
+    for requirement in requirements.values():
+        try:
+            artifact = lower_requirement(requirement)
+        except (TypeError, ValueError):
+            continue  # Other construction diagnostics own an unlowerable requirement.
+        if artifact is None:
+            continue
+        for group in artifact.groups:
+            if not group.accessories:
+                continue
+            matches = [
+                part for part in bom.parts
+                if part.resolution_source == "lowerer"
+                and part.resolution_id == artifact.lowerer_id
+                and part.lowering_requirement_id == requirement.id
+                and part.lowering_role == group.role
+                and part.mpn == group.mpn
+                and part.symbol == group.symbol
+                and part.footprint == group.footprint
+            ]
+            if len(matches) != group.quantity:
+                errors.append(
+                    f"{requirement.id}: required accessory-bearing {group.role} owners "
+                    f"expected {group.quantity}, found {len(matches)}"
+                )
+    for part in bom.parts:
+        accessories = tuple(part.accessories)
+        if part.resolution_source == "lowerer" and part.lowering_requirement_id in requirements:
+            try:
+                artifact = lower_requirement(requirements[part.lowering_requirement_id])
+            except (TypeError, ValueError) as exc:
+                errors.append(f"{part.ref}: cannot verify accessory ownership: {exc}")
+                continue
+            if artifact is not None and artifact.lowerer_id == part.resolution_id:
+                group = next((g for g in artifact.groups if g.role == part.lowering_role), None)
+                if group is not None and tuple(group.accessories) != accessories:
+                    errors.append(f"{part.ref}: required lowerer accessories do not match the BOM")
+        for index, item in enumerate(accessories, 1):
+            key = (item.lcsc.upper(), item.mpn.casefold())
+            totals[key] = totals.get(key, 0) + item.quantity
+            owners.setdefault(key, []).append({
+                "accessory_id": f"{part.ref}:A{index}", "owner_ref": part.ref,
+                "quantity": item.quantity,
+            })
+    receipt: list[dict] = []
+    for (lcsc, mpn), quantity in totals.items():
+        row = jlcparts.lookup(lcsc)
+        if row is None or (row.get("model") or "").casefold() != mpn:
+            errors.append(f"{lcsc} ({mpn}): accessory is absent or has a different catalog MPN")
+            continue
+        stock = row.get("stock") or 0
+        if stock < quantity:
+            errors.append(f"{lcsc} ({mpn}): accessory stock {stock} is below quantity {quantity}")
+            continue
+        receipt.append({
+            "kind": "accessory", "exact_lcsc": lcsc, "catalog_mpn": row["model"],
+            "quantity": quantity, "stock": stock, "owners": owners[(lcsc, mpn)],
+        })
+    return errors, receipt
