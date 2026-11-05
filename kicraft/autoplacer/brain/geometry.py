@@ -39,6 +39,16 @@ def rotate_vector(v: Point, deg: float) -> Point:
     return Point(v.x * cos_t + v.y * sin_t, -v.x * sin_t + v.y * cos_t)
 
 
+def zone_anchor_offset(zone: dict, rotation: float) -> Point | None:
+    """World-oriented block-center-to-anchor offset at the chosen rotation."""
+    offsets = zone.get("anchor_offsets_by_rotation") or {}
+    offset = offsets.get(rotation % 360.0)
+    if offset is not None:
+        return offset
+    local = zone.get("anchor_offset_mm")
+    return rotate_vector(local, rotation) if local is not None else None
+
+
 def transform_point(point: Point, origin: Point, deg: float) -> Point:
     """Rigid local->world transform: rotate ``point`` about the origin by
     ``deg`` (KiCad CW), then translate by ``origin``. Matches

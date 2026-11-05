@@ -752,3 +752,28 @@ def test_ensure_edge_blocks_extremal_noop_when_already_extremity():
     before = solved["B0"].pos.x
     assert _ensure_edge_blocks_extremal(solved, {"B0": {"edge": "left"}}) == []
     assert solved["B0"].pos.x == before
+
+
+@pytest.mark.parametrize("side", ["left", "right", "top", "bottom"])
+def test_same_edge_bank_aligns_connector_datums_not_leaf_boxes(side):
+    # The second leaf has a much larger box; its connector datum, not the
+    # outboard end of its unrelated content, determines the bank alignment.
+    horizontal = side in ("top", "bottom")
+    sign = 1 if side in ("right", "bottom") else -1
+    first = _block("B0", 10, 10, 4, 4)
+    second = _block("B1", 30, 30, 20, 20)
+    if horizontal:
+        second.pos.y = first.pos.y + sign * 1.15
+    else:
+        second.pos.x = first.pos.x + sign * 1.15
+    offset = Point(0, 0)
+    zones = {
+        "B0": {"edge": side, "anchor_offsets_by_rotation": {0.0: offset}},
+        # This connector's in-plane mouth overhangs its board datum by 0.5mm.
+        "B1": {"edge": side, "anchor_offsets_by_rotation": {0.0: offset},
+               "edge_anchor_delta_mm": 0.5},
+    }
+    _ensure_edge_blocks_extremal({"B0": first, "B1": second}, zones)
+    a = first.pos.y if horizontal else first.pos.x
+    b = second.pos.y if horizontal else second.pos.x
+    assert b - sign * 0.5 == pytest.approx(a)

@@ -43,11 +43,13 @@ and above any download. It is derived from that project's own persisted evidence
 gate and synthesis-check summaries, and any independent verification recorded for
 the run) — it is not a separate status database, so reopening a project derives
 the same answer.
+Completion headlines and badges describe generation, not independent product
+acceptance; the assurance reading separately exposes recorded gaps and verification.
 
 - **Software-verified complete export** — a *current*, artifact-hash-bound
   independent verification (an acceptance audit or filled acceptance evidence)
   matches this exact export. Hardware qualification is still the user's to get.
-- **Fabrication-ready package · independently unverified** — a clean,
+- **Generated package · independently unverified** — a clean,
   fabrication-gate-passing export with nothing recorded to review. Downloadable,
   but *not* independently verified as fulfilling the original brief. Parts
   coverage, a committed review stage, or the presence of a downloadable package

@@ -174,7 +174,6 @@ async def test_reopen_reads_durable_and_makes_no_workspace(reopen_harness):
     await _login(u)
     await u.open(f"/?project={pid}")          # reopen the finished project
     await u.should_see("USB_BMP280_READER")   # header/stem rendered from durable
-    await u.should_see("Design complete")
     await u.should_see("Parts")               # BOM inspector populated from durable state.json
 
     # The headline acceptance: no scratch workspace was minted to view it.

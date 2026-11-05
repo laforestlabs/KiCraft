@@ -233,17 +233,14 @@ def attachment_constraints_to_zones(
     Returns ``(zones, allowed_rotations)`` where:
 
       - ``zones[block_ref]`` carries a single ``edge``/``corner``/``zone``
-        key (from the constraint), plus ``anchor_offset_mm`` (a ``Point``
-        in local, unrotated frame: ``local_anchor - body_center``) and
-        ``rotation`` (the chosen base rotation for this block).
+        key plus the local zero-rotation anchor offset, per-rotation
+        world-oriented anchor offsets, and the chosen base rotation.
+        Per-rotation offsets select the constrained board-facing side after
+        rotation; rotating a single zero-degree extremity is not equivalent.
 
       - ``allowed_rotations[block_ref]`` is the list of rotation
         candidates the solver may try via ``_optimize_rotations`` and
         the SA rotation move.
-
-    ``anchor_offset_mm`` is computed in the *unrotated* local frame so
-    the solver can rotate it per ``comp.rotation`` at placement time --
-    this matches ``_world_artifact_origin``'s convention.
     """
     zones: dict[str, dict[str, Any]] = {}
     allowed_rots: dict[str, list[float]] = {}
@@ -289,10 +286,31 @@ def attachment_constraints_to_zones(
             local_anchor.x - body_center.x,
             local_anchor.y - body_center.y,
         )
+        # A board-edge extremity is selected *after* rotation. Rotating the
+        # extremity selected at zero degrees chooses a different face for an
+        # asymmetric connector (e.g. the long end of a vertical pin header).
+        rotated_center = {
+            rotation: geometry.rotate_vector(body_center, rotation)
+            for rotation in spec.models
+        }
+        anchor_offsets_by_rotation = {}
+        for rotation, model in spec.models.items():
+            entry = next(
+                (entry for entry in model.constraint_entries if entry.constraint is primary),
+                None,
+            )
+            if entry is not None:
+                center = rotated_center[rotation]
+                anchor_offsets_by_rotation[rotation % 360.0] = Point(
+                    entry.local_anchor_offset.x - center.x,
+                    entry.local_anchor_offset.y - center.y,
+                )
 
         zone_entry: dict[str, Any] = {
             "anchor_offset_mm": anchor_offset,
             "rotation": float(chosen_rotation),
+            "anchor_offsets_by_rotation": anchor_offsets_by_rotation,
+            "edge_anchor_delta_mm": primary.outward_overhang_mm - primary.inward_keep_in_mm,
         }
         zone_entry[primary.target] = primary.value
         zones[block_ref] = zone_entry

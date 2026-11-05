@@ -366,6 +366,70 @@ def test_attachment_constraints_to_zones_anchor_is_unrotated():
     assert math.isclose(offset_0.y, offset_90.y, abs_tol=1e-9)
 
 
+@pytest.mark.parametrize("rotation", [0.0, 90.0, 180.0, 270.0])
+def test_rotated_header_anchor_selects_board_facing_end(rotation):
+    from kicraft.autoplacer.brain.geometry import rotate_vector, zone_anchor_offset
+
+    header = _comp("J1", pos=Point(9.24, 21.6324), width=15.33,
+                   height=2.59, kind="connector")
+    header.body_center = Point(9.24, 21.6324)
+    header.mating_axis = "board_normal"
+    layout = _layout("MCU", width=35, height=30, components={"J1": header})
+    artifact = _artifact(layout)
+    derived = derive_attachment_constraints(
+        [artifact], parent_local_components={},
+        component_zones={"J1": "edge:bottom"}, cfg={}, rotation_step_deg=0,
+    )
+    zone = attachment_constraints_to_zones(derived, {0: "B"}, [artifact])[0]["B"]
+    model = derived.child_specs[0].models[rotation]
+    body = model.transformed.transformed_components["J1"]
+    # The component is also the entire synthetic block in this fixture.
+    center = rotate_vector(header.body_center, rotation)
+    offset = zone_anchor_offset(zone, rotation)
+    assert center.y + offset.y == pytest.approx(body.physical_bbox()[1].y)
+    assert center.x + offset.x == pytest.approx(body.body_center.x)
+
+
+def test_bank_alignment_preserves_rigid_leaf_bypass_locality():
+    from kicraft.autoplacer.brain.subcircuit_instances import transform_loaded_artifact
+    from kicraft.cli.compose_subcircuits import _ensure_edge_blocks_extremal
+
+    header = _comp("J1", pos=Point(9.24, 21.6324), width=15.33,
+                   height=2.59, kind="connector")
+    header.mating_axis = "board_normal"
+    regulator = _comp("U1", pos=Point(18, 12), kind="ic")
+    bypass = _comp("C1", pos=Point(19, 13), kind="passive")
+    artifact = _artifact(_layout("MCU", width=35, height=30, components={
+        "J1": header, "U1": regulator, "C1": bypass,
+    }))
+    derived = derive_attachment_constraints(
+        [artifact], parent_local_components={},
+        component_zones={"J1": "edge:bottom"}, cfg={}, rotation_step_deg=0,
+    )
+    zones, _ = attachment_constraints_to_zones(derived, {0: "B"}, [artifact])
+    block = artifact_to_component(artifact, ref="B", rotation=90)
+    other = _comp("OTHER", pos=Point(70, 80), kind="subcircuit")
+    zones["OTHER"] = {"edge": "bottom", "anchor_offset_mm": Point(0, 0)}
+    solved = {"B": block, "OTHER": other}
+
+    def placed():
+        placement = placements_from_solved_state(solved, [artifact], {0: "B"})[
+            artifact.instance_path
+        ]
+        return transform_loaded_artifact(artifact, placement.origin, placement.rotation)
+
+    before = placed()
+    old_y = block.pos.y
+    _ensure_edge_blocks_extremal(solved, zones)
+    after = placed()
+    assert block.pos.y > old_y
+    for ref in ("J1", "U1", "C1"):
+        assert after.transformed_components[ref].pos.y - before.transformed_components[ref].pos.y == pytest.approx(block.pos.y - old_y)
+    assert after.transformed_components["U1"].pos.dist(
+        after.transformed_components["C1"].pos
+    ) == pytest.approx(2 ** 0.5)
+
+
 # ---------------------------------------------------------------------------
 # infer_interconnect_nets_pre_placement: synthetic-ref rewriting
 

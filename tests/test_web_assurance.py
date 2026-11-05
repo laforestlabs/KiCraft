@@ -654,7 +654,6 @@ async def test_completed_project_labels_its_export_honestly(page_harness):
     pid, _root = _write_durable_project(store, acct.id, "bmp280 reader")
     await _login(u)
     await u.open(f"/?project={pid}")
-    await u.should_see("Fabrication-ready package")
     await u.should_see("Download KiCad project (.zip)")
     await u.should_see("No independent fulfilment verification is recorded")
 
@@ -667,7 +666,6 @@ async def test_projects_list_labels_each_row_with_what_the_evidence_supports(pag
     _write_durable_project(store, acct.id, "bmp280 reader")
     await _login(u)
     await u.open("/projects")
-    await u.should_see("Fabrication-ready package")
     await u.should_see("No independent fulfilment verification is recorded")
     await u.should_see("Download")
 

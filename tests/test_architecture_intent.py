@@ -916,8 +916,8 @@ def test_rejected_first_draft_counts_a_contract_rejection_not_a_semantic_repair(
             "(lcsc,mfr,package,manufacturer,library_type,stock,price,description,attributes) "
             "VALUES (?,?,?,?,?,?,?,?,?)",
             [
-                (77096, "GRM31CR71H475KA12L", "1206", "Murata", "expand", 0, "", "",
-                 json.dumps({"Capacitance": "4.7uF", "Voltage Rating": "50V"})),
+                (15850, "CL21A106KAYNNNE", "0805", "Samsung Electro Mechanics", "expand", 0, "", "",
+                 json.dumps({"Capacitance": "10uF", "Voltage Rating": "25V"})),
                 (77093, "GRM31CR71E106KA12L", "1206", "Murata", "expand", 0, "", "",
                  json.dumps({"Capacitance": "10uF", "Voltage Rating": "25V"})),
             ],

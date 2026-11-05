@@ -1,7 +1,93 @@
 # Surprise-me completion: continuation handoff
 
 Date: **2026-10-12 (UTC)**.
-Status: **2026-11-03–04 execution closed with zero independently audited product gains; full comparison not measured; not development/release-qualified**.
+Status: **2026-11-04–05 codebase-review/live-GUI follow-up in progress; no new accepted GUI product yet; full 60-brief comparison not measured**.
+
+## Codebase review and actual GUI follow-up — 2026-11-04–05
+
+Durable evidence:
+`/home/kicraft/.kicraft/debug/codebase-review-live-20261104T041014Z/`.
+Start **2026-11-04 04:10:14.925546 UTC** and eight-hour minimum finish
+**2026-11-04 12:10:14.925546 UTC** were recorded in `session.json`.
+The user subsequently authorized all-change commits/pushes and canonical
+production deployment; this does not authorize catalog refreshes, cap changes,
+original-project mutations or weakening product acceptance.
+
+The selected-five GUI review cohort records **0 accepted products / 5** in
+each of passes P1–P4, with **17 actual submitted jobs** across those passes.
+This is not the approved plan's separate fixed-six pilot. The two fresh
+full 60-brief arms remain **not measured**; diagnostic native boards and
+selected GUI winners must never be spliced into them.
+
+Source checkpoint `105ee9b` preserves the broad review fixes; pushed checkpoint
+`fca9db4` adds the qualified compact TLV62569 input support and refuses old
+`@1/@2` graphs without upstream regeneration. Source-owned qualified Hall
+pin mappings, exact STM32G030 support, both MCU bypasses, motor supply/protection,
+native inductor lands, all-connector edge ownership and full copper envelopes
+are repaired. Coverage and execution evidence are under `coverage_assignments.json`,
+the per-finding reports and bounded verification receipts.
+
+**Current physical outcome:** native77 exported fabrication files but failed
+independent electrical acceptance for its remote buck input capacitors.
+Fresh actual architecture/BOM/wiring CLI regeneration in `whole_path84/1149`
+preserves the original Hall brief, intent, functional specification and every
+requirement port. Native85 independently passes the whole static electrical
+domain: actual C8-to-VIN/GND distances **2.024846 / 2.850000 mm**, within 3 mm.
+It nevertheless remains an **overall failure**, with no fabrication export:
+J1 is **1.275 mm inboard** of the required bottom edge. A negative metric here
+does not mean housing overhang. `strategy88_PARENT_PRODUCT_CLOSURE.json` and
+`native85_parent_geometry_witness89.json` preserve the failed approach and
+material source-owned strategy change.
+
+The reusable parent per-rotation connector-datum/bank repair has **129 passing
+consumer geometry cases and 3 skips**; same-edge acceptance tolerances are
+unchanged. Cold `native_tail90`, using the exact frozen native85 workspace,
+now has **PASS in both independent final electrical and fabrication domains**:
+28 parts, 97 logical contacts, all seven local bypass pairs within 3 mm, all six
+connectors on the required edge, and 19 matching fabrication ZIP members.
+The actual board has two copper layers. Fresh DRC has **0 errors, 0 opens and
+1 warning**, not zero warnings: both auditors reviewed the 0.0509 mm same-net
+VBUS stub as nonblocking under the unchanged existing gates. STEP remains
+best-effort, with 22/28 bodies. The fabrication report discloses its recovered
+custody-snapshot limitation; no energized or full assembly-height claim is made.
+Reports: `AuditNative90Electrical_FINAL.txt/json`,
+`AuditNative90Fabrication_FINAL.txt/json`, and `native90_FINAL_CUSTODY.json`.
+This is a completed native diagnostic, **not a GUI, fixed-six or primary gain**;
+native44/48/54/58/66/73/77/85 failures or holds are still retained.
+
+Full verification91 exercised all **6,374** cases: **6,357 passed, 1 failed,
+16 skipped**. Its stale synthetic capacitor catalog is corrected; the
+rejection/commit-accounting scenario passes, without changing runtime behavior.
+The failed full run remains preserved. Final bounded verification94 completed
+all **6,374** cases: **6,358 passed, 0 failures, 0 errors, 16 skipped**.
+
+The actual old GUI visibly called a nonfunctional, review-required Hall board
+“Design complete”. The shared completion caption/badges now say generation is
+complete, not that the product is independently accepted; the unverified
+assurance label no longer calls an unverified package fabrication-ready.
+This is presentation only: statuses, warnings, original records and acceptance
+gates are unchanged. Three incidental wording assertions were removed, not
+repinned. The physical producer remains byte-identical to native90; these final
+caption changes follow the full94 run and receive focused existing UI coverage
+and actual-site visual verification before new paid work.
+
+Long-lived production services are still at `7a8118e`; fresh subprocesses and
+static files can use the checkout, so this is not a pristine old-source runtime.
+No post-fix GUI job is admitted until whole-path proof, independent final
+artifact audits, terminal bounded verification, commit/push and idle canonical
+deployment complete. `targeted_GUI_after55_REGISTRATION.json` retains the exact
+unchanged Hall then Motor prompts for two serial actual-site diagnostics,
+not a new primary arm.
+
+Disk admission protects **4 GiB** plus double expected remaining writes;
+new GUI admission reserves **256 MiB per project** plus fixed evidence overhead.
+All originals, failed/interrupted attempts, source snapshots and production logs
+are protected. Verified unused browser downloads recovered **666,329,088 actual
+filesystem bytes**; passed-only fixture disposal is separately receipted.
+At the 01:40 UTC checkpoint, priced provider spend was **$0.294086913** plus
+**$0.071923564** unresolved exposure, conservatively **$0.366010477**.
+The $0.60/run and $12/session ceilings and all lower production caps remain
+unchanged; **$8** remains reserved for gated primary measurement.
 
 ## Board-outcomes execution — 2026-11-03–04 closeout
 

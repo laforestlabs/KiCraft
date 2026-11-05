@@ -1359,19 +1359,53 @@ def _ensure_edge_blocks_extremal(
     block_zones: dict[str, Any],
     margin_mm: float = 0.1,
 ) -> list[str]:
-    """Shift each edge-zoned block OUTBOARD so it is the extremity on its zoned
-    side, so the connector it contains defines the board edge and stays flush.
+    """Align same-edge connector datums, or make a solitary block extremal.
 
-    Without this, the parent solver may place another leaf's block a hair more
-    outboard than the edge-zoned connector's block; the board edge (= bbox union
-    of all blocks) is then drawn at that other block and the connector reads as
-    stranded inboard -- the KC-S8PC37 J1 signature once R8 is no longer masking
-    the edge. The shift is OUTBOARD-only (toward the empty board edge), so it
-    never creates an overlap; it just grows the board by the small amount the
-    other block had crowded past the connector. Returns the refs shifted.
+    Multi-leaf banks use each rotated connector's board-edge datum, including
+    its intentional overhang/inset. Whole-leaf bounds are not connector
+    positions. For a solitary edge block the existing bbox extremity policy
+    still protects it from unrelated leaves. All shifts are outward; the
+    subsequent courtyard-separation and geometry checks remain authoritative.
     """
+    from kicraft.autoplacer.brain.geometry import zone_anchor_offset
+
     shifted: list[str] = []
+
+    # Align the actual connector datums, not the outer boxes of their leaves.
+    # A leaf may contain copper or components beyond its connector and a
+    # rotated header's edge-facing end is not its unrotated bottom face.
+    banks: dict[str, list[tuple[str, float]]] = {}
+    for ref, zone in (block_zones or {}).items():
+        side = (zone or {}).get("edge")
+        comp = solved.get(ref)
+        if comp is None or side not in ("left", "right", "top", "bottom"):
+            continue
+        offset = zone_anchor_offset(zone, comp.rotation)
+        if offset is None:
+            continue
+        anchor = (comp.pos.x + offset.x if side in ("left", "right")
+                  else comp.pos.y + offset.y)
+        delta = float(zone.get("edge_anchor_delta_mm", 0.0))
+        datum = anchor + delta if side in ("left", "top") else anchor - delta
+        banks.setdefault(side, []).append((ref, datum))
+    aligned_refs: set[str] = set()
+    for side, members in banks.items():
+        if len(members) < 2:
+            continue
+        target = (min if side in ("left", "top") else max)(
+            anchor for _, anchor in members
+        )
+        for ref, anchor in members:
+            aligned_refs.add(ref)
+            delta = target - anchor
+            if abs(delta) <= 1e-9:
+                continue
+            _apply_slide(solved[ref], side in ("top", "bottom"), delta)
+            shifted.append(ref)
+
     for bref, zone in (block_zones or {}).items():
+        if bref in aligned_refs:
+            continue
         side = (zone or {}).get("edge")
         if side not in ("left", "right", "top", "bottom") or bref not in solved:
             continue

@@ -86,7 +86,7 @@ def _record_placed_extent(timings: dict[str, float], prefix: str, comps_dict: di
         )
 
 
-from .geometry import rotate_component_in_place, rotate_vector
+from .geometry import rotate_component_in_place, rotate_vector, zone_anchor_offset
 from .placement_scorer import PlacementScorer
 from .placement_utils import (
     _back_courtyard,
@@ -1631,11 +1631,8 @@ class PlacementSolver:
             cy += self.rng.uniform(-jitter, jitter)
 
             if comp.kind == "subcircuit":
-                anchor_off = zones.get(comp.ref, {}).get("anchor_offset_mm")
-                if anchor_off is not None:
-                    # KiCad-CW, matching how the block is actually stamped
-                    # (parent_adapter._rotated / _world_artifact_origin).
-                    off = rotate_vector(anchor_off, comp.rotation)
+                off = zone_anchor_offset(zones.get(comp.ref, {}), comp.rotation)
+                if off is not None:
                     cx -= off.x
                     cy -= off.y
 
@@ -1784,10 +1781,9 @@ class PlacementSolver:
                 target = tl.x + intent.inset_mm if edge == "left" else br.x - intent.inset_mm
                 return target - offset.x
             if comp.kind == "subcircuit":
-                anchor_off = zones.get(comp.ref, {}).get("anchor_offset_mm")
-                if anchor_off is not None:
-                    # KiCad-CW rotation, matching the stamp transform.
-                    rotated_x = rotate_vector(anchor_off, comp.rotation).x
+                off = zone_anchor_offset(zones.get(comp.ref, {}), comp.rotation)
+                if off is not None:
+                    rotated_x = off.x
                     if edge == "left":
                         return tl.x + connector_inset - rotated_x
                     else:
@@ -1817,10 +1813,9 @@ class PlacementSolver:
                 target = tl.y + intent.inset_mm if edge == "top" else br.y - intent.inset_mm
                 return target - offset.y
             if comp.kind == "subcircuit":
-                anchor_off = zones.get(comp.ref, {}).get("anchor_offset_mm")
-                if anchor_off is not None:
-                    # KiCad-CW rotation, matching the stamp transform.
-                    rotated_y = rotate_vector(anchor_off, comp.rotation).y
+                off = zone_anchor_offset(zones.get(comp.ref, {}), comp.rotation)
+                if off is not None:
+                    rotated_y = off.y
                     if edge == "top":
                         return tl.y + connector_inset - rotated_y
                     else:
@@ -2147,12 +2142,10 @@ class PlacementSolver:
                 # bias toward the inward edge so larger blocks don't slip
                 # outside the zone after edge-of-zone jitter.
                 if comp.kind == "subcircuit":
-                    anchor_off = zone_cfg.get("anchor_offset_mm")
+                    off = zone_anchor_offset(zone_cfg, comp.rotation)
                     off_x = 0.0
                     off_y = 0.0
-                    if anchor_off is not None:
-                        # KiCad-CW rotation, matching the stamp transform.
-                        off = rotate_vector(anchor_off, comp.rotation)
+                    if off is not None:
                         off_x, off_y = off.x, off.y
                     target_x = self.rng.uniform(zx0 + hw, max(zx0 + hw + 1, zx1 - hw))
                     target_y = self.rng.uniform(zy0 + hh, max(zy0 + hh + 1, zy1 - hh))

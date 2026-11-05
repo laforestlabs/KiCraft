@@ -1,5 +1,13 @@
 > **HISTORICAL — FreeRouting era.** FreeRouting was removed from the codebase on commit `a25e039` (2026-08-22); KiCad Routing Tools is the sole router (`kicraft/autoplacer/kicad_routing_tools.py`). File paths, `freerouting_*` config keys, `*_pre_freerouting.kicad_pcb` artifacts, and routing-behavior claims below describe the removed router — re-verify against the KRT adapter before relying on them.
 
+**Current parent geometry contract:** Connector edge anchors are selected in
+the rotated leaf frame, and same-edge leaves align their resulting board-edge
+datums rather than their whole-leaf bounding boxes. Explicit mating overhangs
+remain relative to that datum. A verified board-normal header's courtyard must
+fit on the board; an in-plane mating housing may overhang. Pads, traces, and
+vias still set the copper-clearance floor, and manual or fixed outlines are not
+grown.
+
 # Leaf-level edge-companion clearance (keep parts off a connector-pinned edge)
 
 **Status:** PLACEMENT FIXED + verified; routed confirmation OUTSTANDING (capped

@@ -35,17 +35,14 @@ def _repair_parent_outline(
     The required extent mirrors the rule enforced by
     :func:`_validate_parent_geometry`:
 
-    * every non-edge-constrained component **body** (courtyard) must fit,
-    * **all** pad copper must fit (edge connectors included),
-    * every stamped trace and via must fit,
+    * every non-edge-constrained component body (courtyard) must fit,
+    * a verified board-normal connector's body must fit even at an edge,
+    * all pad copper and every stamped trace and via must fit.
 
-    with ``margin_mm`` of copper-to-edge breathing room. Edge-constrained
-    component *bodies* are exempt (their housing legitimately mounts past the
-    PCB edge), so such refs contribute only their pads -- which, for a
-    correctly flush-mounted connector, already sit inboard and do not push the
-    edge out. The outline is only ever **grown**, never shrunk, so a
-    constraint-aware outline that already encloses everything (the normal
-    case) is left untouched and flush edge-mounting is preserved.
+    In-plane edge housings may legitimately project beyond the board to mate;
+    a board-normal header cannot use that exemption. Connector sides use the
+    zero-margin geometry floor plus copper clearance rather than the general
+    margin, so in-plane mouths are not unnecessarily buried.
 
     Mutates ``state.composition.board_state.board_outline`` in place when a
     grow is needed; :func:`_stamp_parent_board` then derives ``Edge.Cuts``
@@ -106,7 +103,7 @@ def _repair_parent_outline(
         flr_max_y = max(flr_max_y, p_br.y)
 
     for ref, comp in (composition.board_state.components or {}).items():
-        if ref not in edge_constrained:
+        if ref not in edge_constrained or comp.mating_axis == "board_normal":
             b_tl, b_br = comp.bbox()
             _grow(b_tl, b_br)
         for pad in comp.pads:
@@ -580,9 +577,8 @@ def _validate_parent_geometry(
     Two independent checks per component:
 
     * **Body** (``comp.bbox()`` = courtyard) must be inside the board outline,
-      EXCEPT for edge-constrained refs (USB-C, edge connectors) whose
-      housing legitimately extends past the PCB edge to mate with an
-      external host.
+      except edge-constrained in-plane housings that mate past the PCB edge.
+      A verified board-normal header must remain on the board.
     * **Pad copper** (``pad.bbox()`` = full pad extent) must be inside the
       board outline. Always. Overhanging pad copper is unfabricable; no
       exemption.
@@ -665,12 +661,10 @@ def _validate_parent_geometry(
         geometry_union_max_x = max(geometry_union_max_x, phys_br.x)
         geometry_union_max_y = max(geometry_union_max_y, phys_br.y)
 
-        # Body (courtyard) check: a non-edge-constrained component whose
-        # courtyard extends past the board outline is misplaced. Edge-pinned
-        # connectors are exempted because the housing legitimately mounts
-        # past the PCB edge.
+        # Board-normal headers do not have a housing that mates past the edge.
+        # Fabricated edge terminals have their own final geometry contract.
         body_tl, body_br = comp.bbox()
-        if ref in edge_constrained or ref in fabricated_edge_refs:
+        if (ref in edge_constrained and comp.mating_axis != "board_normal") or ref in fabricated_edge_refs:
             component_outside = False
         else:
             component_outside = _bbox_outside(body_tl.x, body_tl.y, body_br.x, body_br.y)

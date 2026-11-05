@@ -2739,7 +2739,7 @@ _SYNTH_CHECK_REL = Path(".kicraft") / "synthesis_check.json"
 # same reading the same way.
 _ASSURANCE_LEVELS: dict[str, tuple[str, str]] = {
     "verified": ("Software-verified complete export", "#34d399"),
-    "generated": ("Fabrication-ready package · independently unverified", "#60a5fa"),
+    "generated": ("Generated package · independently unverified", "#60a5fa"),
     "review_required": ("Generated with recorded gaps · review required", "#eab308"),
     "limited": ("Recorded capability limitation", "#f59e0b"),
     "partial": ("Incomplete or failed preview", "#f87171"),
@@ -3452,9 +3452,9 @@ def _headline_for(status: str, stage: str | None, act: dict, issues=()) -> str:
     if status == "finalizing":
         return "Finalizing the board build"
     if status == "complete":
-        return "Design complete"
+        return "Generation complete"
     if status == "complete_with_warnings":
-        return "Complete, with cautions"
+        return "Generation complete, with cautions"
     if status == "stale":
         return "Stale preview: the board on disk is not this design's delivery"
     if status == "failed":
@@ -3767,7 +3767,7 @@ def _fallback_detail(status: str, sig: dict, act: dict, issues=()) -> str:
     if status == "failed":
         return "Run stopped; no detailed cause was saved."
     if status in ("complete", "complete_with_warnings"):
-        return "Design complete."
+        return "Generation complete. Review the recorded evidence and limitations before fabrication."
     if status == "stale":
         return ("The board on disk is a preview of an earlier design and does not match "
                 "the current one; continue or rebuild before downloading.")
@@ -3784,8 +3784,8 @@ _STATUS_BADGE: dict[str, tuple[str, str, str]] = {
     "queued": ("hourglass_top", "#fbbf24", "Queued for board build"),
     "awaiting_input": ("help", "#a78bfa", "Waiting for your answer"),
     "finalizing": ("hourglass_bottom", "#94a3b8", "Finalizing"),
-    "complete": ("check_circle", "#4ade80", "Complete"),
-    "complete_with_warnings": ("warning", "#eab308", "Complete with cautions"),
+    "complete": ("check_circle", "#4ade80", "Generated"),
+    "complete_with_warnings": ("warning", "#eab308", "Generated with cautions"),
     "stale": ("history_toggle_off", "#eab308", "Stale preview"),
     "failed": ("cancel", "#f87171", "Failed"),
     "interrupted": ("link_off", "#94a3b8", "Interrupted"),

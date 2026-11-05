@@ -121,6 +121,31 @@ def test_edge_connector_body_overhang_does_not_grow_outline():
     assert bs.board_outline[0].x == 0.0
 
 
+@pytest.mark.parametrize("fixed", ["auto", "manual", "form_factor"])
+def test_board_normal_header_body_is_not_an_overhang_exemption(fixed):
+    # Six-position, 90-degree header: the body's end extends 0.415 mm
+    # beyond the connected pad copper. An in-plane housing can overhang,
+    # but this header has no side-facing mating mouth.
+    header = _comp("J1", 5, 10, 2.59, 15.33,
+                   pads=[_pad("J1", 5, 16.35, 1.8, 1.8)], kind="connector")
+    header.rotation = 90
+    header.mating_axis = "board_normal"
+    board = BoardState(components={"J1": header},
+                       board_outline=(Point(0, 0), Point(20, 17.5)))
+    state = _state(board, edge_refs={"J1"}, connector_sides={"bottom"},
+                   manual_outline={"shape": "rect"} if fixed == "manual" else None)
+    state.outline_authoritative = fixed == "form_factor"
+    assert not _validate_parent_geometry(state)["accepted"]
+    result = _repair_parent_outline(state)
+    if fixed != "auto":
+        assert not result["repaired"]
+        assert board.board_outline[1].y == 17.5
+        assert not _validate_parent_geometry(state)["accepted"]
+    else:
+        assert board.board_outline[1].y == pytest.approx(17.665 + 0.2)
+        assert _validate_parent_geometry(state)["accepted"]
+
+
 def test_rf_edge_overhang_preserves_anchor_but_not_outboard_copper():
     owner = _comp("U1", 30, 2.9, 13.29, 16.69,
                   pads=[_pad("U1", 30, 0.7, w=0.4, h=0.8)], kind="ic")

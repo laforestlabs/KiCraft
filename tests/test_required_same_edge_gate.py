@@ -95,3 +95,92 @@ def test_original_contract_cannot_disappear_or_drop_a_connector(tmp_path):
     assert cli_app._required_same_edge_violations(pcb, ("J1", "J2")) == [
         "required_same_edge_zones_missing_or_conflicting",
     ]
+
+
+def test_six_connector_fitted_outline_uses_rotated_header_end(tmp_path):
+    """Exercise the producer's bank and fitted outline through the real gate."""
+    from types import SimpleNamespace
+
+    from kicraft.autoplacer.brain.types import (
+        BoardState, Component, Layer, Pad, Point, TraceSegment, Via,
+    )
+    from kicraft.cli.compose_subcircuits import (
+        _ensure_edge_blocks_extremal, _repair_parent_outline,
+    )
+
+    pcbnew = pytest.importorskip("pcbnew")
+    components = {}
+    zones = {}
+    for index in range(6):
+        ref = f"J{index + 1}"
+        x = 5 + index * 12
+        header = index == 0
+        y = 10 if header else 16.815
+        height = 15.33 if header else 4.0
+        component = Component(
+            ref=ref, value="", pos=Point(x, y), body_center=Point(x, y),
+            rotation=90 if header else 0, layer=Layer.FRONT,
+            width_mm=2.59 if header else 4.0, height_mm=height,
+            kind="connector", mating_axis="board_normal" if header else "in_plane",
+            pads=[Pad(ref=ref, pad_id="1", pos=Point(x, y + (6.35 if header else 0)),
+                      net="", layer=Layer.FRONT, size_mm=Point(1.8, 1.8))],
+        )
+        components[ref] = component
+        zones[ref] = {"edge": "bottom",
+                      "anchor_offsets_by_rotation": {component.rotation: Point(0, height / 2)}}
+
+    board_state = BoardState(
+        components=components, board_outline=(Point(0, 0), Point(70, 18.94)),
+        traces=[TraceSegment(start=Point(62, 18.4), end=Point(64, 18.4),
+                             layer=Layer.FRONT, net="GND", width_mm=0.4)],
+        vias=[Via(pos=Point(67, 18.4), net="GND", size_mm=0.6)],
+    )
+    state = SimpleNamespace(composition=SimpleNamespace(board_state=board_state),
+                            manual_outline=None, edge_constrained_refs=set(components),
+                            edge_zoned_outline_sides={"bottom"})
+    refs = tuple(components)
+    (tmp_path / "BOARD_autoplacer.json").write_text(json.dumps({
+        "required_same_edge_connectors": {"edge": "bottom", "refs": list(refs)},
+        "component_zones": {ref: {"edge": "bottom"} for ref in refs},
+    }))
+    pcb = tmp_path / "BOARD.kicad_pcb"
+
+    def stamp():
+        native = pcbnew.BOARD()
+        tl, br = board_state.board_outline
+        mm = pcbnew.FromMM
+        for start, end in (((tl.x, tl.y), (br.x, tl.y)),
+                           ((br.x, tl.y), (br.x, br.y)),
+                           ((br.x, br.y), (tl.x, br.y)),
+                           ((tl.x, br.y), (tl.x, tl.y))):
+            edge = pcbnew.PCB_SHAPE()
+            edge.SetShape(pcbnew.SHAPE_T_SEGMENT)
+            edge.SetLayer(pcbnew.Edge_Cuts)
+            edge.SetStart(pcbnew.VECTOR2I(*map(mm, start)))
+            edge.SetEnd(pcbnew.VECTOR2I(*map(mm, end)))
+            native.Add(edge)
+        for ref, comp in components.items():
+            fp = pcbnew.FOOTPRINT(native)
+            fp.SetReference(ref)
+            fp.SetPosition(pcbnew.VECTOR2I(mm(comp.pos.x), mm(comp.pos.y)))
+            low, high = comp.bbox()
+            court = pcbnew.PCB_SHAPE(fp)
+            court.SetShape(pcbnew.SHAPE_T_RECT)
+            court.SetLayer(pcbnew.F_CrtYd)
+            court.SetStart(pcbnew.VECTOR2I(mm(low.x), mm(low.y)))
+            court.SetEnd(pcbnew.VECTOR2I(mm(high.x), mm(high.y)))
+            court.SetWidth(mm(0.01))
+            fp.Add(court)
+            native.Add(fp)
+        pcbnew.SaveBoard(str(pcb), native)
+
+    stamp()
+    before = cli_app._required_same_edge_violations(pcb, refs)
+    assert len(before) == 1 and before[0].startswith("required_same_edge_gap:J1@")
+    _ensure_edge_blocks_extremal(components, zones)
+    _repair_parent_outline(state)
+    stamp()
+    assert cli_app._required_same_edge_violations(pcb, refs) == []
+    assert board_state.board_outline[1].y >= 18.4 + 0.3 + 0.2
+    assert board_state.board_outline[1].x <= 100
+    assert board_state.board_outline[1].y <= 100
