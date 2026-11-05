@@ -2329,6 +2329,36 @@ def check_reviewed_device_support_networks(bom) -> CheckResult:
     info, _ = _pin_info_by_ref(bom)
     nets = _nets_by_ref(bom)
     bad: list[str] = []
+    for driver in bom.parts:
+        if getattr(driver, "recipe_id", None) != "drv8833-dual-motor@5" or getattr(driver, "recipe_role", None) != "driver":
+            continue
+        pins = nets.get(driver.ref, {})
+        vm, ground = pins.get("12"), pins.get("13")
+        owned = {
+            getattr(part, "recipe_role", None): part for part in bom.parts
+            if getattr(part, "recipe_id", None) == driver.recipe_id
+            and getattr(part, "recipe_instance", None) == driver.recipe_instance
+        }
+        for role, identity, minimum_voltage in (
+            ("vm_bulk", "ucm1e101mcl1gs", 9.2),
+            ("vm_decoupling", "cl10b104ko8nnnc", 9.2),
+        ):
+            cap = owned.get(role)
+            record = _reviewed_identity_for_bom_part(cap) if cap is not None else None
+            limits = record.operating_limits if record is not None else {}
+            rating = limits.get("voltage_v", limits.get("voltage_max_v", 0))
+            cap_pins = nets.get(cap.ref, {}) if cap is not None else {}
+            if not (vm and ground and vm != ground and record is not None
+                    and record.identity == identity and rating >= minimum_voltage
+                    and cap_pins.get("1") == vm and cap_pins.get("2") == ground):
+                bad.append(f"E_MOTOR_CLAMP_SUPPORT {driver.ref}: {role} must be the reviewed "
+                           f"capacitor rated for the 9.2 V clamp, directly on VM and ground")
+        tvs = owned.get("motor_tvs")
+        tvs_record = _reviewed_identity_for_bom_part(tvs) if tvs is not None else None
+        tvs_pins = nets.get(tvs.ref, {}) if tvs is not None else {}
+        if not (tvs_record is not None and tvs_record.identity == "smbj5.0a-13-f"
+                and tvs_pins.get("1") == vm and tvs_pins.get("2") == ground and vm and ground):
+            bad.append(f"E_MOTOR_CLAMP_SUPPORT {driver.ref}: reviewed SMBJ5.0A must clamp VM to ground")
     for part in bom.parts:
         fact = _reviewed_fact_for_part(part)
         if fact is None:
@@ -2597,7 +2627,26 @@ def check_reviewed_input_operating_ranges(architecture, bom) -> CheckResult:
     nets = _nets_by_ref(bom)
     rail_voltages, bad = _reviewed_pass_through_rails(architecture, bom, info, nets)
     bad.extend(_catalog_capacitor_voltage_defects(architecture, bom, nets))
+    # A qualified fixed module also supplies internal recipe nets, which are
+    # deliberately absent from architecture rail_voltages.
+    for converter in bom.parts:
+        if (getattr(converter, "recipe_id", None) != "k7803m-3v3-reverse-blocked@1"
+                or getattr(converter, "recipe_role", None) != "converter"):
+            continue
+        record = _reviewed_identity_for_bom_part(converter)
+        pins = nets.get(converter.ref, {})
+        source_v = rail_voltages.get(pins.get("1"))
+        if (record is not None and record.identity == "k7803m-1000r3"
+                and isinstance(source_v, (int, float)) and 6 <= source_v < 30 and pins.get("3")):
+            rail_voltages.setdefault(pins["3"], 3.3)
     for part in bom.parts:
+        if (getattr(part, "recipe_id", None) == "drv8833-dual-motor@5"
+                and getattr(part, "recipe_role", None) == "driver"):
+            vm = nets.get(part.ref, {}).get("12")
+            voltage = rail_voltages.get(vm)
+            if isinstance(voltage, (int, float)) and voltage > 5.0:
+                bad.append(f"E_MOTOR_TVS_STANDOFF {part.ref}: VM {voltage:g} V exceeds "
+                           "the fitted SMBJ5.0A's 5 V standoff")
         fact = _reviewed_fact_for_part(part)
         if fact is None:
             continue
@@ -3075,6 +3124,57 @@ def check_reviewed_power_transfer(architecture, bom) -> CheckResult:
         for source_net, dest_net in _recipe_transfer_pairs(requirement, bom):
             graph[source_net].add(dest_net)
     bad: list[str] = []
+    nets = _nets_by_ref(bom)
+    for requirement in architecture.requirements:
+        if requirement.family.casefold() != "k7803m-3v3-reverse-blocked":
+            continue
+        manifests = [m for m in (getattr(bom, "recipe_ownership", ()) or ())
+                     if requirement.id in (m.requirement_ids or ())
+                     and m.recipe == "k7803m-3v3-reverse-blocked@1"]
+        if len(manifests) != 1 or not _has_trusted_recipe_topology_witness(
+                requirement, bom, None, manifest=manifests[0]):
+            bad.append(f"E_MOTOR_REVERSE_BOUNDARY {requirement.id}: protected source "
+                       "requires the complete connected controller, FET and module topology")
+            continue
+        manifest = manifests[0]
+        owned = [p for p in bom.parts if p.ref in manifest.refs]
+        converter = next((p for p in owned if p.recipe_role == "converter"), None)
+        fet = next((p for p in owned if p.recipe_role == "reverse_fet"), None)
+        from kicraft.design.synthesis.fab_export import extract_lcsc_pin
+
+        if fet is not None and extract_lcsc_pin(getattr(fet, "sourcing_note", None) or "") != "C15127":
+            bad.append(f"E_MOTOR_REVERSE_BOUNDARY {requirement.id}: AO3401A must be the "
+                       "reviewed AOS C15127, not an identically named device from another manufacturer")
+        controller = next((p for p in owned if p.recipe_role == "reverse_controller"), None)
+        if (controller is None or "4" in nets.get(controller.ref, {})
+                or not any(ep.ref == controller.ref and ep.pin == "4"
+                           for ep in (getattr(bom, "no_connect_pins", ()) or ()))):
+            bad.append(f"E_MOTOR_REVERSE_BOUNDARY {requirement.id}: controller STAT must be open")
+        raw = (nets.get(converter.ref) or {}).get("3") if converter else None
+        output = requirement.ports.get("output")
+        ground = requirement.ports.get("gnd")
+        if not raw or not output or raw == output or fet is None:
+            bad.append(f"E_MOTOR_REVERSE_BOUNDARY {requirement.id}: raw and protected rails must be distinct")
+            continue
+        # Ignore the controlled FET, and look for other conductive paths.  The
+        # ordinary conversion walk intentionally ignores resistors and diodes;
+        # here either can bypass the reverse boundary, even via several nets.
+        other = bom.model_copy(update={"parts": [p for p in bom.parts if p.ref != fet.ref]})
+        bypass = _reviewed_transfer_edges(other, info, nets)
+        for part in other.parts:
+            if _ref_prefix(part.ref) not in {"R", "D", "L", "F", "JP"}:
+                continue
+            pair = _two_terminal_part_nets(part, nets)
+            if pair and ground not in pair:
+                bypass[pair[0]].add(pair[1])
+                bypass[pair[1]].add(pair[0])
+        if ground:
+            bypass.pop(ground, None)
+            for peers in bypass.values():
+                peers.discard(ground)
+        if _transfer_reaches(bypass, raw, output):
+            bad.append(f"E_MOTOR_REVERSE_BOUNDARY {requirement.id}: conductive path bypasses "
+                       "the controlled FET between raw and protected output")
     for requirement in architecture.requirements:
         family = requirement.family.casefold()
         has_power_conversion = any(

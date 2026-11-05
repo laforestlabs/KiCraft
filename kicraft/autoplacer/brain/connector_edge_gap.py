@@ -198,6 +198,7 @@ def connector_edge_gaps(
     *,
     inboard_tol_mm: float = 0.5,
     max_overhang_mm: float = 6.0,
+    include_access_only: bool = False,
 ) -> list[EdgeGap]:
     """Compute the outward mouth-to-edge gap for every edge-zoned component on
     ``board_path``. Returns one :class:`EdgeGap` per resolvable zoned ref."""
@@ -219,7 +220,7 @@ def connector_edge_gaps(
         fp = fps.get(ref)
         if fp is None:
             continue
-        if _access_only_connector(ref, fp):
+        if not include_access_only and _access_only_connector(ref, fp):
             continue
         marker = _edge_marker_point(fp, pcbnew)
         if marker is not None:

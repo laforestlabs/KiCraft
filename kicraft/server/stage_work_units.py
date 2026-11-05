@@ -619,12 +619,28 @@ def _requirement_needs_controller(requirement: dict) -> bool:
 
 def _required_physical_feature(requirement: dict) -> str | None:
     """Use typed families, never a sheet name or component-group label."""
-    from kicraft.design.part_identity import reviewed_parts_for_feature
+    from kicraft.design.part_identity import (
+        canonical_physical_features,
+        class_key,
+        reviewed_parts_for_feature,
+    )
 
     declared_family = str(requirement.get("family") or "")
     if reviewed_parts_for_feature(declared_family):
         return declared_family
     family = _identity_token(requirement.get("family"))
+    if family == "switchinput" and any(
+        isinstance(obligation, dict)
+        and obligation.get("kind") == "adjustability"
+        and "jumper" in canonical_physical_features(
+            class_key(str(obligation.get("mechanism") or ""))
+        )
+        for obligation in requirement.get("obligations") or []
+    ):
+        # The same lowerer owns two physical circuits: an ordinary button, or
+        # a removable header shunt and its bias resistor. The committed typed
+        # mechanism chooses which real physical part this gate must prove.
+        return "jumper"
     if family in {
         "pinheader",
         "genericheader",

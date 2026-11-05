@@ -89,7 +89,7 @@ def test_failed_gate_keeps_candidate_over_previous_routed_board(
     # wins: the project must show the board THIS build produced so the failure
     # can be inspected (no silent keep-the-last-good fallback).
     pcb = project / "WIDGET.kicad_pcb"
-    monkeypatch.setattr(cli_app, "_verify_routed_board", lambda p: {
+    monkeypatch.setattr(cli_app, "_verify_routed_board", lambda p, **_: {
         "ok": False, "shorts": 3, "unconnected": 1, "reasons": ["shorts"],
         "tracks": {}})
     state_path = tmp_path / "state.json"
@@ -107,7 +107,7 @@ def test_failed_gate_with_no_previous_board_keeps_candidate(project, tmp_path,
     # so the project shows the actual route result (rc still 7, no fab export).
     pcb = project / "WIDGET.kicad_pcb"
     pcb.unlink()  # no prior board (first promote)
-    monkeypatch.setattr(cli_app, "_verify_routed_board", lambda p: {
+    monkeypatch.setattr(cli_app, "_verify_routed_board", lambda p, **_: {
         "ok": False, "shorts": 1, "unconnected": 0, "reasons": [], "tracks": {}})
     rc = cli_app._promote_verify_fab(
         _state_stub(), tmp_path / "state.json", _artifacts_stub(project),
@@ -123,7 +123,7 @@ def test_failed_gate_with_unrouted_previous_board_keeps_candidate(
     # The dirty routed candidate must win; the placeholder backup is dropped.
     pcb = project / "WIDGET.kicad_pcb"
     pcb.write_text("PLACED PARTS ONLY no copper here", encoding="utf-8")
-    monkeypatch.setattr(cli_app, "_verify_routed_board", lambda p: {
+    monkeypatch.setattr(cli_app, "_verify_routed_board", lambda p, **_: {
         "ok": False, "shorts": 0, "unconnected": 1, "reasons": [], "tracks": {}})
     rc = cli_app._promote_verify_fab(
         _state_stub(), tmp_path / "state.json", _artifacts_stub(project),
@@ -136,7 +136,7 @@ def test_failed_gate_with_unrouted_previous_board_keeps_candidate(
 def test_passing_gate_promotes_and_exports(project, tmp_path, monkeypatch):
     pcb = project / "WIDGET.kicad_pcb"
     seen = {}
-    monkeypatch.setattr(cli_app, "_verify_routed_board", lambda p: {
+    monkeypatch.setattr(cli_app, "_verify_routed_board", lambda p, **_: {
         "ok": True, "shorts": 0, "unconnected": 0, "reasons": [],
         "tracks": {"traces": 12, "vias": 2}})
 
@@ -207,7 +207,7 @@ def test_cmd_manual_route_end_to_end_with_stubbed_router(tmp_path, monkeypatch):
 
     monkeypatch.setattr(subprocess_mod, "run", fake_run)
     monkeypatch.setattr(cli_app, "_preflight_project_router", lambda _p: {})
-    monkeypatch.setattr(cli_app, "_verify_routed_board", lambda p: {
+    monkeypatch.setattr(cli_app, "_verify_routed_board", lambda p, **_: {
         "ok": True, "shorts": 0, "unconnected": 0, "reasons": [],
         "tracks": {"traces": 5, "vias": 0}})
 

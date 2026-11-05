@@ -363,13 +363,16 @@ def reduce_activity(previous: dict | None, event: dict) -> dict:
             finished_at=None,
             failure=None,
             last_activity="Starting the design run",
+            planned_units=set(),
+            completed_units=set(),
         )
         return act
 
     if event.get("run_id") and not act.get("run_id"):
         act["run_id"] = event.get("run_id")
-    if event.get("stage"):
-        act["stage"] = event.get("stage")
+    stage = event.get("stage")
+    if stage and stage != act.get("stage"):
+        act.update(stage=stage, planned_units=set(), completed_units=set())
 
     if kind == "run_finished":
         status = str(event.get("status") or "")

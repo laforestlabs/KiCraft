@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>KiCad document viewer</title>
+  <style>html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#0b1220;color:#cbd5e1}</style>
+  <script src="/static/kicanvas-content-fit.js"></script>
+  <script type="module" src="/static/kicanvas.js"></script>
+</head>
+<body>
+<script>
+  // Populate sources before the deferred module upgrades the custom elements.
+  // A real HTTP location is required by the vendor's FetchFileSystem resolver;
+  // about:srcdoc breaks it even when every source URL is already absolute.
+  try {
+    const config = JSON.parse(decodeURIComponent(location.hash.slice(1)));
+    if (!Array.isArray(config.sources) || !config.sources.length) {
+      throw new Error("No KiCad source document was supplied");
+    }
+    const embed = document.createElement("kicanvas-embed");
+    embed.setAttribute("controls", config.controls);
+    embed.style.cssText = "display:block;width:100%;height:100%;background:#0b1220";
+    for (const source of config.sources) {
+      const element = document.createElement("kicanvas-source");
+      element.setAttribute("src", new URL(source.url, parent.document.baseURI).href);
+      element.setAttribute("name", source.filename);
+      embed.appendChild(element);
+    }
+    document.body.appendChild(embed);
+  } catch (error) {
+    const message = document.createElement("p");
+    message.textContent = "Unable to open KiCad document: " + error.message;
+    document.body.appendChild(message);
+    console.error(error);
+  }
+</script>
+</body>
+</html>

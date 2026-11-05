@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import sqlite3
 
 import pytest
 
@@ -688,3 +689,24 @@ def test_norm_unit_error_is_a_stable_cross_run_key(raw, expected):
     the same contract gap ranks as a separate row per design."""
     assert triage.norm_unit_error(raw) == expected
 
+
+
+@pytest.mark.parametrize("persisted, exists", [(False, True), (True, True), (False, False)])
+def test_board_code_recovers_existing_active_workspace_read_only(tmp_path, monkeypatch, persisted, exists):
+    projects = tmp_path / "projects"
+    workspace = tmp_path / "custom" if persisted else projects / "7" / "103"
+    if exists:
+        workspace.mkdir(parents=True)
+    db = tmp_path / "accounts.db"
+    with sqlite3.connect(db) as con:
+        con.execute("CREATE TABLE projects (id INTEGER, user_id INTEGER, board_code TEXT, dir_path TEXT)")
+        con.execute("INSERT INTO projects VALUES (103, 7, 'KC-ACTIVE', ?)",
+                    (str(workspace) if persisted else None,))
+    before = db.read_bytes()
+    paths_before = set(tmp_path.rglob("*"))
+    monkeypatch.setattr(triage, "resolve_projects_dir", lambda: projects)
+    monkeypatch.setattr(triage, "resolve_db_path", lambda _projects: db)
+    resolved, _note = triage.resolve_run("kc-active")
+    assert resolved == (workspace if exists else None)
+    assert db.read_bytes() == before
+    assert set(tmp_path.rglob("*")) == paths_before

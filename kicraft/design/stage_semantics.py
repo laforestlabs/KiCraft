@@ -2041,6 +2041,28 @@ def _architecture_supply_over_rating(candidate: dict) -> list[StageDiagnostic]:
         )
     return diagnostics
 
+def _architecture_motor_clamp_standoff(candidate: dict) -> list[StageDiagnostic]:
+    """The native DRV recipe's clamp narrows the IC's otherwise wider VM range."""
+    rails = _architecture_rail_voltages(candidate)
+    offenders = []
+    for requirement in candidate.get("requirements") or []:
+        if not isinstance(requirement, dict):
+            continue
+        exact = str(requirement.get("exact_part") or "").casefold()
+        if exact and exact != "drv8833pwpr":
+            continue
+        if not exact and str(requirement.get("family") or "").casefold() != "dual-dc-motor-driver":
+            continue
+        vm = (requirement.get("ports") or {}).get("vm") or requirement.get("supply")
+        voltage = rails.get(str(vm))
+        if voltage is not None and voltage > 5.0:
+            offenders.append(f"requirement {requirement.get('id')!r} VM {vm!r} is "
+                             f"{voltage:g} V; the native SMBJ5.0A standoff is 5 V")
+    return [_diag("architecture_motor_clamp_standoff", "repair_required",
+                  "The native DRV8833 clamp cannot support this nominal motor rail.",
+                  offenders)] if offenders else []
+
+
 
 def complete_usb_socket_rail(candidate: dict) -> dict:
     """Declare the rail a native-USB socket exposes, and keep it resolvable.
@@ -3551,6 +3573,7 @@ def _architecture(upstream: dict, candidate: dict) -> list[StageDiagnostic]:
     diagnostics = architecture_power_requirement_diagnostics(upstream, candidate)
     diagnostics.extend(architecture_conversion_output_diagnostics(upstream, candidate))
     diagnostics.extend(_architecture_supply_over_rating(candidate))
+    diagnostics.extend(_architecture_motor_clamp_standoff(candidate))
     diagnostics.extend(_architecture_drive_on_logic_rail(upstream, candidate))
     diagnostics.extend(_architecture_obligation_family_mismatch(candidate))
     diagnostics.extend(_architecture_derivation_diagnostics(upstream, candidate))

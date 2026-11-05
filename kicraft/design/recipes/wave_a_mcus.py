@@ -1187,8 +1187,12 @@ STM32G030F6P6_MINIMAL = RecipeDefinition(
         AllocatablePin(role="mcu", pin="17", capabilities=("gpio", "input", "output", "pwm", "interrupt")),
         AllocatablePin(role="mcu", pin="20", capabilities=("gpio", "input", "output", "pwm", "interrupt")),
     ),
-    placement_constraints=(
-        PlacementConstraint(kind="decoupling_proximity", role="local_decoupling", parameters={"anchor_role": "mcu", "max_mm": 3.0}),
+    placement_constraints=tuple(
+        PlacementConstraint(kind="owned_bypass", role=role, parameters={
+            "anchor_role": "mcu", "power_net": "vdd", "ground_net": "gnd",
+            "max_mm": 3.0,
+        })
+        for role in ("local_decoupling", "bulk_decoupling")
     ),
     electrical_assertions=(
         Assertion(code="stm32g0_supply_3v3", message="STM32G030F6P6 VDD/VDDA is a 3.3 V rail within its 2.0–3.6 V operating range"),
@@ -1206,7 +1210,7 @@ STM32G030F6P6_MINIMAL = RecipeDefinition(
 # from the F6 TSSOP: notably SWD and I2C are on different contacts.
 _STM32G030K6T6_DATASHEET = "https://www.st.com/resource/en/datasheet/stm32g030k8.pdf"
 STM32G030K6T6_MINIMAL = STM32G030F6P6_MINIMAL.model_copy(update={
-    "recipe": "stm32g030k6t6-minimal@1",
+    "recipe": "stm32g030k6t6-minimal@2",
     "exact_part": "STM32G030K6T6",
     "default_for_family": True,
     "protected_aliases": ("STM32G0", "STM32G030"),
@@ -1222,7 +1226,8 @@ STM32G030K6T6_MINIMAL = STM32G030F6P6_MINIMAL.model_copy(update={
               symbol="MCU_ST_STM32G0:STM32G030K6Tx",
               footprint="Package_QFP:LQFP-32_7x7mm_P0.8mm",
               sheet_role="mcu", mpn="STM32G030K6T6", datasheet=_STM32G030K6T6_DATASHEET),
-        *STM32G030F6P6_MINIMAL.parts[1:],
+        *(part for part in STM32G030F6P6_MINIMAL.parts[1:] if part.role != "swd_header"),
+        Group(role="swd_header", reference_prefix="J", value="SWD", symbol="Connector_Generic:Conn_01x06", footprint="amphenol-68000-406hlf:HDR-TH_6P-P2.54-V-M-1", sheet_role="mcu", mpn="68000-406HLF"),
     ),
     "pins": (
         Pin(role="mcu", pin="4", net="vdd"),
@@ -1260,10 +1265,6 @@ STM32G030K6T6_MINIMAL = STM32G030F6P6_MINIMAL.model_copy(update={
         *(AllocatablePin(role="mcu", pin=str(pin), capabilities=("gpio", "input", "interrupt"), input_only=True)
           for pin in (2, 3)),
     ),
-    "placement_constraints": (
-        PlacementConstraint(kind="decoupling_proximity", role="local_decoupling", parameters={"anchor_role": "mcu", "max_mm": 3.0}),
-        PlacementConstraint(kind="decoupling_proximity", role="bulk_decoupling", parameters={"anchor_role": "mcu", "max_mm": 3.0}),
-    ),
     "electrical_assertions": (
         Assertion(code="stm32g0_supply_3v3", message="STM32G030K6T6 VDD/VDDA is supplied at 3.3 V"),
         Assertion(code="stm32g0_swd_reset_access", message="SWDIO, SWCLK/BOOT0, NRST, VTREF, and ground reach the physical SWD header"),
@@ -1272,6 +1273,7 @@ STM32G030K6T6_MINIMAL = STM32G030F6P6_MINIMAL.model_copy(update={
     "source_documents": (
         SourceDocument(url="https://datasheet.lcsc.com/datasheet/pdf/753f35401d4598e355b1dd55569495e1.pdf?productCode=C529331", title="STM32G030x6/x8 data sheet (ST document, distributor mirror)", revision="DS12991 Rev. 3", reviewed_date="2026-11-04", sections=("Figure 4 LQFP32 pinout", "Tables 12–14 pin and alternate functions", "Figure 9 supply decoupling", "Table 21 operating conditions")),
         STM32G030F6P6_MINIMAL.source_documents[1],
+        SourceDocument(url="https://jlcpcb.com/api/file/downloadByFileSystemAccessId/8588895884876242944", title="Amphenol BERGSTIK II 68000 customer drawing", revision="DC", reviewed_date="2026-11-04", sections=("Recommended hole pattern", "Product number", "Pin detail")),
     ),
 })
 
@@ -1802,7 +1804,7 @@ def expand_wave_a_mcu(resolved):
         for port, pin in definition.fixed_port_pins.items():
             if port in bindings and pin not in allocated_pins:
                 pins.append(Pin(role="mcu", pin=pin, net=port))
-    if definition.recipe in {"stm32g030f6p6-minimal@1", "stm32g030k6t6-minimal@1", "attiny1604-ssn-minimal@1"}:
+    if definition.recipe in {"stm32g030f6p6-minimal@1", "stm32g030k6t6-minimal@2", "attiny1604-ssn-minimal@1"}:
         i2c_ports = {"i2c_scl", "i2c_sda"}
         bound_i2c = i2c_ports.intersection(bindings)
         ads_enabled = resolved.parameters.get("adc_expansion") == "ads1115x2"

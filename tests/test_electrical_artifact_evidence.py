@@ -190,7 +190,7 @@ def test_wrong_delivered_divider_cannot_fulfil_the_named_rail(tmp_path, monkeypa
 
 @pytest.mark.parametrize("defect", [None, "bad_feedback"])
 def test_tlv62569_output_requires_its_delivered_adjustable_divider(tmp_path, monkeypatch, defect):
-    state, board, names = _buck_artifact(["tlv62569-3v3@1"], defect=defect, input_voltage=5.0)
+    state, board, names = _buck_artifact(["tlv62569-3v3@2"], defect=defect, input_voltage=5.0)
     monkeypatch.setattr(electrical_artifact_evidence, "_pin_names", lambda *_: names)
     facts = electrical_artifact_evidence.extract_electrical_facts(
         tmp_path, state, board, _contract(3.3),

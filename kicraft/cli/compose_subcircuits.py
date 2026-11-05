@@ -2892,9 +2892,11 @@ def _edge_demotion_candidates(
     )
 
     zones = (cfg or {}).get("component_zones") or {}
+    required_edge = (cfg or {}).get("required_same_edge_connectors") or {}
+    required_refs = set(required_edge.get("refs") or ()) if isinstance(required_edge, dict) else set()
     pinned = sorted(
         ref for ref, zone in zones.items()
-        if isinstance(zone, dict) and ("edge" in zone or "corner" in zone)
+        if ref not in required_refs and isinstance(zone, dict) and ("edge" in zone or "corner" in zone)
     )
     if not pinned or len(loaded_artifacts) < 2:
         return []

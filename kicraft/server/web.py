@@ -47,7 +47,7 @@ from .accounts import (
 from .config import LEGAL_VERSION, Settings, default_legal_dir
 from .examples import BRIEF_SEED_MODULO, EXAMPLE_PROMPTS, generate_brief
 from .question_policy import normalize_question_options
-from .kicanvas import KICANVAS_ASSET, KiCanvasSource, KiCanvasView, kicanvas_head
+from .kicanvas import KICANVAS_ASSET, KiCanvasSource, KiCanvasView
 from .layout_panel import (
     LayoutEditorPanel,
     leaf_artifacts_exist,
@@ -839,35 +839,39 @@ def _build_place_route_progress(run_status: dict, leaf_prog: list[dict]) -> dict
     """Build a 'progress' inspector section from run_status.json fields."""
     h = run_status.get("hierarchy") or {}
     phase_raw = run_status.get("phase", "")
-    pct = run_status.get("progress_percent", 0)
+    stage_raw = h.get("current_stage")
+    pct = None
     elapsed = run_status.get("elapsed_s", 0)
     eta = run_status.get("eta_s", 0)
     action = h.get("current_action") or run_status.get("current_action") or ""
 
-    if phase_raw == "done" or h.get("current_stage") == "complete":
-        phase = "Layout complete"
-        bar_color = "#34d399"
-        action = f"{h.get('leaf_total','?')} leaves, parent routed"
-    elif h.get("current_stage") == "leaves" or phase_raw == "leaf":
-        phase = "Leaf phase"
+    if phase_raw == "done" or stage_raw in {"done", "complete"}:
+        phase = "Routed candidate ready" if h.get("parent_routed") else "Routing run finished"
+        bar_color = "#34d399" if h.get("parent_routed") else "#60a5fa"
+    elif stage_raw in {"leaves", "solve_leafs"} or phase_raw == "leaf":
+        phase = "Leaf solves"
         bar_color = "#60a5fa"
-        completed = h.get("leaf_workers", {}).get("completed", 0)
-        total = h.get("leaf_total", 0)
+        total = h.get("leaf_total") or len(leaf_prog)
+        completed = (h.get("leaf_workers") or {}).get("completed")
+        if completed is None:
+            completed = sum(item.get("status") == "Routed" for item in leaf_prog)
         if total:
+            pct = 100 * completed / total
             action = f"solving leaf circuits ({completed}/{total})"
-    elif h.get("current_stage") == "parent" or phase_raw in ("parent", "compose"):
-        phase = "Parent phase"
+    elif stage_raw in {"parent", "route_parent"} or phase_raw in ("parent", "compose"):
+        phase = "Parent attempt budget"
         bar_color = "#a78bfa"
         round_num = run_status.get("round", 0)
         total_rounds = run_status.get("total_rounds", 0)
         if total_rounds:
-            action = f"compose + route round {round_num}/{total_rounds}"
+            pct = 100 * round_num / total_rounds
+            action = f"compose + route attempt {round_num}/{total_rounds}"
     else:
-        phase = "Place & route"
+        phase = "Scoring candidate" if stage_raw == "score_round" else "Routing"
         bar_color = "#60a5fa"
 
     elapsed_str = _fmt_duration(elapsed) if elapsed else ""
-    eta_str = _fmt_eta(eta) if eta and phase_raw != "done" else ""
+    eta_str = _fmt_eta(eta) if eta and pct is not None else ""
 
     chips = []
     for d in (leaf_prog or []):
@@ -1252,14 +1256,23 @@ def _silk_sections(sj: dict, arts: dict) -> list[dict]:
     placed_ids = set(placed)
     # Legend lines carry synthetic ids "legend:N"; separate them from content labels.
     n_legend = sum(1 for p in placed if p.startswith("legend:"))
-    n_labels_placed = len(placed) - n_legend
+    dropped_ids = {item.partition(": ")[0] for item in place_dropped}
+    label_status: dict[str, str] = {}
+    for label in labels:
+        lid = str(label.get("id", ""))
+        owned = {item for item in placed_ids if item == lid or item.startswith(lid + ":")}
+        dropped = any(item == lid or item.startswith(lid + ":") for item in dropped_ids)
+        pins = label.get("pins") or []
+        expected = {f"{lid}:{pin['pin']}" for pin in pins} if label.get("kind") == "pinout" and pins else {lid}
+        complete = not dropped and (lid in placed_ids or expected <= placed_ids)
+        label_status[lid] = "yes" if complete else "partial" if owned else "no"
 
     secs: list[dict] = [{"type": "kv", "title": "Silkscreen", "rows": [
         ("title", silk.get("title") or "(board stem)"),
         ("board code", silk.get("board_code") or "(pending)"),
         ("rev", silk.get("rev", "")),
         ("legend lines", n_legend),
-        ("labels placed", f"{n_labels_placed} / {len(labels)}"),
+        ("labels complete", f"{sum(value == 'yes' for value in label_status.values())} / {len(labels)}"),
         ("dropped (no space)", len(place_dropped))]}]
 
     if labels:
@@ -1275,7 +1288,7 @@ def _silk_sections(sj: dict, arts: dict) -> list[dict]:
             anchor = (lb.get("anchor") or {}).get("ref") or ""
             rows.append([lb.get("kind", "note"), text, anchor,
                          lb.get("priority", 2),
-                         "yes" if lid in placed_ids else "no"])
+                         label_status[lid]])
         note = None
         if any(lb.get("kind") == "table" for lb in labels):
             note = ("Tables (e.g. DIP-switch settings) are LLM-authored from the "
@@ -3003,7 +3016,7 @@ def _project_assurance(*, status: str, derived: dict, signals: dict) -> dict:
               "(not independently verified): " + ", ".join(declared))
     unresolved = [str(name) for name in (arch.get("unresolved_requirement_ids") or [])]
     if unresolved:
-        limit("Requirements with no reviewed implementation yet (model-owned remainder): "
+        limit("Requirements outside reviewed circuit-recipe coverage (including deterministic primitive lowering): "
               + ", ".join(unresolved))
 
     # Part substitutions: a required part keeps its own consent requirement; a
@@ -6075,7 +6088,6 @@ def public_project_page(project_id: str):
 
     ui.dark_mode().enable()
     ui.query("body").style("background:var(--kc-bg)")
-    kicanvas_head()
     _mobile_head()
 
     with ui.header().classes("items-center justify-between") \
@@ -6248,7 +6260,6 @@ def samples_page():
 
     ui.dark_mode().enable()
     ui.query("body").style("background:var(--kc-bg)")
-    kicanvas_head()
     _mobile_head()
     if any(s.has_3d() for s in available_samples()):
         # <model-viewer> (Google @google/model-viewer 4.0.0, BSD-3) — self-hosted
@@ -6335,7 +6346,6 @@ def sample_detail_page(sample_id: str):
 
     ui.dark_mode().enable()
     ui.query("body").style("background:var(--kc-bg)")
-    kicanvas_head()
     _mobile_head()
     if sample.has_3d():
         ui.add_head_html(
@@ -6911,7 +6921,6 @@ def index(prompt: str = "", project: str = ""):
         return RedirectResponse("/consent")
     q0 = _store().quota_status(user)
 
-    kicanvas_head()
     _mobile_head()
     ui.add_head_html('<link rel="stylesheet" href="/static/kc_onboarding.css">')
     ui.add_head_html(
@@ -7711,12 +7720,26 @@ def index(prompt: str = "", project: str = ""):
                     design_btn.enable()
                 quota_label.style("color:#94a3b8")
 
+        def _replace_project_url(project_id: int | None) -> None:
+            """Keep reload/share recovery attached to the design being viewed."""
+            ui.run_javascript(
+                "(() => {const url = new URL(window.location.href);"
+                "url.searchParams.delete('project');"
+                "url.searchParams.delete('prompt');"
+                f"const projectId = {json.dumps(project_id)};"
+                "if (projectId !== null) "
+                "url.searchParams.set('project', String(projectId));"
+                "history.replaceState(history.state, '', "
+                "url.pathname + url.search + url.hash);})();"
+            )
+
         def start_fresh():
             """Detach from the open design and reset to a blank composer. A
             still-running design keeps its worker and its _LIVE_RUNS entry, so
             this is how a second design gets started in parallel."""
             nonlocal state
             state = _fresh_run_state()
+            _replace_project_url(None)
             auto_default_chk.value = True
             brief.value = ""
             _reset_view()
@@ -7770,6 +7793,7 @@ def index(prompt: str = "", project: str = ""):
                          attempt_generation=proj.attempt_generation if proj else 0,
                          auto_default_questions=auto_default_questions,
                          board_code=(proj.board_code if proj else None))
+            _replace_project_url(pid)
             _reset_view()
             continue_btn.set_visibility(False)
             new_btn.set_visibility(False)  # "New design" lives in the header now
@@ -8225,9 +8249,10 @@ def index(prompt: str = "", project: str = ""):
             summary_stage.text = f"Stage: {stage}" if stage else ""
             summary_stage.set_visibility(bool(stage))
             activity_bits = []
-            if detail.get("percent") is not None and pres["stage"] == "place_route":
-                activity_bits.append(
-                    f"{detail.get('phase') or 'Layout'} {int(detail['percent'])}%")
+            if detail and pres["stage"] == "place_route":
+                phase = detail.get("phase") or "Layout"
+                percent = detail.get("percent")
+                activity_bits.append(phase if percent is None else f"{phase} {int(percent)}%")
             if units:
                 activity_bits.append(units)
             if state.get("journal_failed"):

@@ -116,3 +116,24 @@ def test_schematic_sources_root_first(tmp_path):
     names = [f for _u, f in srcs]
     assert names[0] == "DEMO.kicad_sch"  # root sheet first (selector's "Overview")
     assert set(names) == {"DEMO.kicad_sch", "MCU.kicad_sch", "USB_INPUT.kicad_sch"}
+
+
+def test_hierarchy_progress_scopes_do_not_inherit_another_phase_percentage():
+    leaf = web._build_place_route_progress({
+        "phase": "running", "progress_percent": 100,
+        "hierarchy": {"current_stage": "solve_leafs", "leaf_total": 4,
+                      "leaf_workers": {"completed": 2}},
+    }, [])
+    assert leaf["percent"] == 50
+    parent = web._build_place_route_progress({
+        "phase": "running", "progress_percent": 100, "round": 1, "total_rounds": 3,
+        "hierarchy": {"current_stage": "route_parent"},
+    }, [])
+    assert parent["percent"] == 100 / 3
+    complete = web._build_place_route_progress({
+        "phase": "done", "progress_percent": 66.67,
+        "hierarchy": {"current_stage": "complete", "parent_routed": True},
+    }, [])
+    assert complete["percent"] is None
+    unknown = web._build_place_route_progress({"phase": "running", "progress_percent": 33}, [])
+    assert unknown["percent"] is None

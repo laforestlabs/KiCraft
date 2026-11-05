@@ -2314,10 +2314,14 @@ def _switch_input(requirement: CircuitRequirement) -> LoweringArtifact | None:
                 "deterministic"
             )
         raw_supply = re.sub(r"[^A-Z0-9]", "", ports["vdd"].upper())
-        if (
-            raw_supply in {"VIN", "VBAT", "RAW"}
-            or re.fullmatch(r"(?:VIN|VBAT|RAW)(?:1[89]|2[0-9]|[3-9][0-9])V?", raw_supply)
+        explicitly_high = (
+            re.fullmatch(r"(?:VIN|VBAT|RAW)(?:1[89]|2[0-9]|[3-9][0-9])V?", raw_supply)
             or re.fullmatch(r"(?:1[89]|2[0-9]|[3-9][0-9])V", raw_supply)
+        )
+        voltage = requirement.parameters.get("voltage")
+        if explicitly_high or (
+            raw_supply in {"VIN", "VBAT", "RAW"}
+            and (type(voltage) not in (int, float) or not 0 < voltage <= 5.5)
         ):
             raise ValueError(
                 "a removable enable jumper must use a verified logic/control rail, not an "

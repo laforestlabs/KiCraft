@@ -226,6 +226,38 @@ def test_repair_encloses_stamped_traces_and_vias():
     assert _validate_parent_geometry(state)["accepted"] is True
 
 
+@pytest.mark.parametrize("side", ["left", "right", "top", "bottom"])
+@pytest.mark.parametrize("kind", ["trace", "via"])
+def test_connector_side_clears_full_trace_and_via_copper(side, kind):
+    center = {
+        "left": Point(0.1, 10), "right": Point(19.9, 10),
+        "top": Point(10, 0.1), "bottom": Point(10, 19.9),
+    }[side]
+    board = BoardState(components={}, board_outline=(Point(0, 0), Point(20, 20)))
+    if kind == "trace":
+        dx, dy = (0, 2) if side in ("left", "right") else (2, 0)
+        board.traces = [TraceSegment(
+            start=Point(center.x - dx, center.y - dy),
+            end=Point(center.x + dx, center.y + dy),
+            layer=Layer.FRONT, net="RESET", width_mm=0.8,
+        )]
+        radius = 0.4
+    else:
+        board.vias = [Via(pos=center, net="RESET", size_mm=1.0)]
+        radius = 0.5
+    _repair_parent_outline(
+        _state(board, connector_sides={side}), pad_edge_clearance_mm=0.2,
+    )
+    tl, br = board.board_outline
+    clearance = {
+        "left": center.x - radius - tl.x,
+        "right": br.x - center.x - radius,
+        "top": center.y - radius - tl.y,
+        "bottom": br.y - center.y - radius,
+    }[side]
+    assert clearance + 1e-9 >= 0.2
+
+
 def test_manual_outline_is_authoritative_no_grow_and_loud_validation():
     """Manual mode: the user's outline must never be silently grown.
 

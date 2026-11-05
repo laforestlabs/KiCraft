@@ -223,19 +223,27 @@ def is_horizontal_terminal(footprint_name: str) -> bool:
     )
 
 
+# XFCN drawing PM254V-11-XX-H85 rev A1: reviewed vertical female 1xN
+# variants C541849/C541851/C46595973. These exact physical identities
+# mate along Z; an unknown lookalike or horizontal variant stays unverified.
+_REVIEWED_BOARD_NORMAL_HEADERS = frozenset(
+    f"XFCN_PM254V_11_{count:02d}_H85" for count in (2, 4, 8)
+)
+
+
 def is_board_normal_header(footprint_name: str) -> bool:
     """True only for header naming contracts that explicitly declare vertical.
 
     ``PinHeader_*_Vertical`` is KiCad's stock mechanical identity. The
     vendored ``HDR-TH_*`` family uses ``-V-`` for its vertical THT variant;
     the frozen C492422 2x05 footprint is
-    ``HDR-TH_10P-P2.54-V-M-R2-C5-S2.54``. Both mate along board normal, not
-    through an in-plane opening. This deliberately excludes generic THT
-    connectors and all horizontal variants: absence of a direction remains
-    unverified rather than becoming evidence of vertical mating.
+    ``HDR-TH_10P-P2.54-V-M-R2-C5-S2.54``. The exact reviewed XFCN
+    PM254V-11-XX-H85 variants also mate along Z. This deliberately
+    excludes generic THT connectors, unreviewed variants and horizontal
+    identities: a missing mouth is never evidence of vertical mating.
     """
     name = _bare_name(footprint_name)
-    return (
+    return name in _REVIEWED_BOARD_NORMAL_HEADERS or (
         name.startswith("PinHeader_") and name.endswith("_Vertical")
     ) or (
         name.startswith("HDR-TH_") and "-V-" in name

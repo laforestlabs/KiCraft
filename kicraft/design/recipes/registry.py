@@ -166,10 +166,13 @@ def migrate_recipe_selection(value: object) -> RecipeSelection:
     """
     selection = RecipeSelection.model_validate(value)
     replacement = legacy_recipe_replacement(selection.recipe)
-    if replacement is not None and selection.recipe.startswith("drv8833-dual-motor@"):
+    if replacement is not None and (
+        selection.recipe.startswith("drv8833-dual-motor@")
+        or selection.recipe in {"tlv62569-3v3@1", "stm32g030k6t6-minimal@1"}
+    ):
         raise ValueError(
-            f"saved {selection.recipe} requires architecture regeneration: its MCU control "
-            "allocations must be requalified for reset bias before using the replacement recipe"
+            f"saved {selection.recipe} requires architecture regeneration: changed control, "
+            "power, or debug support must be requalified before replacement"
         )
     if replacement is not None and not selection.recipe.startswith("rp2040-minimal@"):
         definition = get_recipe(replacement)
@@ -324,6 +327,7 @@ def expand_static_definition(
                     assembly=group.assembly,
                     mpn=group.mpn,
                     datasheet=group.datasheet,
+                    sourcing_note=group.sourcing_note,
                     recipe_id=definition.recipe,
                     resolution_source="recipe",
                     resolution_id=definition.recipe,

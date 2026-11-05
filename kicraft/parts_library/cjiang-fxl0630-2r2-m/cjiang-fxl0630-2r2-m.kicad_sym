@@ -1,0 +1,17 @@
+(kicad_symbol_lib (version 20231120) (generator kicraft)
+  (symbol "FXL0630-2R2-M"
+    (pin_names (offset 0))
+    (exclude_from_sim no) (in_bom yes) (on_board yes)
+    (property "Reference" "L" (at 0 3.81 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "FXL0630-2R2-M" (at 0 -3.81 0) (effects (font (size 1.27 1.27))))
+    (property "Footprint" "cjiang-fxl0630-2r2-m:FXL0630_Cjiang_Recommended" (at 0 0 0) (effects (font (size 1.27 1.27)) (hide yes)))
+    (property "Datasheet" "https://datasheet.lcsc.com/datasheet/pdf/40dfb6cb4606b2ccaa4e89438a42f563.pdf?productCode=C167218" (at 0 0 0) (effects (font (size 1.27 1.27)) (hide yes)))
+    (symbol "FXL0630-2R2-M_0_1"
+      (rectangle (start -2.54 1.27) (end 2.54 -1.27) (stroke (width 0.254) (type default)) (fill (type background)))
+    )
+    (symbol "FXL0630-2R2-M_1_1"
+      (pin passive line (at -5.08 0 0) (length 2.54) (name "1" (effects (font (size 1.27 1.27)))) (number "1" (effects (font (size 1.27 1.27)))))
+      (pin passive line (at 5.08 0 180) (length 2.54) (name "2" (effects (font (size 1.27 1.27)))) (number "2" (effects (font (size 1.27 1.27)))))
+    )
+  )
+)

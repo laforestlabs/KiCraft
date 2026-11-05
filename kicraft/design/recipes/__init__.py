@@ -44,6 +44,7 @@ from .wave_c_interfaces import (
 )
 from .wave_d_display import WAVE_D_DISPLAY_RECIPES, expand_max7219_four_digit
 from .wave_e_usb_bridge import WAVE_E_USB_BRIDGE_RECIPES, expand_cp2102n_usb_uart
+from .wave_f_sensing import WAVE_F_SENSING_RECIPES, expand_ah49entr_g1_analog_hall
 from .actuator_interfaces import WAVE_F_ACTUATOR_RECIPES
 from .data_logging_storage import DATA_LOGGING_STORAGE_RECIPES
 from .dual_source_battery_power import WAVE_G_DUAL_SOURCE_POWER_RECIPES, expand_dual_source_battery_power
@@ -86,6 +87,8 @@ for definition in WAVE_D_DISPLAY_RECIPES:
     )
 for definition in WAVE_E_USB_BRIDGE_RECIPES:
     register_recipe(definition, expand_cp2102n_usb_uart)
+for definition in WAVE_F_SENSING_RECIPES:
+    register_recipe(definition, expand_ah49entr_g1_analog_hall)
 for definition in WAVE_F_ACTUATOR_RECIPES:
     register_recipe(definition)
 for definition in DATA_LOGGING_STORAGE_RECIPES:

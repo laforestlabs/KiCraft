@@ -87,3 +87,42 @@ def test_integrated_module_with_opened_support_is_not_qualified(role):
     assert qualified_converter_power_stage_currents(
         parts, names, pad_nets, outputs, _bound_source(24.0)
     ) == []
+
+
+@pytest.mark.parametrize(("role", "pin"), [
+    ("reverse_fet", "1"), ("reverse_fet", "2"), ("reverse_fet", "3"),
+    ("reverse_controller", "1"), ("reverse_controller", "3"),
+    ("reverse_controller", "5"), ("reverse_controller", "6"),
+])
+def test_motor_current_evidence_requires_actual_reverse_boundary(role, pin):
+    parts, names, pads, outputs = _qualified_recipe("k7803m-3v3-reverse-blocked@1", 3.3)
+    facts = qualified_converter_power_stage_currents(parts, names, pads, outputs, _bound_source(24))
+    assert [row["power_stage_current_a"] for row in facts] == [0.5]
+    part = next(p for p in parts if p["recipe_role"] == role)
+    pads[part["ref"], pin] = "BROKEN"
+    assert not qualified_converter_power_stage_currents(parts, names, pads, outputs, _bound_source(24))
+
+
+def test_motor_current_evidence_rejects_parallel_bypass_and_wrong_manufacturer():
+    parts, names, pads, outputs = _qualified_recipe("k7803m-3v3-reverse-blocked@1", 3.3)
+    converter = next(p for p in parts if p["recipe_role"] == "converter")
+    raw = pads[converter["ref"], "3"]
+    assert qualified_converter_power_stage_currents(parts, names, pads, outputs, _bound_source(24))
+    parts.append({"ref": "R999", "symbol": "Device:R", "value": "0R"})
+    pads["R999", "1"] = raw
+    pads["R999", "2"] = "VOUT"
+    assert not qualified_converter_power_stage_currents(parts, names, pads, outputs, _bound_source(24))
+    parts.pop()
+    fet = next(p for p in parts if p["recipe_role"] == "reverse_fet")
+    fet["sourcing_note"] = "LCSC C999999"
+    assert not qualified_converter_power_stage_currents(parts, names, pads, outputs, _bound_source(24))
+
+
+@pytest.mark.parametrize(("voltage", "accepted"), [
+    (5.99, False), (6.0, True), (24.0, True), (29.99, True), (30.0, False),
+])
+def test_protected_motor_current_retains_module_input_envelope(voltage, accepted):
+    parts, names, pads, outputs = _qualified_recipe("k7803m-3v3-reverse-blocked@1", 3.3)
+    facts = qualified_converter_power_stage_currents(parts, names, pads, outputs,
+                                                      _bound_source(voltage))
+    assert bool(facts) is accepted

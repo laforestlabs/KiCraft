@@ -1501,6 +1501,126 @@ def _bind_analog_adc_limits(
         )
 
 
+def _protected_motor_sources(
+    architecture: Architecture,
+    requirements: list[CircuitRequirement],
+    recipes: tuple[RegisteredRecipe, ...],
+) -> tuple[dict[str, CircuitRequirement], list[ResolutionDiagnostic]]:
+    """Add reverse isolation only to a dedicated, qualified K78 motor branch."""
+    protected = next(
+        (row for row in recipes if row.definition.recipe == "k7803m-3v3-reverse-blocked@1"),
+        None,
+    )
+    if protected is None:
+        return {}, []
+    replacements: dict[str, CircuitRequirement] = {}
+    diagnostics: list[ResolutionDiagnostic] = []
+    for driver in requirements:
+        matches = (
+            [_recipe_for_exact(driver.exact_part, recipes)]
+            if driver.exact_part else _family_recipes(driver.family, recipes)
+        )
+        if not any(row and row.definition.recipe == "drv8833-dual-motor@5" for row in matches):
+            continue
+        vm = driver.ports.get("vm")
+        sources = [
+            row for row in requirements
+            if row.role == "regulator" and row.ports.get("output") == vm
+        ] if vm else []
+        k78 = [
+            row for row in sources
+            if (not row.exact_part or _identity(row.exact_part) == _identity("K7803M-1000R3"))
+            and any(
+                candidate.definition.recipe in {
+                    "ylptec-k7803m-1000r3@1", "k7803m-3v3-reverse-blocked@1",
+                }
+                for candidate in _family_recipes(row.family, recipes)
+            )
+        ]
+        if not k78:
+            continue
+        source = k78[0]
+        vin = architecture.rail_voltages.get(source.ports.get("input", ""))
+        shared_logic = driver.ports.get("logic_vdd") == vm or any(
+            row.role == "mcu_core" and row.ports.get("vdd") == vm
+            for row in requirements
+        )
+        if (
+            len(sources) != 1
+            or architecture.rail_voltages.get(vm) != 3.3
+            or vin is None or not 6.0 <= vin < 30.0
+            or source.ports.get("gnd") != driver.ports.get("gnd")
+            or shared_logic
+        ):
+            diagnostics.append(ResolutionDiagnostic(
+                code="unqualified_motor_supply",
+                requirement_id=driver.id,
+                message=(
+                    "The K7803 motor branch requires one dedicated 3.3 V source, "
+                    "6 V <= input < 30 V and common ground; logic must remain on "
+                    "a separate rail rather than be exposed to motor regeneration."
+                ),
+                evidence=[f"VM={vm}", f"VIN={vin}", f"shared_logic={shared_logic}"],
+            ))
+            continue
+        replacements[source.id] = source.model_copy(update={"family": protected.definition.family})
+    return replacements, diagnostics
+
+
+def _analog_hall_requirement(requirement: CircuitRequirement, architecture: Architecture) -> bool:
+    """Generic Hall defaults require a positive analog contract, never a switch guess."""
+    interfaces = set(requirement.interfaces)
+    if interfaces & {"digital", "digital_output", "gpio", "pulse", "hall-switch"}:
+        return False
+    if interfaces & {"adc", "analog", "analog_output"}:
+        return True
+    output = requirement.ports.get("out")
+    return bool(output and any(
+        peer.role == "mcu_core" and any(
+            name.startswith("adc") and net == output for name, net in peer.ports.items()
+        )
+        for peer in architecture.requirements
+    ))
+
+
+def _hall_supply_diagnostics(
+    definition: RecipeDefinition,
+    requirement: CircuitRequirement,
+    architecture: Architecture,
+    bindings: dict[str, str],
+) -> list[ResolutionDiagnostic]:
+    if definition.recipe != "ah49entr-g1-analog-hall@1":
+        return []
+    supply = architecture.rail_voltages.get(bindings.get("vdd", ""))
+    ground = architecture.rail_voltages.get(bindings.get("gnd", ""))
+    invalid = supply != 3.3 or ground != 0.0
+    invalid |= bool(set(requirement.interfaces) & {"digital", "digital_output", "gpio", "pulse", "hall-switch"})
+    invalid |= len({bindings.get(name) for name in ("vdd", "gnd", "out")}) != 3
+    for peer in architecture.requirements:
+        if peer.role != "mcu_core":
+            continue
+        consumers = [name for name, net in peer.ports.items() if net == bindings.get("out")]
+        if consumers and (
+            not all(name.startswith("adc") for name in consumers)
+            or peer.ports.get("vdd") != bindings.get("vdd")
+            or peer.ports.get("gnd") != bindings.get("gnd")
+        ):
+            invalid = True
+    if not invalid:
+        return []
+    return [ResolutionDiagnostic(
+        code="unqualified_hall_analog_domain",
+        requirement_id=requirement.id,
+        recipe=definition.recipe,
+        message=(
+            "The reviewed Hall acquisition profile requires distinct VDD/GND/OUT, "
+            "an explicitly typed 3.3 V supply and 0 V ground, and MCU consumers "
+            "on ADC ports in that same supply/reference domain."
+        ),
+        evidence=[f"{name}={net}" for name, net in sorted(bindings.items())],
+    )]
+
+
 def resolve_architecture_recipes(
     architecture: Architecture | dict,
     intent: dict | BaseModel | None = None,
@@ -1710,7 +1830,12 @@ def resolve_architecture_recipes(
     }
     output_nets: dict[str, list[str]] = defaultdict(list)
 
+    motor_sources, motor_diagnostics = _protected_motor_sources(
+        architecture_model, requirements, recipes
+    )
+    result.blocking.extend(motor_diagnostics)
     for requirement in sorted(requirements, key=lambda item: item.id):
+        requirement = motor_sources.get(requirement.id, requirement)
         requirement, required_reset_controls = _complete_reset_control_peers(
             requirement, architecture_model, recipes
         )
@@ -1731,6 +1856,12 @@ def resolve_architecture_recipes(
             )
             continue
         family_matches = _family_recipes(requirement.family, recipes)
+        if (
+            _identity(requirement.family) == "halleffect"
+            and not requirement.exact_part
+            and not _analog_hall_requirement(requirement, architecture_model)
+        ):
+            family_matches = []
         sheet = next(
             (row for row in architecture_model.sheets if row.name == requirement.sheet),
             None,
@@ -2226,6 +2357,12 @@ def resolve_architecture_recipes(
                 f"{requirement.id}: firmware must enable CAN remap {parameters['can_remap']}"
             )
         bindings, port_diagnostics = _port_bindings(definition, requirement, architecture_model)
+        hall_diagnostics = _hall_supply_diagnostics(
+            definition, requirement, architecture_model, bindings
+        )
+        if hall_diagnostics:
+            result.blocking.extend(hall_diagnostics)
+            continue
         mcu_supply_diagnostics = _mcu_core_supply_diagnostics(
             definition, requirement, architecture_model, bindings, parameters
         )
@@ -2408,6 +2545,10 @@ def resolve_architecture_recipes(
                     ),
                     "parameters": resolved_parameters,
                     "ports": {**requirement.ports, **bindings},
+                    "declared_interface": (
+                        None if definition.recipe == "ah49entr-g1-analog-hall@1"
+                        else requirement.declared_interface
+                    ),
                 }
             )
         )
@@ -2592,6 +2733,11 @@ def apply_architecture_recipe_resolution(
     if result.blocking:
         raise RecipeResolutionError(result.blocking)
     requirements = result.requirements
+    verified_hall_ids = {
+        key for selection in result.selections
+        if selection.recipe == "ah49entr-g1-analog-hall@1"
+        for key in selection.requirement_ids
+    }
     return architecture_model.model_copy(
         update={
             "mcu_present": architecture_model.mcu_present
@@ -2601,6 +2747,9 @@ def apply_architecture_recipe_resolution(
             "recipe_resolution": result.records,
             "unresolved_requirement_ids": result.unresolved_requirements,
             "protected_identities": result.protected_identities,
+            "declared_interfaces": [
+                key for key in architecture_model.declared_interfaces if key not in verified_hall_ids
+            ],
             "assumptions": list(
                 dict.fromkeys([*architecture_model.assumptions, *result.assumptions])
             ),

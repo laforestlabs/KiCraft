@@ -134,6 +134,197 @@ def test_owned_bypasses_follow_their_own_ic_on_a_shared_rail():
         assert owner["2"].pos.dist(cap["2"].pos) <= 2.5
 
 
+
+@pytest.mark.parametrize("recipe", [
+    "stm32g030f6p6-minimal@1", "stm32g030k6t6-minimal@2",
+])
+def test_stm32g0_local_bypass_does_not_excuse_distant_bulk_capacitor(recipe):
+    from types import SimpleNamespace
+
+    from kicraft.autoplacer.brain.placement_solver import PlacementSolver
+    from kicraft.design.models import BOM, RecipeSelection
+    from kicraft.design.recipes.registry import expand_recipe
+    from kicraft.design.synthesis.autoplacer import _recipe_local_bypasses
+
+    selection = RecipeSelection(
+        recipe=recipe, instance="core", sheets={"mcu": "MCU"},
+        port_bindings={"vdd": "+3V3", "gnd": "GND"},
+    )
+    expansion = expand_recipe(selection)
+    bom = BOM(parts=expansion.parts, connections=expansion.connections,
+              recipe_ownership=[expansion.ownership])
+    roles = {part.recipe_role: part.ref for part in expansion.parts}
+    owner_ref = roles["mcu"]
+    owner = _ic(owner_ref, 20, 20.5, [
+        _pad(owner_ref, "4", 23, 20, "+3V3"),
+        _pad(owner_ref, "5", 23, 21, "GND"),
+    ])
+    caps = []
+    for role, x in (("local_decoupling", 25), ("bulk_decoupling", 70)):
+        ref = roles[role]
+        caps.append(_cap(ref, x, 20.5, [
+            _pad(ref, "1", x, 20, "+3V3"),
+            _pad(ref, "2", x, 21, "GND"),
+        ]))
+    state = _state([owner, *caps])
+    cfg = {
+        "local_bypasses": _recipe_local_bypasses(
+            SimpleNamespace(recipe_selections=[selection]), bom),
+        "legality_clearance_mm": 0,
+        "courtyard_overlap_min_gap_mm": 0.15,
+    }
+    PlacementSolver(state, cfg)._place_local_bypasses(state.components)
+    owner_pads = {pad.pad_id: pad for pad in state.components[owner_ref].pads}
+    for cap in caps:
+        pads = {pad.pad_id: pad for pad in state.components[cap.ref].pads}
+        assert owner_pads["4"].pos.dist(pads["1"].pos) <= 3
+        assert owner_pads["5"].pos.dist(pads["2"].pos) <= 3
+
+
+def test_single_edge_header_does_not_strand_a_feasible_owned_mcu_group():
+    from kicraft.autoplacer.brain.placement_solver import PlacementSolver
+
+    center = 26.29 / 2
+    owner = Component(
+        ref="U1", value="MCU", pos=Point(center, center), rotation=0,
+        layer=Layer.FRONT, width_mm=10.45, height_mm=10.45,
+        kind="ic", body_center=Point(center, center),
+        pads=[_pad("U1", "4", center - 4.4, center - 0.4, "+3V3"),
+              _pad("U1", "5", center - 4.4, center + 0.4, "GND")],
+    )
+    header = Component(
+        ref="J1", value="SWD", pos=Point(center, center), rotation=0,
+        layer=Layer.FRONT, width_mm=2.59, height_mm=15.33,
+        kind="connector", body_center=Point(center, center),
+        is_through_hole=True, mating_axis="board_normal",
+        pads=[_pad("J1", str(i + 1), center, center + (i - 2.5) * 2.54, net)
+              for i, net in enumerate(("+3V3", "GND", "SWDIO", "SWCLK", "NRST", ""))],
+    )
+    caps = [
+        Component(
+            ref=ref, value=value, pos=Point(18, y), rotation=0,
+            layer=Layer.FRONT, width_mm=3.05, height_mm=1.55,
+            kind="passive", body_center=Point(18, y),
+            pads=[_pad(ref, "1", 17.225, y, "+3V3"),
+                  _pad(ref, "2", 18.775, y, "GND")],
+        )
+        for ref, value, y in (("C1", "100nF", 5), ("C2", "4.7uF", 8))
+    ]
+    state = _state([owner, header, *caps])
+    state.board_outline = (Point(0, 0), Point(26.29, 26.29))
+    solver = PlacementSolver(state, {
+        "component_zones": {"J1": {"edge": "bottom"}},
+        "connector_perp_orientation": True,
+        "connector_edge_inset_mm": 2,
+        "edge_margin_mm": 2,
+        "placement_clearance_mm": 2.84,
+        "legality_clearance_mm": 0.2,
+        "courtyard_overlap_min_gap_mm": 0.2,
+        "local_bypasses": [
+            {"owner_ref": "U1", "bypass_ref": cap.ref,
+             "power_pins": ["4", "1"], "ground_pins": [["5"], "2"],
+             "max_distance_mm": 3}
+            for cap in caps
+        ],
+    }, seed=9)
+    solver._pin_edge_components(state.components)
+    solver._reserve_local_bypasses(state.components)
+    owner_pads = {pad.pad_id: pad for pad in state.components["U1"].pads}
+    for cap in caps:
+        pads = {pad.pad_id: pad for pad in state.components[cap.ref].pads}
+        assert owner_pads["4"].pos.dist(pads["1"].pos) <= 3
+        assert owner_pads["5"].pos.dist(pads["2"].pos) <= 3
+    header = state.components["J1"]
+    assert header.mating_axis == "board_normal"
+    assert header.bbox()[1].y == pytest.approx(24.29)
+
+@pytest.mark.parametrize("rotations", [(0, 0, 0, 0), (0, 90, 180, 270)])
+def test_four_hall_owned_bypasses_fit_despite_overlapping_soft_poses(rotations):
+    from itertools import combinations
+
+    from kicraft.autoplacer.brain.placement_solver import PlacementSolver
+    from kicraft.autoplacer.brain.geometry import rotate_component_in_place
+
+    def group(i, x, y, cap_y):
+        owner_ref, cap_ref = f"U{i}", f"C{i}"
+        # AH49E manufacturer footprint pads and the native extracted 4.19 x
+        # 3.19 courtyard; 0603 native geometry matches the helpers above.
+        sensor = Component(
+            ref=owner_ref, value="AH49ENTR-G1", pos=Point(x, y), rotation=0,
+            layer=Layer.FRONT, width_mm=4.19, height_mm=3.19, kind="ic",
+            body_center=Point(x, y),
+            pads=[Pad(ref=owner_ref, pad_id=pin, pos=Point(x + dx, y + dy),
+                      net=net, layer=Layer.FRONT, size_mm=Point(1.0, 0.7))
+                  for pin, dx, dy, net in (
+                      ("1", 1.3, 0.95, "+3V3"),
+                      ("2", 1.3, -0.95, f"OUT{i}"),
+                      ("3", -1.3, 0.0, "GND"),
+                  )],
+        )
+        cap = Component(
+            ref=cap_ref, value="100nF", pos=Point(x, cap_y), rotation=180,
+            layer=Layer.FRONT, width_mm=3.05, height_mm=1.55, kind="passive",
+            body_center=Point(x, cap_y),
+            pads=[Pad(ref=cap_ref, pad_id=pin, pos=Point(x + dx, cap_y),
+                      net=net, layer=Layer.FRONT, size_mm=Point(0.9, 0.95))
+                  for pin, dx, net in (
+                      ("1", 0.775, "+3V3"), ("2", -0.775, "GND"),
+                  )],
+        )
+        return sensor, cap
+
+    specs = [
+        {"owner_ref": f"U{i}", "bypass_ref": f"C{i}",
+         "power_pins": ["1", "1"], "ground_pins": ["3", "2"],
+         "max_distance_mm": 3.0}
+        for i in range(1, 5)
+    ]
+
+    def assert_legal(comps):
+        for component in comps.values():
+            tl, br = component.physical_bbox()
+            assert tl.x >= 2.0 and tl.y >= 2.0
+            assert br.x <= 15.72 and br.y <= 15.72
+        for i in range(1, 5):
+            sensor = {pad.pad_id: pad for pad in comps[f"U{i}"].pads}
+            cap = {pad.pad_id: pad for pad in comps[f"C{i}"].pads}
+            assert sensor["1"].pos.dist(cap["1"].pos) <= 3.0
+            assert sensor["3"].pos.dist(cap["2"].pos) <= 3.0
+        for a, b in combinations(comps.values(), 2):
+            # Native solver applies the placement clearance across reserved
+            # groups, but the legality gap within an owner/bypass pair.
+            gap = 0.2 if a.ref[1:] == b.ref[1:] else 2.84
+            at, ab = a.bbox(gap / 2)
+            bt, bb = b.bbox(gap / 2)
+            assert ab.x <= bt.x + 1e-9 or bb.x <= at.x + 1e-9 or (
+                ab.y <= bt.y + 1e-9 or bb.y <= at.y + 1e-9
+            ), (a.ref, b.ref)
+
+    # Concrete feasible placement, independently checked before the solver:
+    # owner centers (4.1,3.7), (12.2,3.7), (4.1,11.8), (12.2,11.8);
+    # each cap is 2.8 mm below its owner with 180-degree rotation.
+    witness = [component
+               for i, (x, y) in enumerate(
+                   ((4.1, 3.7), (12.2, 3.7), (4.1, 11.8), (12.2, 11.8)), 1)
+               for component in group(i, x, y, y + 2.8)]
+    assert_legal({component.ref: component for component in witness})
+
+    components = [component for i in range(1, 5)
+                  for component in group(i, 8.86, 8.86, 8.86)]
+    for i, rotation in enumerate(rotations):
+        rotate_component_in_place(components[2 * i], rotation)
+    state = BoardState(
+        components={component.ref: component for component in components},
+        board_outline=(Point(0, 0), Point(17.72, 17.72)),
+    )
+    solver = PlacementSolver(state, {
+        "local_bypasses": specs, "edge_margin_mm": 2.0,
+        "placement_clearance_mm": 2.84, "legality_clearance_mm": 0.2,
+        "courtyard_overlap_min_gap_mm": 0.2,
+    })
+    solver._reserve_local_bypasses(state.components)
+    assert_legal(state.components)
+
 def test_owned_bypass_refuses_when_legal_courtyard_cannot_fit():
     from kicraft.autoplacer.brain.placement_solver import PlacementSolver
     import json

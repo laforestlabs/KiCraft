@@ -262,16 +262,20 @@ def resolve_run(arg: str | None) -> tuple[Path | None, str]:
             con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
             try:
                 row = con.execute(
-                    "SELECT dir_path FROM projects WHERE upper(board_code)=upper(?)",
+                    "SELECT dir_path, user_id, id FROM projects WHERE upper(board_code)=upper(?)",
                     (arg,)).fetchone()
             finally:
                 con.close()
         except sqlite3.Error as exc:
             return None, f"accounts.db query failed: {exc}"
-        if not row or not row[0]:
+        if row is None:
             return None, f"no project row with board_code {arg} in {db}"
-        run = Path(row[0])
-        return (run, "board_code") if run.is_dir() else (None, f"dir_path {run} missing on disk")
+        # Workers create the workspace before terminal project metadata persists
+        # dir_path. Recover that existing directory without creating anything.
+        run = Path(row[0]) if row[0] else projects / str(row[1]) / str(row[2])
+        if run.is_dir():
+            return run, "board_code"
+        return None, f"project {arg} exists but workspace {run} is missing on disk"
     if arg:
         p = Path(arg)
         if p.is_dir():
@@ -1092,7 +1096,7 @@ def _run_family(exp, parent, promotion, pipeline, stages) -> str:
                 f"(failure_kind={kind}, family={stages.get('terminal_family')}) — the build "
                 "never ran: triage stages / §1b")
     if exp is None:
-        return "no .experiments -> build never reached layout (rc<=5 family): investigate the schematic"
+        return "no layout evidence or terminal build verdict recorded"
 
     rv = (parent.get("routed_validation") or {}) if parent.get("present") else {}
     kind = (promotion.get("provenance") or {}).get("source_kind")

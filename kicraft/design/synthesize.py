@@ -373,6 +373,7 @@ def run(
         library_leaves=library_leaves or None,
         placement=getattr(state, "placement", None),
         form_factor=state.intent.form_factor if state.intent else None,
+        intent=state.intent,
     )
     record_written(ap)
     # Build the artifact record BEFORE the PCB stub — the schematic files

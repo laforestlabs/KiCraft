@@ -23,6 +23,7 @@ from kicraft.eval.display_artifact_evidence import display_circuit_facts
 from kicraft.eval.converter_current_evidence import (
     qualified_converter_power_stage_currents,
     qualified_module_output_net,
+    qualified_protected_module_output,
 )
 from kicraft.eval.data_logging_artifact_evidence import data_logging_hardware_facts
 from kicraft.eval.dual_source_power_evidence import observe_dual_source_battery_power
@@ -1131,6 +1132,17 @@ def _observed_power_outputs(parts, names, pad_nets, state, source_outputs):
             for output in _observed_linear_outputs(parts, names, pad_nets, state, observed)
             if output["ref"] not in known
         )
+        known_outputs = {(row["ref"], row["output_net"]) for row in observed}
+        for row in tuple(observed):
+            converter = next((part for part in parts if part.get("ref") == row["ref"]), None)
+            if converter is None or row["output_net"] != qualified_module_output_net(converter, parts, pad_nets):
+                continue
+            protected = qualified_protected_module_output(converter, parts, pad_nets, names)
+            if protected and (row["ref"], protected) not in known_outputs:
+                # This is nominal rail identity, not a guaranteed exact voltage:
+                # the ideal-diode FET has load- and temperature-dependent drop.
+                observed.append({**row, "output_net": protected})
+                known_outputs.add((row["ref"], protected))
         if len(observed) == count:
             return observed
 

@@ -281,3 +281,21 @@ def _start_attempt_for_test(state: dict) -> dict:
     """`_start_attempt` without touching the store (no project id)."""
     web._start_attempt(state, mode="continue")
     return state
+
+
+def test_work_unit_progress_belongs_to_current_stage_and_attempt():
+    act = activity.reduce_activity(None, {"kind": "run_started", "run_id": "first"})
+    for unit in ("a", "b", "c"):
+        activity.reduce_activity(act, {"kind": "work_unit_plan", "stage": "bom", "unit_id": unit})
+        activity.reduce_activity(act, {"kind": "work_unit_done", "stage": "bom", "unit_id": unit})
+    assert act["planned_units"] == act["completed_units"] == {"a", "b", "c"}
+    activity.reduce_activity(act, {"kind": "stage_start", "stage": "wiring"})
+    activity.reduce_activity(act, {"kind": "work_unit_plan", "stage": "wiring", "unit_id": "a"})
+    assert act["planned_units"] == {"a"}
+    assert act["completed_units"] == set()
+    activity.reduce_activity(act, {"kind": "work_unit_done", "stage": "wiring", "unit_id": "a"})
+    activity.reduce_activity(act, {"kind": "build_log", "stage": "synthesize", "text": "synthesis started"})
+    assert act["planned_units"] == act["completed_units"] == set()
+    activity.reduce_activity(act, {"kind": "work_unit_plan", "stage": "bom", "unit_id": "a"})
+    activity.reduce_activity(act, {"kind": "run_started", "run_id": "second"})
+    assert act["planned_units"] == act["completed_units"] == set()

@@ -114,12 +114,17 @@ def _repair_parent_outline(
             _grow(p_tl, p_br)
 
     for trace in composition.board_state.traces or []:
+        half_width = trace.width_mm / 2.0
         _grow(
-            Point(min(trace.start.x, trace.end.x), min(trace.start.y, trace.end.y)),
-            Point(max(trace.start.x, trace.end.x), max(trace.start.y, trace.end.y)),
+            Point(min(trace.start.x, trace.end.x) - half_width,
+                  min(trace.start.y, trace.end.y) - half_width),
+            Point(max(trace.start.x, trace.end.x) + half_width,
+                  max(trace.start.y, trace.end.y) + half_width),
         )
     for via in composition.board_state.vias or []:
-        _grow(via.pos, via.pos)
+        radius = via.size_mm / 2.0
+        _grow(Point(via.pos.x - radius, via.pos.y - radius),
+              Point(via.pos.x + radius, via.pos.y + radius))
 
     if req_min_x == float("inf"):
         return {"repaired": False, "reason": "no geometry"}

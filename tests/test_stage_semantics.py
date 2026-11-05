@@ -1204,9 +1204,9 @@ def test_architecture_rejects_false_pd_dac_provenance_and_missing_load_budget():
         }
 
 
-    # A 2A reviewed buck is enough, even with the topology prose removed.
+    # The bounded reviewed buck is enough for this producer check.
     complete_regulator = {
-        **_with_3v3_producer("tlv62569-3v3@1"),
+        **_with_3v3_producer("tlv62569-3v3@2"),
         "topologies": {"MCU": "ESP32-S3-WROOM-1 with native USB"},
     }
     complete_codes = _regulator_codes(complete_regulator)
@@ -1439,7 +1439,7 @@ def test_architecture_rejects_source_without_headroom_for_external_loads():
                 "ports": {"input": "VBUS", "output": "+3V3", "gnd": "GND"},
             }
         ],
-        "recipe_resolution": [{"requirement_id": "buck", "recipe": "tlv62569-3v3@1"}],
+        "recipe_resolution": [{"requirement_id": "buck", "recipe": "tlv62569-3v3@2"}],
         "inter_sheet_nets": [
             {
                 "name": "VBUS",
@@ -3139,7 +3139,7 @@ def test_the_rp2040_recipes_own_bootsel_button_realizes_a_pushbutton_demand():
                     "family": "tlv62569-3v3", "exact_part": "TLV62569DBVR",
                 }],
                 "recipe_selections": [
-                    {"recipe": "tlv62569-3v3@1", "instance": "rp2040",
+                    {"recipe": "tlv62569-3v3@2", "instance": "rp2040",
                      "requirement_ids": ["rp2040"]}
                 ],
             }
@@ -4253,3 +4253,15 @@ def test_linear_regulator_absolute_dissipation_refuses_proven_overload():
     candidate["requirements"][0]["obligations"][0]["value"] = 0.5
     issues = architecture_power_requirement_diagnostics({}, candidate)
     assert not any(issue.code == "architecture_linear_regulator_dissipation_exceeded" for issue in issues)
+
+
+@pytest.mark.parametrize(("voltage", "rejected"), [(3.3, False), (5.0, False), (5.1, True), (9.0, True)])
+def test_native_drv_motor_tvs_standoff_constrains_architecture_vm(voltage, rejected):
+    from kicraft.design.stage_semantics import _architecture_motor_clamp_standoff
+
+    candidate = {
+        "rail_voltages": {"VM": voltage},
+        "requirements": [{"id": "motor", "role": "driver", "family": "dual-dc-motor-driver",
+                          "exact_part": "DRV8833PWPR", "ports": {"vm": "VM"}}],
+    }
+    assert bool(_architecture_motor_clamp_standoff(candidate)) is rejected

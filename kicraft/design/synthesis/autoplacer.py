@@ -12,6 +12,7 @@ map; both flow into the emitted JSON.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Iterable
 from fnmatch import fnmatch
 from pathlib import Path
@@ -67,6 +68,62 @@ def _edge_connector_zone_injections(
         if any(fnmatch(fp, pat) for pat in _EDGE_CONNECTOR_FOOTPRINT_PATTERNS):
             out[ref] = {"edge": DEFAULT_EDGE_CONNECTOR_ZONE}
     return out
+
+_ALL_CONNECTORS_ONE_EDGE = re.compile(
+    r"\ball\s+(?:the\s+)?connectors\b[^.;]{0,80}\b(?:on|along|at)\s+"
+    r"(?:the\s+)?(?:one|same|single)\s+(?:board\s+)?edge\b",
+    re.IGNORECASE,
+)
+
+
+def _same_edge_connector_constraint(constraints: Iterable[str]) -> bool:
+    """Recognize an explicit positive constraint, never model-authored assumptions."""
+    for constraint in constraints:
+        text = str(constraint)
+        for match in _ALL_CONNECTORS_ONE_EDGE.finditer(text):
+            prefix = re.split(r"[.;]", text[:match.start()])[-1]
+            if not re.search(r"\b(?:not|never|without|avoid)\b", prefix, re.IGNORECASE):
+                return True
+    return False
+
+
+def required_same_edge_connector_refs(intent, bom: BOM) -> tuple[str, ...] | None:
+    """Return all physical connector refs for the explicit original constraint."""
+    if intent is None or not _same_edge_connector_constraint(intent.constraints):
+        return None
+    from kicraft.design.part_identity import physical_inventory_record
+
+    refs = []
+    for part in bom.parts:
+        record = physical_inventory_record(mpn=part.mpn, symbol=part.symbol, footprint=part.footprint)
+        features = record.physical_features if record is not None else ()
+        if (re.fullmatch(r"J[0-9]+", part.ref) or any(
+            feature in {"connector", "header", "pin-header", "screw-terminal", "terminal-block"}
+            or feature.endswith("-connector") for feature in features
+        )):
+            refs.append(part.ref)
+    return tuple(sorted(refs))
+
+
+def _same_edge_connector_zones(refs, component_zones, placement):
+    """Zone every connector named by the original all-one-edge contract."""
+    if not refs:
+        raise ValueError("all-connectors-one-edge constraint has no connector references")
+    explicit = {
+        ref: spec for ref, spec in (getattr(placement, "component_zones", None) or {}).items()
+        if ref in refs
+    }
+    if any("corner" in spec or "zone" in spec for spec in explicit.values()):
+        raise ValueError("all-connectors-one-edge conflicts with an explicit connector zone")
+    explicit_edges = {spec["edge"] for spec in explicit.values() if "edge" in spec}
+    if len(explicit_edges) > 1:
+        raise ValueError("all-connectors-one-edge conflicts with explicit connector edges")
+    edge = next(iter(explicit_edges), DEFAULT_EDGE_CONNECTOR_ZONE)
+    for ref in refs:
+        # The hard original brief takes precedence over model-authored hints.
+        old = component_zones.get(ref, {})
+        component_zones[ref] = {"edge": edge, **({"rotation": old["rotation"]} if "rotation" in old else {})}
+    return {"edge": edge, "refs": list(refs)}
 
 
 def _recipe_local_bypasses(architecture: Architecture, bom: BOM) -> list[dict]:
@@ -151,6 +208,7 @@ def write_autoplacer_json(
     library_leaves: dict[str, dict[str, Any]] | None = None,
     placement=None,
     form_factor=None,
+    intent=None,
 ) -> Path:
     """Write `<project_stem>_autoplacer.json` to project_dir. Returns the path.
 
@@ -268,6 +326,12 @@ def write_autoplacer_json(
                 "[autoplacer] warning: dropping placement rule(s) for ref(s) "
                 f"not in the BOM: {', '.join(sorted(set(dropped)))}"
             )
+
+    required_refs = required_same_edge_connector_refs(intent, bom)
+    if required_refs is not None:
+        body["required_same_edge_connectors"] = _same_edge_connector_zones(
+            required_refs, component_zones, placement
+        )
 
     if ic_groups:
         body["ic_groups"] = ic_groups

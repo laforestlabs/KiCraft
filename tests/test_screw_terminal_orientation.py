@@ -254,6 +254,47 @@ def test_facing_omits_verified_vertical_header_strip(tmp_path):
     assert connector_facings(str(out), {"J9": {"edge": "right"}}) == []
 
 
+@pytest.mark.parametrize("count", [2, 4, 8])
+def test_reviewed_xfcn_vertical_header_keeps_edge_position_contract(tmp_path, count):
+    from kicraft.autoplacer.brain.connector_edge_gap import connector_edge_gaps, connector_facings
+    from kicraft.autoplacer.hardware.adapter import connector_mating_evidence
+    from kicraft.design.synthesis.footprint_library import load_footprint
+    from kicraft.parts_library.footprint_opening import is_board_normal_header
+
+    pcbnew_mod = pytest.importorskip("pcbnew")
+    bundle = f"xfcn-pm254v-11-{count:02d}-h85"
+    name = f"XFCN_PM254V_11_{count:02d}_H85"
+    fp, _ = load_footprint(pcbnew_mod, bundle, name)
+    assert connector_mating_evidence(fp) == ("board_normal", None)
+    assert not is_board_normal_header("XFCN_PM254V_11_03_H85")
+    assert not is_board_normal_header("XFCN_PM254H_11_02_H85")
+    board = pcbnew_mod.CreateEmptyBoard()
+    fp.SetReference("J2")
+    fp.SetValue("HOST_5V")
+    fp.SetPosition(pcbnew_mod.VECTOR2I(pcbnew_mod.FromMM(20), pcbnew_mod.FromMM(38)))
+    board.Add(fp)
+    rect = pcbnew_mod.PCB_SHAPE(board)
+    rect.SetShape(pcbnew_mod.SHAPE_T_RECT)
+    rect.SetStart(pcbnew_mod.VECTOR2I(0, 0))
+    rect.SetEnd(pcbnew_mod.VECTOR2I(pcbnew_mod.FromMM(60), pcbnew_mod.FromMM(40)))
+    rect.SetLayer(pcbnew_mod.Edge_Cuts)
+    board.Add(rect)
+    near = tmp_path / "near.kicad_pcb"
+    pcbnew_mod.SaveBoard(str(near), board)
+    zones = {"J2": {"edge": "bottom"}}
+    assert connector_facings(str(near), zones) == []
+    gaps = connector_edge_gaps(str(near), zones, include_access_only=True)
+    assert [gap.ref for gap in gaps] == ["J2"]
+    assert -0.5 <= gaps[0].gap_mm <= 1.0
+    fp.SetPosition(pcbnew_mod.VECTOR2I(pcbnew_mod.FromMM(20), pcbnew_mod.FromMM(20)))
+    inland = tmp_path / "inland.kicad_pcb"
+    pcbnew_mod.SaveBoard(str(inland), board)
+    inland_gaps = connector_edge_gaps(str(inland), zones, include_access_only=True)
+    assert [gap.ref for gap in inland_gaps] == ["J2"]
+    assert not inland_gaps[0].ok
+    assert inland_gaps[0].gap_mm < -10.0
+
+
 def test_facing_blocks_unknown_mouth(tmp_path):
     # No vertical identity and no mouth datum must block rather than disappear.
     # (The 4P geometry under a name the reviewed table does not cover, not the

@@ -686,6 +686,46 @@ def _all_leaf_artifacts(project_dir: Path) -> list[dict[str, Any]]:
         )
     return artifacts
 
+def _planned_leaf_paths(schematic: Path, parent_selector: str = "/") -> set[str]:
+    """Physical leaf instances below the selected composition parent."""
+    from kicraft.autoplacer.brain.hierarchy_parser import parse_hierarchy
+
+    graph = parse_hierarchy(project_dir=schematic.parent, top_schematic=schematic)
+    selector = parent_selector.strip().lower()
+    parent = next(
+        (
+            node for node in [graph.root, *graph.non_leaf_nodes()]
+            if selector in {
+                node.id.sheet_name.lower(),
+                node.id.sheet_file.lower(),
+                node.id.instance_path.lower(),
+            }
+        ),
+        None,
+    )
+    if parent is None:
+        raise ValueError(f"Unknown parent subcircuit: {parent_selector}")
+    planned = set()
+    pending = list(parent.children)
+    while pending:
+        node = pending.pop()
+        if node.is_leaf:
+            planned.add(node.id.instance_path)
+        else:
+            pending.extend(node.children)
+    return planned
+
+
+def _leaf_progress_counts(
+    planned_paths: set[str],
+    accepted_leafs: list[dict[str, Any]],
+) -> tuple[int, int]:
+    """Count planned physical instances, independently of artifact discovery."""
+    accepted_paths = {
+        item.get("instance_path") or item.get("metadata", {}).get("instance_path")
+        for item in accepted_leafs
+    }
+    return len(planned_paths), len(planned_paths & accepted_paths)
 
 def _read_composer_quality_score(
     parent_output_json: Path,
@@ -2479,6 +2519,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: schematic not found: {schematic}", file=sys.stderr)
         return 2
 
+    planned_leaf_paths = _planned_leaf_paths(schematic, args.parent)
+    planned_leaf_total = len(planned_leaf_paths)
+
     work_dir = project_dir / ".experiments"
     work_dir.mkdir(parents=True, exist_ok=True)
     rounds_dir = work_dir / "rounds"
@@ -2627,7 +2670,7 @@ def main(argv: list[str] | None = None) -> int:
         latest_marker="starting hierarchical run",
         start_ts=start_ts,
         current_stage="startup",
-        leaf_total=0,
+        leaf_total=planned_leaf_total,
         leaf_accepted=0,
         parent_routed=False,
         leaf_worker_count=effective_workers,
@@ -2804,7 +2847,7 @@ def main(argv: list[str] | None = None) -> int:
             latest_marker=f"round {round_num} started",
             start_ts=start_ts,
             current_stage="solve_leafs",
-            leaf_total=0,
+            leaf_total=planned_leaf_total,
             leaf_accepted=0,
             parent_routed=False,
             leaf_worker_count=effective_workers,
@@ -2881,7 +2924,7 @@ def main(argv: list[str] | None = None) -> int:
             latest_marker=f"round {round_num} leaf solve launched",
             start_ts=start_ts,
             current_stage="solve_leafs",
-            leaf_total=0,
+            leaf_total=planned_leaf_total,
             leaf_accepted=0,
             parent_routed=False,
             leaf_worker_count=effective_workers,
@@ -2986,6 +3029,9 @@ def main(argv: list[str] | None = None) -> int:
 
         all_leafs = _all_leaf_artifacts(project_dir)
         accepted_leafs = _accepted_leaf_artifacts(project_dir)
+        leaf_total, leaf_accepted = _leaf_progress_counts(
+            planned_leaf_paths, accepted_leafs
+        )
 
         leaf_names = [item.get("sheet_name", "") for item in all_leafs]
         accepted_leaf_names = [item.get("sheet_name", "") for item in accepted_leafs]
@@ -3058,13 +3104,13 @@ def main(argv: list[str] | None = None) -> int:
                 latest_marker=f"round {round_num} parent composed",
                 start_ts=start_ts,
                 current_stage="route_parent",
-                leaf_total=len(all_leafs),
-                leaf_accepted=len(accepted_leafs),
+                leaf_total=leaf_total,
+                leaf_accepted=leaf_accepted,
                 parent_routed=False,
                 leaf_worker_count=effective_workers,
                 leaf_workers_active=0,
                 leaf_workers_queued=0,
-                leaf_workers_completed=len(accepted_leafs),
+                leaf_workers_completed=leaf_accepted,
                 current_node=args.parent,
                 current_parent=args.parent,
                 current_leaf=", ".join(accepted_leaf_names[:3])
@@ -3112,13 +3158,13 @@ def main(argv: list[str] | None = None) -> int:
                 latest_marker=f"round {round_num} parent routing launched",
                 start_ts=start_ts,
                 current_stage="route_parent",
-                leaf_total=len(all_leafs),
-                leaf_accepted=len(accepted_leafs),
+                leaf_total=leaf_total,
+                leaf_accepted=leaf_accepted,
                 parent_routed=False,
                 leaf_worker_count=effective_workers,
                 leaf_workers_active=0,
                 leaf_workers_queued=0,
-                leaf_workers_completed=len(accepted_leafs),
+                leaf_workers_completed=leaf_accepted,
                 current_node=args.parent,
                 current_parent=args.parent,
                 current_leaf=", ".join(accepted_leaf_names[:3])
@@ -3188,13 +3234,13 @@ def main(argv: list[str] | None = None) -> int:
                 latest_marker=f"round {round_num} parent routing complete",
                 start_ts=start_ts,
                 current_stage="score_round",
-                leaf_total=len(all_leafs),
-                leaf_accepted=len(accepted_leafs),
+                leaf_total=leaf_total,
+                leaf_accepted=leaf_accepted,
                 parent_routed=parent_routed,
                 leaf_worker_count=effective_workers,
                 leaf_workers_active=0,
                 leaf_workers_queued=0,
-                leaf_workers_completed=len(accepted_leafs),
+                leaf_workers_completed=leaf_accepted,
                 current_node=args.parent,
                 current_parent=args.parent,
                 current_leaf=", ".join(accepted_leaf_names[:3])
@@ -3284,8 +3330,8 @@ def main(argv: list[str] | None = None) -> int:
         score_round_start_ts = _timing_now()
 
         score, score_breakdown, score_notes, tier = _score_round(
-            leaf_accepted=len(accepted_leafs),
-            leaf_total=len(all_leafs),
+            leaf_accepted=leaf_accepted,
+            leaf_total=leaf_total,
             parent_routed=parent_routed,
             parent_output_json=parent_output_json,
             parent_routed_validation=parent_routed_validation,
@@ -3348,8 +3394,8 @@ def main(argv: list[str] | None = None) -> int:
             score=score,
             kept=is_meaningful_improvement,
             duration_s=duration_s,
-            leaf_total=len(all_leafs),
-            leaf_accepted=len(accepted_leafs),
+            leaf_total=leaf_total,
+            leaf_accepted=leaf_accepted,
             parent_composed=parent_composed,
             parent_routed=parent_routed,
             accepted_trace_count=sum(
@@ -3359,7 +3405,7 @@ def main(argv: list[str] | None = None) -> int:
             latest_stage="done",
             details=(
                 f"tier={tier}; "
-                f"leafs {len(accepted_leafs)}/{len(all_leafs)} accepted; "
+                f"leafs {leaf_accepted}/{leaf_total} accepted; "
                 f"parent_composed={'yes' if parent_composed else 'no'}; "
                 f"parent_route={'ok' if parent_routed else 'fail'}; "
                 f"score={score:.2f}; "
@@ -3479,13 +3525,13 @@ def main(argv: list[str] | None = None) -> int:
             latest_marker=f"round {round_num} {'kept' if round_result.kept else 'discarded'}",
             start_ts=start_ts,
             current_stage="done",
-            leaf_total=len(all_leafs),
-            leaf_accepted=len(accepted_leafs),
+            leaf_total=leaf_total,
+            leaf_accepted=leaf_accepted,
             parent_routed=parent_routed,
             leaf_worker_count=effective_workers,
             leaf_workers_active=0,
             leaf_workers_queued=0,
-            leaf_workers_completed=len(accepted_leafs),
+            leaf_workers_completed=leaf_accepted,
             current_node=args.parent,
             current_parent=args.parent,
             current_leaf=", ".join(accepted_leaf_names[:3])
@@ -3503,7 +3549,7 @@ def main(argv: list[str] | None = None) -> int:
             f"Round {round_num:3d}/{args.rounds} "
             f"score={score:6.2f} "
             f"tier={tier:14s} "
-            f"leafs={len(accepted_leafs)}/{len(all_leafs)} "
+            f"leafs={leaf_accepted}/{leaf_total} "
             f"parent_route={'ok' if parent_routed else 'fail'} "
             f"[{'KEPT' if round_result.kept else 'discard'}]"
         )

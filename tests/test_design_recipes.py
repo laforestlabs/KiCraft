@@ -782,7 +782,7 @@ def _shared_net(expansion, ref: str, *pins: str) -> list[str]:
 def test_a_declared_enable_binding_is_not_overwritten():
     """A brief that wires `enable` explicitly keeps its net: the recipe default tie is a fallback.
 
-    `tlv62569-3v3@1` publishes an optional `enable` port tied to `input` by default. A design that
+    `tlv62569-3v3@2` publishes an optional `enable` port tied to `input` by default. A design that
     names a net for it (the enable-jumper brief) must keep that binding, and the tie must not turn
     the binding into a `recipe_signal_in_power_nets` refusal.
     """
@@ -829,7 +829,7 @@ def test_a_declared_enable_binding_is_not_overwritten():
     canonical, _expanded = _normalize_stage_response("architecture", payload, {})
 
     selection = canonical["recipe_selections"][0]
-    assert selection["recipe"] == "tlv62569-3v3@1"
+    assert selection["recipe"] == "tlv62569-3v3@2"
     assert selection["port_bindings"]["enable"] == "EN_JUMPER"
     assert selection["port_bindings"]["input"] == "VIN_12V"
 
@@ -842,9 +842,9 @@ def test_a_declared_enable_binding_is_not_overwritten():
 def test_an_unbound_enable_port_expands_onto_the_input_rail():
     """The pre-change selection shape — no `enable` key — still expands onto the input rail."""
     selection = RecipeSelection(
-        recipe="tlv62569-3v3@1",
+        recipe="tlv62569-3v3@2",
         instance="buck",
-        sheets={role: "POWER" for role in get_recipe("tlv62569-3v3@1").required_sheet_roles},
+        sheets={role: "POWER" for role in get_recipe("tlv62569-3v3@2").required_sheet_roles},
         port_bindings={"input": "VIN_12V", "gnd": "GND", "output": "+5V"},
     )
 
@@ -853,6 +853,46 @@ def test_an_unbound_enable_port_expands_onto_the_input_rail():
     # VIN (pin 4) and EN (pin 1) sit on one net; no separate `enable` net is created.
     assert _shared_net(expansion, "U1", "4", "1") == ["VIN_12V"]
     assert not any(connection.net_name == "enable" for connection in expansion.connections)
+
+
+def test_tlv62569_v2_owns_bounded_exact_support_and_old_graph_requires_regeneration():
+    from kicraft.design.stage_state import legacy_recipe_resume_stage
+
+    definition = get_recipe("tlv62569-3v3@2")
+    assert definition.rated_output_current_a == 0.5
+    selection = RecipeSelection(
+        recipe=definition.recipe, instance="buck", sheets={"power": "POWER"},
+        port_bindings={"input": "VIN", "gnd": "GND", "output": "VOUT"},
+        requirement_ids=["buck"],
+    )
+    expansion = expand_recipe(selection)
+    by_role = {}
+    for part in expansion.parts:
+        by_role.setdefault(part.recipe_role, []).append(part)
+    assert [(p.mpn, p.sourcing_note) for p in by_role["inductor"]] == [
+        ("FXL0630-2R2-M", "LCSC C167218")]
+    assert len(by_role["input_cap"]) == 2 and all(
+        p.mpn == "GRM31CR71H475KA12L" and p.sourcing_note == "LCSC C77096"
+        for p in by_role["input_cap"])
+    assert len(by_role["output_cap"]) == 2 and all(
+        p.mpn == "GRM31CR71E106KA12L" and p.sourcing_note == "LCSC C77093"
+        for p in by_role["output_cap"])
+    nets = {(ep.ref, ep.pin): connection.net_name
+            for connection in expansion.connections for ep in connection.endpoints}
+    inductor = by_role["inductor"][0]
+    converter = by_role["converter"][0]
+    assert nets[inductor.ref, "1"] == nets[converter.ref, "3"]
+    assert nets[inductor.ref, "2"] == "VOUT"
+    assert all(nets[p.ref, "1"] == "VIN" and nets[p.ref, "2"] == "GND"
+               for p in by_role["input_cap"])
+    assert all(nets[p.ref, "1"] == "VOUT" and nets[p.ref, "2"] == "GND"
+               for p in by_role["output_cap"])
+    old = selection.model_copy(update={"recipe": "tlv62569-3v3@1"})
+    with pytest.raises(ValueError, match="architecture regeneration"):
+        migrate_recipe_selection(old)
+    assert legacy_recipe_resume_stage({
+        "architecture": {"recipe_selections": [old.model_dump()]}, "bom": {"parts": []},
+    }) == "architecture"
 
 
 def test_raw_legacy_recipe_ids_identify_artifacts_needing_regeneration():
@@ -888,12 +928,12 @@ def test_electrical_fix_versions_migrate_saved_selection_without_mutation(old, n
     with pytest.raises(ValueError, match="unknown parameters"):
         migrate_recipe_selection(saved.model_copy(update={"parameters": {"unexpected": 1}}))
 
-@pytest.mark.parametrize("old", ["drv8833-dual-motor@1", "drv8833-dual-motor@2", "drv8833-dual-motor@3"])
+@pytest.mark.parametrize("old", ["drv8833-dual-motor@1", "drv8833-dual-motor@2", "drv8833-dual-motor@3", "drv8833-dual-motor@4"])
 @pytest.mark.parametrize("complete", [False, True])
 def test_legacy_motor_requires_architecture_regeneration(old, complete):
     from kicraft.design.stage_state import legacy_recipe_resume_stage
 
-    definition = get_recipe("drv8833-dual-motor@4")
+    definition = get_recipe("drv8833-dual-motor@5")
     selection = RecipeSelection(
         recipe=old, instance="motor", sheets={"interface": "MOTOR"},
         port_bindings={port.name: port.name.upper() for port in definition.ports
@@ -914,7 +954,7 @@ def test_legacy_motor_requires_architecture_regeneration(old, complete):
 
 
 def test_drv8833_charge_pump_capacitor_is_between_vcp_and_vm():
-    definition = get_recipe("drv8833-dual-motor@4")
+    definition = get_recipe("drv8833-dual-motor@5")
     selection = RecipeSelection(
         recipe=definition.recipe, instance="motor", sheets={"interface": "MOTOR"},
         port_bindings={port.name: port.name.upper() for port in definition.ports if port.required},
@@ -935,6 +975,93 @@ def test_drv8833_charge_pump_capacitor_is_between_vcp_and_vm():
     assert nets[pullup, "2"] != nets[driver, "12"]
     assert nets[driver, "3"] == nets[driver, "6"] == nets[driver, "13"] == nets[driver, "17"] == "GND"
     assert not any(part.recipe_role == "sense" for part in expansion.parts)
+
+
+def _protected_motor_evidence():
+    from kicraft.design.models import Architecture
+
+    motor = get_recipe("drv8833-dual-motor@5")
+    selections = [
+        RecipeSelection(recipe="k7803m-3v3-reverse-blocked@1", instance="supply",
+                        sheets={"power": "POWER"}, requirement_ids=["supply"],
+                        port_bindings={"input": "VIN", "gnd": "GND", "output": "VM"}),
+        RecipeSelection(recipe=motor.recipe, instance="motor", sheets={"interface": "MOTOR"},
+                        requirement_ids=["motor"],
+                        port_bindings={p.name: ("VM" if p.name == "vm" else p.name.upper())
+                                       for p in motor.ports if p.required}),
+    ]
+    expansions = expand_selections(selections)
+    bom = BOM(parts=[p for e in expansions for p in e.parts],
+              connections=[c for e in expansions for c in e.connections],
+              no_connect_pins=[p for e in expansions for p in e.no_connect_pins],
+              recipe_ownership=[e.ownership for e in expansions])
+    architecture = Architecture.model_validate({
+        "sheets": [{"name": "POWER", "stem": "POWER", "function": "supply"},
+                   {"name": "MOTOR", "stem": "MOTOR", "function": "motor"}],
+        "power_nets": ["VIN", "VM", "GND"],
+        "inter_sheet_nets": [],
+        "rail_voltages": {"VIN": 24.0, "VM": 3.3, "GND": 0.0},
+        "recipe_selections": selections,
+        "requirements": [
+            {"id": "supply", "sheet": "POWER", "role": "regulator",
+             "family": "k7803m-3v3-reverse-blocked",
+             "ports": {"input": "VIN", "output": "VM", "gnd": "GND"}},
+            {"id": "motor", "sheet": "MOTOR", "role": "driver",
+             "family": "dual-dc-motor-driver", "exact_part": "DRV8833PWPR",
+             "ports": {"vm": "VM", "gnd": "GND"}},
+        ],
+    })
+    return architecture, bom
+
+
+def _move_evidence_pin(bom, ref, pin, target):
+    from kicraft.design.models import NetConnection, PinEndpoint
+
+    for connection in bom.connections:
+        connection.endpoints = [ep for ep in connection.endpoints
+                                if (ep.ref, ep.pin) != (ref, pin)]
+    bom.connections.append(NetConnection(sheet="POWER", net_name=target,
+                                         endpoints=[PinEndpoint(ref=ref, pin=pin)]))
+
+
+@pytest.mark.parametrize(("role", "pin", "target"), [
+    ("reverse_fet", "2", "VIN"), ("reverse_fet", "3", "VM"),
+    ("reverse_controller", "6", "VIN"), ("reverse_controller", "5", "GND"),
+])
+def test_protected_motor_source_rejects_broken_actual_fet_and_control_graph(role, pin, target):
+    from kicraft.design.synthesis.validation import check_reviewed_power_transfer
+
+    architecture, bom = _protected_motor_evidence()
+    assert check_reviewed_power_transfer(architecture, bom).ok
+    part = next(p for p in bom.parts if p.recipe_role == role)
+    _move_evidence_pin(bom, part.ref, pin, target)
+    assert not check_reviewed_power_transfer(architecture, bom).ok
+
+
+def test_protected_motor_rejects_conductive_bypass_and_underrated_bulk():
+    from kicraft.design.models import NetConnection, PinEndpoint
+    from kicraft.design.synthesis.validation import (
+        check_reviewed_device_support_networks, check_reviewed_power_transfer,
+    )
+
+    architecture, bom = _protected_motor_evidence()
+    assert check_reviewed_power_transfer(architecture, bom).ok
+    assert check_reviewed_device_support_networks(bom).ok
+    converter = next(p for p in bom.parts if p.recipe_role == "converter")
+    raw = next(c.net_name for c in bom.connections
+               if any(ep.ref == converter.ref and ep.pin == "3" for ep in c.endpoints))
+    resistor = next(p for p in bom.parts if p.recipe_role == "fault_pullup")
+    bypass = resistor.model_copy(update={"ref": "R999", "recipe_id": None,
+                                         "recipe_role": None, "recipe_instance": None})
+    bom.parts.append(bypass)
+    bom.connections.extend([
+        NetConnection(sheet="POWER", net_name=raw, endpoints=[PinEndpoint(ref="R999", pin="1")]),
+        NetConnection(sheet="POWER", net_name="VM", endpoints=[PinEndpoint(ref="R999", pin="2")]),
+    ])
+    assert not check_reviewed_power_transfer(architecture, bom).ok
+    bulk = next(p for p in bom.parts if p.recipe_role == "vm_bulk")
+    bulk.mpn = "CL31A476MQHNNNE"  # 47 uF, 6.3 V: the audited failure.
+    assert not check_reviewed_device_support_networks(bom).ok
 
 @pytest.mark.parametrize(("binding", "expected"), [(None, "VIN"), ("CONTROL", "CONTROL")])
 def test_me6211_enable_binding_or_default_tracks_pin_three(binding, expected):
@@ -5400,7 +5527,7 @@ def test_stm32g030k6_native_graph_and_four_adc_resources():
     from kicraft.design.recipes.pin_allocator import allocate_requirement_pins
     from kicraft.design.part_identity import reviewed_part
 
-    definition = get_recipe("stm32g030k6t6-minimal@1")
+    definition = get_recipe("stm32g030k6t6-minimal@2")
     f6 = get_recipe("stm32g030f6p6-minimal@1")
     assert sum("adc" in pin.capabilities for pin in definition.allocatable_pins) == 14
     assert sum("adc" in pin.capabilities for pin in f6.allocatable_pins) == 8
@@ -5434,6 +5561,12 @@ def test_stm32g030k6_native_graph_and_four_adc_resources():
         "STM32G030K6T6", record.symbol, record.footprint,
     )
     assert record.lcsc == "C529331" and len(record.contacts) == 32
+    swd = next(part for part in expansion.parts if part.recipe_role == "swd_header")
+    assert (swd.mpn, swd.symbol, swd.footprint) == (
+        "68000-406HLF", "Connector_Generic:Conn_01x06",
+        "amphenol-68000-406hlf:HDR-TH_6P-P2.54-V-M-1",
+    )
+    assert next(part for part in f6.parts if part.role == "swd_header").mpn is None
     assert nets[mcu, "4"] == "+3V3" and nets[mcu, "5"] == "GND"
     assert nets[mcu, "6"] == nets[refs["swd_header"], "5"] == nets[refs["reset_button"], "1"]
     assert nets[mcu, "24"] == nets[refs["swd_header"], "3"]
@@ -5562,7 +5695,7 @@ def test_attiny1604_mux_and_updi_boundaries_are_explicit():
     "recipe,expected_pins",
     [
         ("stm32g030f6p6-minimal@1", {"i2c_scl": "1", "i2c_sda": "2"}),
-        ("stm32g030k6t6-minimal@1", {"i2c_scl": "32", "i2c_sda": "1"}),
+        ("stm32g030k6t6-minimal@2", {"i2c_scl": "32", "i2c_sda": "1"}),
         ("attiny1604-ssn-minimal@1", {"i2c_scl": "13", "i2c_sda": "12"}),
     ],
 )
@@ -5592,7 +5725,7 @@ def test_new_mcu_i2c_artifact_owns_one_pullup_per_documented_line(recipe, expect
     }
 
 
-@pytest.mark.parametrize("recipe", ["stm32g030f6p6-minimal@1", "stm32g030k6t6-minimal@1", "attiny1604-ssn-minimal@1"])
+@pytest.mark.parametrize("recipe", ["stm32g030f6p6-minimal@1", "stm32g030k6t6-minimal@2", "attiny1604-ssn-minimal@1"])
 def test_new_mcu_conditional_ads1115_pair_has_distinct_addresses_and_eight_endpoints(recipe):
     expansion = expand_recipe(
         RecipeSelection(
@@ -5614,7 +5747,7 @@ def test_new_mcu_conditional_ads1115_pair_has_distinct_addresses_and_eight_endpo
     )
 
 
-@pytest.mark.parametrize("recipe", ["stm32g030f6p6-minimal@1", "stm32g030k6t6-minimal@1", "attiny1604-ssn-minimal@1"])
+@pytest.mark.parametrize("recipe", ["stm32g030f6p6-minimal@1", "stm32g030k6t6-minimal@2", "attiny1604-ssn-minimal@1"])
 def test_new_mcu_conditional_mcp23017_owns_sixteen_explicit_outputs(recipe):
     expansion = expand_recipe(
         RecipeSelection(

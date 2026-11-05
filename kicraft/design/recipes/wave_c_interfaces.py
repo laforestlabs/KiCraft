@@ -224,7 +224,7 @@ MAX3485_RS485_NODE = _recipe(
 )
 
 DRV8833_DUAL_MOTOR = _recipe(
-    recipe="drv8833-dual-motor@4",
+    recipe="drv8833-dual-motor@5",
     family="dual-dc-motor-driver",
     exact="DRV8833PWPR",
     safety=True,
@@ -249,8 +249,11 @@ DRV8833_DUAL_MOTOR = _recipe(
             "drv8833:TSSOP-16_L5.0-W4.4-P0.65-LS6.4-BL-EP",
             mpn="DRV8833PWPR",
         ),
-        _passive("vm_bulk", "C", "47uF"),
-        _passive("vm_decoupling", "C", "100nF"),
+        _part("vm_bulk", "C", "100uF 25V, UCM1E101MCL1GS", "Device:C_Polarized",
+              "Capacitor_SMD:CP_Elec_6.3x5.8", mpn="UCM1E101MCL1GS",
+              datasheet="https://www.nichicon.com/getmedia/f527b3ab-1197-491e-9b2c-7ca4b61e1e20/e-ucm5-11.pdf").model_copy(update={"sourcing_note": "LCSC C729678"}),
+        _part("vm_decoupling", "C", "100nF 16V X7R, CL10B104KO8NNNC", "Device:C",
+              "Capacitor_SMD:C_0603_1608Metric", mpn="CL10B104KO8NNNC").model_copy(update={"sourcing_note": "LCSC C66501"}),
         _passive("vcp_cap", "C", "10nF"),
         _passive("vint_cap", "C", "2.2uF"),
         _passive("control_pulldown", "R", "100k", 5),
@@ -315,6 +318,10 @@ DRV8833_DUAL_MOTOR = _recipe(
         Assertion(
             code="motor_current_thermal_bound",
             message="AISEN and BISEN are grounded directly, so winding current regulation is not provided. The exposed pad requires grounded thermal copper; this ordinary-fab footprint has no in-pad vias. Motor stall current, copper area, dissipation, and bulk capacitance require independent review; the package current rating is not a board current guarantee",
+        ),
+        Assertion(
+            code="motor_clamp_and_bulk_envelope",
+            message="SMBJ5.0A has 5 V standoff and 9.2 V maximum clamp only at its specified pulse current and waveform. Nominal VM must not exceed 5 V. The 100 uF 25 V bulk and 16 V bypass cover that specified clamp voltage, not unlimited motor energy; capacitor bias, ripple and lifetime, TVS pulse energy, repeated events, and the motor and source's transient response require independent validation.",
         ),
     ),
 )

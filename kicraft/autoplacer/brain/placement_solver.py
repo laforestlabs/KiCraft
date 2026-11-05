@@ -1214,24 +1214,61 @@ class PlacementSolver:
         }
         board_tl, board_br = self.state.board_outline
         try:
-            for owner_ref, specs in groups.items():
+            # Reserve constrained groups before movable ones can occupy the
+            # only legal space around an authored/pinned owner or capacitor.
+            ordered = sorted(groups.items(), key=lambda item: not any(
+                self._locality_fixed(ref, comps[ref])
+                for ref in (item[0], *(spec["bypass_ref"] for spec in item[1]))
+            ))
+            for owner_ref, specs in ordered:
                 self.cfg["local_bypasses"] = specs
                 owner = comps[owner_ref]
                 original_pos = Point(owner.pos.x, owner.pos.y)
                 fixed = self._locality_fixed(owner_ref, owner)
-                offsets = [(0.0, 0.0)]
-                if not fixed:
-                    nx = math.ceil(board_br.x - board_tl.x)
-                    ny = math.ceil(board_br.y - board_tl.y)
-                    offsets += sorted(
-                        ((float(x), float(y)) for x in range(-nx, nx + 1)
-                         for y in range(-ny, ny + 1) if x or y),
-                        key=lambda xy: (xy[0] * xy[0] + xy[1] * xy[1], xy),
-                    )
+                original_rotation = owner.rotation
+
+                def candidate_offsets():
+                    if fixed:
+                        yield 0.0, 0.0
+                        return
+                    # Reserve a complete group in a stable allowed orientation,
+                    # not an arbitrary soft routing pose. Trying orientations
+                    # only after locking other groups can strand repeated ICs.
+                    angles = sorted({angle % 360 for angle in (
+                        owner.allowed_rotations or (0, 90, 180, 270)
+                    )})
+                    for angle in angles:
+                        old = Point(owner.pos.x, owner.pos.y)
+                        owner.pos = Point(original_pos.x, original_pos.y)
+                        _update_pad_positions(owner, old, owner.rotation)
+                        rotate_component_in_place(owner, angle - owner.rotation)
+                        low, high = owner.physical_bbox()
+                        left = board_tl.x + self.edge_margin + original_pos.x - low.x
+                        right = board_br.x - self.edge_margin + original_pos.x - high.x
+                        top = board_tl.y + self.edge_margin + original_pos.y - low.y
+                        bottom = board_br.y - self.edge_margin + original_pos.y - high.y
+                        # Inward search roundoff keeps hard legality unchanged.
+                        inset_x = min(_PAD_INSET_ROUNDOFF_MM, max(0.0, right - left) / 2)
+                        inset_y = min(_PAD_INSET_ROUNDOFF_MM, max(0.0, bottom - top) / 2)
+                        left, right = left + inset_x, right - inset_x
+                        top, bottom = top + inset_y, bottom - inset_y
+                        xs = [left + x for x in range(math.floor(right - left) + 1)]
+                        ys = [top + y for y in range(math.floor(bottom - top) + 1)]
+                        if xs and xs[-1] < right - 1e-9:
+                            xs.append(right)
+                        if ys and ys[-1] < bottom - 1e-9:
+                            ys.append(bottom)
+                        for y in ys:
+                            for x in xs:
+                                yield x - original_pos.x, y - original_pos.y
+                        if (left <= original_pos.x <= right
+                                and top <= original_pos.y <= bottom
+                                and (original_pos.x not in xs or original_pos.y not in ys)):
+                            yield 0.0, 0.0
                 failure = None
                 failure_reason = "owner_blocked"
                 failure_blocker = None
-                for dx, dy in offsets:
+                for dx, dy in candidate_offsets():
                     old = Point(owner.pos.x, owner.pos.y)
                     owner.pos = Point(original_pos.x + dx, original_pos.y + dy)
                     _update_pad_positions(owner, old, owner.rotation)
@@ -1360,6 +1397,7 @@ class PlacementSolver:
                             "courtyard_bbox_mm": box(other.bbox()),
                             "physical_bbox_mm": box(other.physical_bbox()),
                         }
+                    rotate_component_in_place(owner, original_rotation - owner.rotation)
                     old = Point(owner.pos.x, owner.pos.y)
                     owner.pos = original_pos
                     _update_pad_positions(owner, old, owner.rotation)
@@ -1795,7 +1833,7 @@ class PlacementSolver:
             else:  # bottom
                 return br.y - connector_inset - hh - off_y
 
-        def _orient_for_edge(comp: Component, edge: str):
+        def _orient_for_edge(comp: Component, edge: str, rotation_cfg: dict):
             """Rotate the connector to face the edge, keeping extents honest.
 
             ``width_mm``/``height_mm`` describe the part at its CURRENT
@@ -1821,7 +1859,7 @@ class PlacementSolver:
             elif intent is not None:
                 new_rot = antenna_rotation_for_edge(intent.local_direction, edge, comp.layer)
             else:
-                new_rot = self._best_rotation_for_edge(comp, edge, self.cfg)
+                new_rot = self._best_rotation_for_edge(comp, edge, rotation_cfg)
             rotate_component_in_place(comp, new_rot - comp.rotation)
 
         def _place_at(comp: Component, edge: str, pos: Point):
@@ -1962,8 +2000,14 @@ class PlacementSolver:
             # Orient every group member BEFORE measuring: the pack pitch,
             # grow-to-fit trigger, and flush inset must all use the extents
             # of the part as it will actually sit on the edge.
+            # Perpendicular orientation packs a bank, not a lone header whose
+            # unnecessary depth can strand an otherwise legal owned IC group.
+            orientation_cfg = self.cfg
+            if sum(self._connector_wants_perp_axis(comp, self.cfg)
+                   for comp in group_comps) < 2:
+                orientation_cfg = {**self.cfg, "connector_perp_orientation": False}
             for i in order:
-                _orient_for_edge(group_comps[i], edge)
+                _orient_for_edge(group_comps[i], edge, orientation_cfg)
 
             if edge in ("left", "right"):
                 # Column along Y axis — include antenna keepout parallel span.

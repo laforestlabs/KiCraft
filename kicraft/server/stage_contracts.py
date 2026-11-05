@@ -1059,12 +1059,38 @@ def attach_uniquely_provable_physical_obligations(
         return payload
     normalized = dict(payload)
     requirements = list(normalized.get("requirements") or [])
+    functional_spec = prompt_state.get("functional_spec") or {}
+    blocks = (functional_spec.get("blocks") or []) if isinstance(functional_spec, dict) else []
     derived_notes: list[str] = []
     for row in source_rows:
         if row["kind"] != "physical":
             continue
         identifier = str(row["original_obligation_id"])
         candidate_ids = physical_obligation_candidate_requirement_ids(normalized, row)
+        # A reviewed part can satisfy several broad physical classes (a jumper
+        # header is also a pin header), but that alone does not make it the
+        # interface named by a different committed functional block. The
+        # source spec, not the draft's own claims, names which blocks own this
+        # obligation. An unproved generic carrier in that block must remain for
+        # later construction/physical validation rather than being displaced by
+        # a currently provable, unrelated part.
+        owner_blocks = {
+            str(block.get("name"))
+            for block in blocks
+            if isinstance(block, dict)
+            and identifier in (block.get("obligation_ids") or [])
+            and block.get("name")
+        }
+        if owner_blocks:
+            candidate_ids = [
+                candidate for candidate in candidate_ids
+                if any(
+                    isinstance(requirement, dict)
+                    and requirement.get("id") == candidate
+                    and owner_blocks.intersection(requirement.get("functional_blocks") or [])
+                    for requirement in requirements
+                )
+            ]
         if not candidate_ids:
             continue
         unique_owner = len(candidate_ids) == 1

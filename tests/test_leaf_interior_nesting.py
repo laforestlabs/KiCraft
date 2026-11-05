@@ -312,6 +312,8 @@ def test_edge_demotion_candidates_finds_nestable_pinned_leaf(monkeypatch):
 
     cfg = {"component_zones": {"J1": {"edge": "bottom"}}, "nest_margin_mm": 1.5}
     assert _edge_demotion_candidates([ring_art, mcu_art], cfg) == ["J1"]
+    hard = {**cfg, "required_same_edge_connectors": {"edge": "bottom", "refs": ["J1"]}}
+    assert _edge_demotion_candidates([ring_art, mcu_art], hard) == []
 
     # No holes anywhere -> nothing to demote into.
     monkeypatch.setattr(

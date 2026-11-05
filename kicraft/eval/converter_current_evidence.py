@@ -75,6 +75,72 @@ def qualified_module_output_net(
         return None
     return output_net
 
+def qualified_protected_module_output(
+    converter: Mapping[str, Any], parts: list[dict[str, Any]],
+    pad_nets: Mapping[tuple[str, str], str],
+    names: Mapping[tuple[str, str], str],
+) -> str | None:
+    """Prove the actual motor-only LTC4412/AOS series path, not a recipe label."""
+    raw = qualified_module_output_net(converter, parts, pad_nets)
+    ground = pad_nets.get((str(converter.get("ref") or ""), "2"))
+    if not raw or not ground:
+        return None
+    matches = []
+    for fet in parts:
+        if _identity(fet) != "ao3401a" or "C15127" not in str(fet.get("sourcing_note") or "").upper():
+            continue
+        ref = str(fet.get("ref") or "")
+        gate, output, drain = (pad_nets.get((ref, p)) for p in ("1", "2", "3"))
+        if not gate or not output or drain != raw or len({raw, output, ground, gate}) != 4:
+            continue
+        for controller in parts:
+            if _identity(controller) != "ltc4412es6#trpbf":
+                continue
+            cref = str(controller.get("ref") or "")
+            if all(pad_nets.get((cref, pin)) == net for pin, net in (
+                ("1", raw), ("2", ground), ("3", ground), ("5", gate), ("6", output),
+            )) and not pad_nets.get((cref, "4")):
+                matches.append((ref, output))
+    if len(matches) != 1:
+        return None
+    fet_ref, output = matches[0]
+    graph: dict[str, set[str]] = {}
+    for part in parts:
+        ref = str(part.get("ref") or "")
+        if ref == fet_ref:
+            continue
+        # Known passives, diodes and reviewed power paths can create a parallel
+        # conductor; capacitors and controller pins are not DC power paths.
+        pairs = []
+        if ref.startswith(("R", "D", "L", "F", "JP")):
+            pairs.append(("1", "2"))
+        record = physical_inventory_record(
+            mpn=part.get("mpn"), symbol=part.get("symbol"), footprint=part.get("footprint"))
+        transfer = record.power_transfer if record is not None else {}
+        paths = transfer.get("paths") or (transfer,)
+        for path in paths:
+            if isinstance(path, Mapping) and path.get("from_pin") and path.get("to_pin"):
+                pairs.append((str(path["from_pin"]), str(path["to_pin"])))
+        def pin_number(pin: str) -> str:
+            return next((number for (owner, number), name in names.items()
+                         if owner == ref and name.upper() == pin.upper()), pin)
+        for a, b in pairs:
+            left, right = pad_nets.get((ref, pin_number(a))), pad_nets.get((ref, pin_number(b)))
+            if left and right and ground not in (left, right) and left != right:
+                graph.setdefault(left, set()).add(right)
+                graph.setdefault(right, set()).add(left)
+    pending, seen = [raw], {raw}
+    while pending:
+        node = pending.pop()
+        if node == output:
+            return None
+        for peer in graph.get(node, ()):
+            if peer not in seen:
+                seen.add(peer)
+                pending.append(peer)
+    return output
+
+
 
 def qualified_converter_power_stage_currents(
     parts: list[dict[str, Any]],
@@ -118,13 +184,14 @@ def qualified_converter_power_stage_currents(
         ):
             continue
         matches = [part for part in parts if part.get("ref") == ref]
-        if (
-            len(matches) != 1
-            or qualified_module_output_net(matches[0], parts, pad_nets) != output_net
-        ):
+        if len(matches) != 1:
+            continue
+        raw = qualified_module_output_net(matches[0], parts, pad_nets)
+        protected = qualified_protected_module_output(matches[0], parts, pad_nets, names)
+        if not raw or output_net not in {raw, protected}:
             continue
         if any(pad_nets.get((ref, pin)) != net for pin, net in (
-            ("1", input_net), ("2", ground_net), ("3", output_net),
+            ("1", input_net), ("2", ground_net), ("3", raw),
         )):
             continue
         input_voltage = supply_voltage(input_net, ground_net)

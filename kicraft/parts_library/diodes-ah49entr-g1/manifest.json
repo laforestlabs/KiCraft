@@ -1,0 +1,17 @@
+{
+  "schema_version": "1",
+  "name": "diodes-ah49entr-g1",
+  "version": "1.0.0",
+  "content_hash": "sha256:881d8f25f466349bf1f1de112768d4c1e5363ae52f4b9ba7ef6f1325aed40704",
+  "description": "Diodes AH49ENTR-G1 linear Hall sensor with manufacturer suggested SOT-23-3 land pattern.",
+  "mpn": "AH49ENTR-G1",
+  "sourcing": {"lcsc": "C314698"},
+  "symbol_name": "AH49ENTR-G1",
+  "footprint_name": "SOT-23-3_Diodes_AH49E",
+  "datasheet_url": "https://www.diodes.com/datasheet/download/AH49E.pdf",
+  "kicad_version_min": "9.0.0",
+  "maturity": "production",
+  "provenance": {"source": "manufacturer-datasheet", "added_at": "2026-11-04T00:00:00Z", "kicad_version": "9.0.0", "source_project_stem": null},
+  "tags": ["hall-effect", "analog", "sot-23"],
+  "watch_out_for": "Linear output; not a digital Hall switch. Magnetic polarity depends on SOT-23 orientation."
+}

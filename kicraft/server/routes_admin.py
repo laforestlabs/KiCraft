@@ -36,7 +36,7 @@ from .accounts import (
 )
 from .config import DESIGN_PROFILES, Settings
 from .host_metrics import HostMetricsStore
-from .kicanvas import KiCanvasSource, KiCanvasView, kicanvas_head
+from .kicanvas import KiCanvasSource, KiCanvasView
 from .render_serving import _register_project_dir, _resolve_project_token
 from .spend_guard import SpendGuard
 from .stage_state_io import KICRAFT
@@ -2052,7 +2052,6 @@ def admin_self_eval_run_page(run: str = ""):
         return redirect
     ui.dark_mode().enable()
     ui.query("body").style("background:var(--kc-bg)")
-    kicanvas_head()
     _admin_header("self-eval")
 
     run_dir = _resolve_project_token(run) if run else None
@@ -2927,7 +2926,6 @@ def admin_project_view_page(project: str = ""):
 
     ui.dark_mode().enable()
     ui.query("body").style("background:var(--kc-bg)")
-    kicanvas_head()
     _admin_header("projects")
 
     try:

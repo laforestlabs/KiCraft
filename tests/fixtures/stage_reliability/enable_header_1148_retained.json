@@ -1,0 +1,555 @@
+{
+  "intent": {
+    "goal": "Convert a 5 V host-board supply to 3.3 V on a regulator board rated for 0.5 A, with three push buttons, a power LED, and an enable jumper.",
+    "constraints": [
+      "5 V input supplied from the host board through a header",
+      "3.3 V regulated output",
+      "Rated output current: 0.5 A",
+      "Three push buttons",
+      "One power LED",
+      "Enable jumper",
+      "Four-layer PCB stack-up"
+    ],
+    "named_parts": [],
+    "inferred_expertise": "intermediate",
+    "assumptions": [
+      "Regulator topology and exact components are unspecified (defaulted)",
+      "Header pin count and pitch are unspecified (defaulted)",
+      "Rectangular board outline assumed (defaulted)"
+    ],
+    "form_factor": null,
+    "obligations": [
+      {
+        "kind": "conversion",
+        "original_obligation_id": "voltage-conversion",
+        "input_kind": "5 V DC",
+        "output_kind": "3.3 V DC",
+        "behavior": "Regulate the host-board input to 3.3 V."
+      },
+      {
+        "kind": "quantitative",
+        "original_obligation_id": "output-current-rating",
+        "quantity": "rated output current",
+        "relation": "equal",
+        "value": 0.5,
+        "minimum": null,
+        "maximum": null,
+        "unit": "A"
+      },
+      {
+        "kind": "physical",
+        "original_obligation_id": "host-header",
+        "component_class": "pin-header"
+      },
+      {
+        "kind": "physical",
+        "original_obligation_id": "push-button",
+        "component_class": "push-button"
+      },
+      {
+        "kind": "quantity",
+        "original_obligation_id": "push-button-count",
+        "subject": "push-button",
+        "minimum": 3
+      },
+      {
+        "kind": "physical",
+        "original_obligation_id": "power-led",
+        "component_class": "led"
+      },
+      {
+        "kind": "quantity",
+        "original_obligation_id": "power-led-count",
+        "subject": "led",
+        "minimum": 1
+      },
+      {
+        "kind": "physical",
+        "original_obligation_id": "enable-jumper",
+        "component_class": "jumper"
+      },
+      {
+        "kind": "quantitative",
+        "original_obligation_id": "pcb-layer-count",
+        "quantity": "PCB layers",
+        "relation": "equal",
+        "value": 4.0,
+        "minimum": null,
+        "maximum": null,
+        "unit": "layers"
+      },
+      {
+        "kind": "adjustability",
+        "original_obligation_id": "enable-jumper-control",
+        "parameter": "enable",
+        "mechanism": "jumper"
+      }
+    ]
+  },
+  "functional_spec": {
+    "blocks": [
+      {
+        "name": "HOST_INPUT",
+        "category": "interface",
+        "purpose": "Accept the host board's 5 V supply through a header and provide the regulated board's 3.3 V output interface.",
+        "count": 1,
+        "obligation_ids": [
+          "host-header"
+        ]
+      },
+      {
+        "name": "POWER_CONVERSION",
+        "category": "power",
+        "purpose": "Convert the 5 V input to a regulated 3.3 V supply rated for 0.5 A output.",
+        "count": 1,
+        "obligation_ids": [
+          "voltage-conversion",
+          "output-current-rating"
+        ]
+      },
+      {
+        "name": "PUSH_BUTTONS",
+        "category": "interface",
+        "purpose": "Provide three independently actuated push-button inputs.",
+        "count": 3,
+        "obligation_ids": [
+          "push-button",
+          "push-button-count"
+        ]
+      },
+      {
+        "name": "POWER_INDICATOR",
+        "category": "interface",
+        "purpose": "Indicate the presence of the regulated power rail with one LED.",
+        "count": 1,
+        "obligation_ids": [
+          "power-led",
+          "power-led-count"
+        ]
+      },
+      {
+        "name": "ENABLE_CONTROL",
+        "category": "interface",
+        "purpose": "Provide an enable control through a jumper.",
+        "count": 1,
+        "obligation_ids": [
+          "enable-jumper",
+          "enable-jumper-control"
+        ]
+      }
+    ],
+    "connections": [
+      {
+        "from_block": "HOST_INPUT",
+        "to_block": "POWER_CONVERSION",
+        "signal_type": "power",
+        "description": "5 V supply input"
+      },
+      {
+        "from_block": "POWER_CONVERSION",
+        "to_block": "HOST_INPUT",
+        "signal_type": "power",
+        "description": "Regulated 3.3 V output"
+      },
+      {
+        "from_block": "POWER_CONVERSION",
+        "to_block": "POWER_INDICATOR",
+        "signal_type": "power",
+        "description": "Regulated rail supplies the power indicator"
+      },
+      {
+        "from_block": "ENABLE_CONTROL",
+        "to_block": "POWER_CONVERSION",
+        "signal_type": "digital",
+        "description": "Jumper-selected enable control"
+      },
+      {
+        "from_block": "PUSH_BUTTONS",
+        "to_block": "HOST_INPUT",
+        "signal_type": "digital",
+        "description": "Push-button logic input signals are available at the host interface"
+      }
+    ],
+    "assumptions": [
+      "Push buttons provide user-operated logic inputs; their destinations are unspecified (defaulted)",
+      "Four-layer PCB stack-up is retained as a board constraint rather than a functional block (defaulted)"
+    ],
+    "obligations": [
+      {
+        "kind": "conversion",
+        "original_obligation_id": "voltage-conversion",
+        "input_kind": "5 V DC",
+        "output_kind": "3.3 V DC",
+        "behavior": "Regulate the host-board input to 3.3 V."
+      },
+      {
+        "kind": "quantitative",
+        "original_obligation_id": "output-current-rating",
+        "quantity": "rated output current",
+        "relation": "equal",
+        "value": 0.5,
+        "minimum": null,
+        "maximum": null,
+        "unit": "A"
+      },
+      {
+        "kind": "physical",
+        "original_obligation_id": "host-header",
+        "component_class": "pin-header"
+      },
+      {
+        "kind": "physical",
+        "original_obligation_id": "push-button",
+        "component_class": "push-button"
+      },
+      {
+        "kind": "quantity",
+        "original_obligation_id": "push-button-count",
+        "subject": "push-button",
+        "minimum": 3
+      },
+      {
+        "kind": "physical",
+        "original_obligation_id": "power-led",
+        "component_class": "led"
+      },
+      {
+        "kind": "quantity",
+        "original_obligation_id": "power-led-count",
+        "subject": "led",
+        "minimum": 1
+      },
+      {
+        "kind": "physical",
+        "original_obligation_id": "enable-jumper",
+        "component_class": "jumper"
+      },
+      {
+        "kind": "quantitative",
+        "original_obligation_id": "pcb-layer-count",
+        "quantity": "PCB layers",
+        "relation": "equal",
+        "value": 4.0,
+        "minimum": null,
+        "maximum": null,
+        "unit": "layers"
+      },
+      {
+        "kind": "adjustability",
+        "original_obligation_id": "enable-jumper-control",
+        "parameter": "enable",
+        "mechanism": "jumper"
+      }
+    ]
+  },
+  "architecture_draft": {
+    "topologies": {
+      "POWER": "Synchronous buck converter, 5 V to 3.3 V at 0.5 A"
+    },
+    "comms_protocols": [],
+    "mcu_present": false,
+    "sheets": [
+      {
+        "name": "POWER",
+        "stem": "POWER",
+        "role": "power",
+        "function": "Convert host 5 V input to 3.3 V at 0.5 A, with jumper-controlled enable and a power indicator.",
+        "from_library": null,
+        "library_instance": null,
+        "replication_group": null,
+        "replication_instance": null
+      },
+      {
+        "name": "HOST INTERFACE",
+        "stem": "HOST_INTERFACE",
+        "role": "interface",
+        "function": "Provide host input and regulated output contacts plus three independent button signals.",
+        "from_library": null,
+        "library_instance": null,
+        "replication_group": null,
+        "replication_instance": null
+      }
+    ],
+    "requirements": [
+      {
+        "id": "host",
+        "sheet": "HOST INTERFACE",
+        "role": "connector",
+        "family": "pin-header",
+        "exact_part": null,
+        "parameters": {
+          "rows": 1,
+          "gender": "male"
+        },
+        "supply": null,
+        "supply_bindings": {},
+        "reference_bindings": {},
+        "standard_stacking_role": null,
+        "programming": null,
+        "interfaces": [],
+        "functional_blocks": [
+          "HOST_INPUT"
+        ],
+        "ties": {
+          "pin2": "GND"
+        },
+        "declared_ports": [],
+        "obligation_ids": [
+          "host-header"
+        ]
+      },
+      {
+        "id": "reg",
+        "sheet": "POWER",
+        "role": "regulator",
+        "family": "tps54331-adjustable",
+        "exact_part": null,
+        "parameters": {
+          "output_voltage": 3.3,
+          "enable_control": true
+        },
+        "supply": "+5V",
+        "supply_bindings": {},
+        "reference_bindings": {},
+        "standard_stacking_role": null,
+        "programming": null,
+        "interfaces": [],
+        "functional_blocks": [
+          "POWER_CONVERSION"
+        ],
+        "ties": {},
+        "declared_ports": [],
+        "obligation_ids": [
+          "voltage-conversion",
+          "output-current-rating"
+        ]
+      },
+      {
+        "id": "enable",
+        "sheet": "POWER",
+        "role": "user_io",
+        "family": "jumper-header",
+        "exact_part": "TSW-102-07-G-S",
+        "parameters": {},
+        "supply": null,
+        "supply_bindings": {},
+        "reference_bindings": {},
+        "standard_stacking_role": null,
+        "programming": null,
+        "interfaces": [],
+        "functional_blocks": [
+          "ENABLE_CONTROL"
+        ],
+        "ties": {},
+        "declared_ports": [
+          {
+            "key": "pin1",
+            "direction": "input",
+            "function": "jumper signal contact connected to regulator enable",
+            "supply_rail": null,
+            "reference_domain": null,
+            "pin": "1"
+          },
+          {
+            "key": "pin2",
+            "direction": "passive",
+            "function": "jumper contact",
+            "supply_rail": null,
+            "reference_domain": null,
+            "pin": "2"
+          }
+        ],
+        "obligation_ids": [
+          "enable-jumper",
+          "enable-jumper-control"
+        ]
+      },
+      {
+        "id": "button1",
+        "sheet": "HOST INTERFACE",
+        "role": "user_io",
+        "family": "switch-input",
+        "exact_part": "KMR232NGULCLFS",
+        "parameters": {
+          "pull_policy": "external",
+          "active_level": "low",
+          "voltage": 3.3
+        },
+        "supply": "+3V3",
+        "supply_bindings": {},
+        "reference_bindings": {},
+        "standard_stacking_role": null,
+        "programming": null,
+        "interfaces": [],
+        "functional_blocks": [
+          "PUSH_BUTTONS"
+        ],
+        "ties": {},
+        "declared_ports": [],
+        "obligation_ids": [
+          "push-button",
+          "push-button-count"
+        ]
+      },
+      {
+        "id": "button2",
+        "sheet": "HOST INTERFACE",
+        "role": "user_io",
+        "family": "switch-input",
+        "exact_part": "KMR232NGULCLFS",
+        "parameters": {
+          "pull_policy": "external",
+          "active_level": "low",
+          "voltage": 3.3
+        },
+        "supply": "+3V3",
+        "supply_bindings": {},
+        "reference_bindings": {},
+        "standard_stacking_role": null,
+        "programming": null,
+        "interfaces": [],
+        "functional_blocks": [
+          "PUSH_BUTTONS"
+        ],
+        "ties": {},
+        "declared_ports": [],
+        "obligation_ids": [
+          "push-button",
+          "push-button-count"
+        ]
+      },
+      {
+        "id": "button3",
+        "sheet": "HOST INTERFACE",
+        "role": "user_io",
+        "family": "switch-input",
+        "exact_part": "KMR232NGULCLFS",
+        "parameters": {
+          "pull_policy": "external",
+          "active_level": "low",
+          "voltage": 3.3
+        },
+        "supply": "+3V3",
+        "supply_bindings": {},
+        "reference_bindings": {},
+        "standard_stacking_role": null,
+        "programming": null,
+        "interfaces": [],
+        "functional_blocks": [
+          "PUSH_BUTTONS"
+        ],
+        "ties": {},
+        "declared_ports": [],
+        "obligation_ids": [
+          "push-button",
+          "push-button-count"
+        ]
+      },
+      {
+        "id": "led",
+        "sheet": "POWER",
+        "role": "user_io",
+        "family": "status-led",
+        "exact_part": null,
+        "parameters": {
+          "rail_voltage": 3.3,
+          "led_vf": 2.0,
+          "target_current_ma": 2.0
+        },
+        "supply": null,
+        "supply_bindings": {},
+        "reference_bindings": {},
+        "standard_stacking_role": null,
+        "programming": null,
+        "interfaces": [],
+        "functional_blocks": [
+          "POWER_INDICATOR"
+        ],
+        "ties": {},
+        "declared_ports": [],
+        "obligation_ids": [
+          "power-led",
+          "power-led-count"
+        ]
+      }
+    ],
+    "signals": [
+      {
+        "name": "HOST_5V",
+        "from": "host.pin1",
+        "to": "reg.input",
+        "rails": [],
+        "start": null,
+        "end": null
+      },
+      {
+        "name": "HOST_3V3",
+        "from": "reg.output",
+        "to": "host.pin3",
+        "rails": [],
+        "start": null,
+        "end": null
+      },
+      {
+        "name": "REG_ENABLE",
+        "from": "enable.pin1",
+        "to": "reg.enable",
+        "rails": [],
+        "start": null,
+        "end": null
+      },
+      {
+        "name": "BUTTON_1",
+        "from": "button1.signal",
+        "to": "host.pin4",
+        "rails": [],
+        "start": null,
+        "end": null
+      },
+      {
+        "name": "BUTTON_2",
+        "from": "button2.signal",
+        "to": "host.pin5",
+        "rails": [],
+        "start": null,
+        "end": null
+      },
+      {
+        "name": "BUTTON_3",
+        "from": "button3.signal",
+        "to": "host.pin6",
+        "rails": [],
+        "start": null,
+        "end": null
+      },
+      {
+        "name": "POWER_LED",
+        "from": "reg.output",
+        "to": "led.drive",
+        "rails": [],
+        "start": null,
+        "end": null
+      }
+    ],
+    "power": {
+      "rails": {
+        "+5V": {
+          "voltage": 5.0,
+          "from": "host.pin1"
+        },
+        "+3V3": {
+          "voltage": 3.3,
+          "from": "reg.output"
+        }
+      }
+    },
+    "assumptions": [
+      "TPS54331 adjustable buck topology selected for a 3.3 V 0.5 A output from 5 V (defaulted)",
+      "Host header is a 1x6 male 2.54 mm header for input, ground, output, and three button signals (defaulted)",
+      "Buttons are active-low inputs with external pull-ups to 3.3 V (defaulted)",
+      "Power indicator is a low-current 3.3 V LED with series resistance (defaulted)",
+      "Four-layer PCB stack-up retained as a board constraint (defaulted)"
+    ],
+    "standard_form_factor": null
+  }
+}

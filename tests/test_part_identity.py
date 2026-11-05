@@ -367,6 +367,40 @@ def test_catalogued_c3_passives_require_exact_identity_and_land_pair():
         assert physical_inventory_record(mpn=mpn + "-other", symbol=symbol, footprint=footprint) is None
 
 
+def test_motor_protection_orders_require_their_exact_physical_pairs():
+    rows = (
+        ("LTC4412ES6#TRPBF", "C514442", "Power_Management:LTC4412xS6",
+         "Package_TO_SOT_SMD:TSOT-23-6",
+         {"input": "1", "ground": "2", "control": "3", "status": "4", "gate": "5", "sense": "6"}),
+        ("AO3401A", "C15127", "Transistor_FET:AO3401A", "Package_TO_SOT_SMD:SOT-23",
+         {"gate": "1", "source": "2", "drain": "3"}),
+        ("RC0603FR-0722RL", "C107701", "Device:R", "Resistor_SMD:R_0603_1608Metric", {}),
+        ("UCM1E101MCL1GS", "C729678", "Device:C_Polarized",
+         "Capacitor_SMD:CP_Elec_6.3x5.8", {"positive": "1", "negative": "2"}),
+        ("FXL0630-2R2-M", "C167218", "cjiang-fxl0630-2r2-m:FXL0630-2R2-M",
+         "cjiang-fxl0630-2r2-m:FXL0630_Cjiang_Recommended", {}),
+        ("AH49ENTR-G1", "C314698", "diodes-ah49entr-g1:AH49ENTR-G1",
+         "diodes-ah49entr-g1:SOT-23-3_Diodes_AH49E",
+         {"vcc": "1", "output": "2", "ground": "3"}),
+    )
+    for mpn, lcsc, symbol, footprint, pins in rows:
+        part = physical_inventory_record(mpn=mpn, symbol=symbol, footprint=footprint)
+        assert part is not None and part.identity == mpn.casefold()
+        assert part.lcsc == lcsc and part.manufacturer_sources
+        assert all(part.port_pins[key] == pin for key, pin in pins.items())
+        assert physical_inventory_record(mpn=mpn, symbol=symbol, footprint="Other:Land") is None
+        assert physical_inventory_record(mpn=mpn, symbol="Other:Symbol", footprint=footprint) is None
+        assert physical_inventory_record(mpn=mpn + "-other", symbol=symbol, footprint=footprint) is None
+
+    cap = reviewed_part("UCM1E101MCL1GS")
+    assert cap.operating_limits["capacitance_uf"] == 100.0
+    assert cap.operating_limits["voltage_v"] == 25.0
+    assert cap.operating_limits["tolerance_fraction"] == 0.2
+    resistor = reviewed_part("RC0603FR-0722RL")
+    assert resistor.operating_limits["resistance_ohm"] == 22.0
+    assert resistor.operating_limits["tolerance_fraction"] == 0.01
+
+
 def test_null_mpn_pair_does_not_select_an_arbitrary_manufacturer(monkeypatch):
     from kicraft.design import part_identity
 

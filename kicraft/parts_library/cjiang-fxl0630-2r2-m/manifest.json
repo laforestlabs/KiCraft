@@ -1,0 +1,17 @@
+{
+  "schema_version": "1",
+  "name": "cjiang-fxl0630-2r2-m",
+  "version": "1.0.0",
+  "content_hash": "sha256:9d01dda54635ba077d620e6e86903a2f5134a6c632161120878c93cdc3ae4575",
+  "description": "Cjiang FXL0630-2R2-M 2.2 uH molded power inductor using the manufacturer recommended FXL0630 land pattern.",
+  "mpn": "FXL0630-2R2-M",
+  "sourcing": {"lcsc": "C167218"},
+  "symbol_name": "FXL0630-2R2-M",
+  "footprint_name": "FXL0630_Cjiang_Recommended",
+  "datasheet_url": "https://datasheet.lcsc.com/datasheet/pdf/40dfb6cb4606b2ccaa4e89438a42f563.pdf?productCode=C167218",
+  "kicad_version_min": "9.0.0",
+  "maturity": "production",
+  "provenance": {"source": "manufacturer-datasheet", "added_at": "2026-11-04T00:00:00Z", "kicad_version": "9.0.0", "source_project_stem": null},
+  "tags": ["inductor", "power-inductor", "smd"],
+  "watch_out_for": "No manufacturer-qualified 3D model is supplied. Check saturation, RMS current, and converter stability for the actual application."
+}

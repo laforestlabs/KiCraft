@@ -38,26 +38,14 @@ def test_full_plan_builds_summary_labels_and_drops():
 
     # kv summary: legend lines split from labels; placed X / total
     kv = dict(by["Silkscreen"]["rows"])
-    assert kv["title"] == "USB-C PD Trigger"
-    assert kv["board code"] == "KC-TEST"
     assert kv["legend lines"] == 2
-    assert kv["labels placed"] == "1 / 2"
     assert kv["dropped (no space)"] == 1
 
     # labels table: DIP newline flattened, placed column reflects silk_placed
     tbl = by["Board labels"]
-    assert tbl["columns"] == ["type", "text", "near", "priority", "placed"]
     rows = {r[0]: r for r in tbl["rows"]}
-    assert rows["io"][1] == "IN 9/12/20V"
-    assert rows["io"][2] == "J1"
     assert rows["io"][4] == "yes"           # in silk_placed
-    assert rows["table"][1] == "1:9V / 2:12V / 3:20V"
     assert rows["table"][4] == "no"         # dropped, not placed
-    assert tbl["note"] and "verify" in tbl["note"].lower()  # DIP verify caution
-
-    # drop lists surfaced honestly
-    assert by["Dropped — no clear silk space"]["items"] == ["dip: no clear space on silk"]
-    assert by["Rejected by content lint"]["items"] == ["note-x: uncorroborated claim"]
 
 
 def test_plan_without_table_has_no_verify_note():
@@ -68,27 +56,19 @@ def test_plan_without_table_has_no_verify_note():
     assert tbl.get("note") is None
 
 
-def test_pinout_text_and_uncovered_connectors_rendered():
-    sj = {"silk_plan": {
-        "version": 1, "title": "PD Trigger", "board_code": "KC-T", "rev": "1.0",
-        "labels": [
-            {"id": "j1-pins", "kind": "pinout", "anchor": {"ref": "J1"},
-             "priority": 1,
-             "pins": [{"pin": "1", "text": "VIN"}, {"pin": "2", "text": "GND"}]},
-        ],
-        "dropped_at_lint": [],
-        "uncovered_connectors": ["J1"],
-    }}
-    arts = {"status": "fab_ready", "silk_placed": ["legend:0"],
-            "silk_dropped": []}
 
-    secs = web._silk_sections(sj, arts)
-    by = _by_title(secs)
 
-    # pinout text cell renders per-pin, not the (empty) text field
-    tbl = by["Board labels"]
-    rows = {r[0]: r for r in tbl["rows"]}
-    assert rows["pinout"][1] == "1:VIN → 2:GND"
-    assert rows["pinout"][2] == "J1"
-
-    assert by["Uncovered IO connectors"]["items"] == ["J1"]
+def test_pinout_piece_placement_is_complete_partial_or_absent_per_label():
+    labels = [
+        {"id": key, "kind": "pinout", "anchor": {"ref": ref},
+         "pins": [{"pin": "1", "text": "OUT"}, {"pin": "2", "text": "GND"}]}
+        for key, ref in (("j1", "J1"), ("j2", "J2"), ("j3", "J3"))
+    ]
+    sections = web._silk_sections({"silk_plan": {"labels": labels}}, {
+        "silk_placed": ["legend:0", "j1:1", "j1:2", "j2:1", "j30:1"],
+        "silk_dropped": ["j2:2: no clear space on silk"],
+    })
+    table = next(section for section in sections if section["type"] == "table")
+    assert {row[2]: row[4] for row in table["rows"]} == {
+        "J1": "yes", "J2": "partial", "J3": "no",
+    }

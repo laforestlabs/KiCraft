@@ -5218,6 +5218,57 @@ def _degenerate_hierarchy_error(root_sch: Path) -> str | None:
     return None
 
 
+def _required_same_edge_violations(
+    pcb: Path, expected_refs: tuple[str, ...] | None = None,
+) -> list[str]:
+    """Verify an explicit original connector-placement contract, fail closed."""
+    import json
+
+    try:
+        contracts = []
+        for config_path in sorted(pcb.parent.glob("*_autoplacer.json")):
+            payload = json.loads(config_path.read_text(encoding="utf-8"))
+            if payload.get("required_same_edge_connectors") is not None:
+                contracts.append((payload, payload["required_same_edge_connectors"]))
+        if not contracts:
+            return ["required_same_edge_contract_missing"] if expected_refs is not None else []
+        if len(contracts) != 1:
+            return ["required_same_edge_contract_ambiguous"]
+        payload, contract = contracts[0]
+        if not isinstance(contract, dict):
+            return ["required_same_edge_contract_invalid"]
+        edge, refs = contract.get("edge"), contract.get("refs")
+        if (
+            edge not in {"top", "bottom", "left", "right"}
+            or not isinstance(refs, list) or not refs
+            or any(not isinstance(ref, str) or not ref for ref in refs)
+            or len(set(refs)) != len(refs)
+        ):
+            return ["required_same_edge_contract_invalid"]
+        if expected_refs is not None and set(refs) != set(expected_refs):
+            return ["required_same_edge_refs_mismatch"]
+        zones = payload.get("component_zones", payload.get("zones", {})) or {}
+        if any(not isinstance(zones.get(ref), dict) or zones[ref].get("edge") != edge for ref in refs):
+            return ["required_same_edge_zones_missing_or_conflicting"]
+        from kicraft.autoplacer.brain.connector_edge_gap import connector_edge_gaps
+        from kicraft.autoplacer.config import DEFAULT_CONFIG
+
+        gaps = connector_edge_gaps(
+            str(pcb), {ref: zones[ref] for ref in refs},
+            inboard_tol_mm=float(DEFAULT_CONFIG.get("connector_edge_inboard_tol_mm", 1.0)),
+            include_access_only=True,
+        )
+        missing = set(refs) - {gap.ref for gap in gaps}
+        violations = [f"required_same_edge_unmeasured:{ref}" for ref in sorted(missing)]
+        violations.extend(
+            f"required_same_edge_gap:{gap.ref}@{gap.gap_mm:.2f}mm({gap.edge})"
+            for gap in gaps if not gap.ok
+        )
+        return violations
+    except Exception as exc:
+        return [f"required_same_edge_unmeasured:{type(exc).__name__}"]
+
+
 def _effective_connector_zones(pcb: Path) -> dict:
     """The project's edge zones minus compose-time demotions.
 
@@ -5234,9 +5285,13 @@ def _effective_connector_zones(pcb: Path) -> dict:
 
     zone_files = sorted(glob.glob(str(pcb.parent / "*_autoplacer.json")))
     zones: dict = {}
+    required_refs: set[str] = set()
     if zone_files:
         payload = json.loads(Path(zone_files[0]).read_text(encoding="utf-8"))
         zones = payload.get("component_zones", payload.get("zones", {})) or {}
+        required = payload.get("required_same_edge_connectors")
+        if isinstance(required, dict) and isinstance(required.get("refs"), list):
+            required_refs = set(required["refs"])
     for sidecar in sorted(
         glob.glob(str(pcb.parent / ".experiments" / "subcircuits" / "*" / "edge_pins_demoted.json"))
     ):
@@ -5245,6 +5300,8 @@ def _effective_connector_zones(pcb: Path) -> dict:
         except (OSError, ValueError):
             continue
         for ref in demoted.get("refs") or []:
+            if str(ref) in required_refs:
+                continue
             if zones.pop(str(ref), None) is not None:
                 print(
                     f"[build]     connector-edge gate: skipping "
@@ -6028,7 +6085,9 @@ def _layout_failure_evidence_text(failure_summary: dict) -> str:
     return "\n".join(parts)
 
 
-def _verify_routed_board(pcb: Path) -> dict:
+def _verify_routed_board(
+    pcb: Path, *, required_same_edge_refs: tuple[str, ...] | None = None,
+) -> dict:
     """Acceptance gate: no shorts, no unconnected (connector-shield items waived),
     no physical-assembly blocker (courtyard overlap / antenna keep-out intrusion),
     and no edge-zoned connector stranded inboard of its board edge.
@@ -6120,6 +6179,10 @@ def _verify_routed_board(pcb: Path) -> dict:
             f"connector stranded {s} -- board is electrically clean; flagged for visual review"
             for s in strand
         )
+    same_edge_violations = _required_same_edge_violations(pcb, required_same_edge_refs)
+    if same_edge_violations:
+        accepted = False
+        reasons.extend(reason for reason in same_edge_violations if reason not in reasons)
     # Hard fab-blockers only. A minor-courtyard-only or strand-only board is
     # NOT "ok" (it carries warnings) but it is fab-acceptable; genuine routed
     # geometry errors are never exportable.
@@ -6132,6 +6195,7 @@ def _verify_routed_board(pcb: Path) -> dict:
             and keepout == 0
             and not blocking_courtyard
             and not illegal_geometry
+            and not same_edge_violations
         ),
         "shorts": shorts,
         "unconnected": unconnected,
@@ -6140,6 +6204,7 @@ def _verify_routed_board(pcb: Path) -> dict:
         "courtyard_overlaps": courtyard_overlaps,
         "keepout": keepout,
         "reasons": reasons,
+        "required_same_edge_violations": same_edge_violations,
         "warnings": warnings,
         "tracks": v.get("track_summary", {}) or {},
         # Positioned diagnosis for the manual-layout editor and PCB overlay.
@@ -7024,7 +7089,13 @@ def _promote_verify_fab(
 
     # 4. Verification gate: no shorts, no unconnected, and no silently-dropped
     #    components (a board that dropped parts can still verify "clean").
-    gate = _verify_routed_board(pcb)
+    from kicraft.design.synthesis.autoplacer import required_same_edge_connector_refs
+
+    required_same_edge_refs = (
+        required_same_edge_connector_refs(state.intent, state.bom)
+        if state is not None and state.intent is not None and state.bom is not None else None
+    )
+    gate = _verify_routed_board(pcb, required_same_edge_refs=required_same_edge_refs)
     expected_refs = {p.ref for p in (state.bom.parts if state and state.bom else [])}
     missing_refs = _missing_component_refs(expected_refs, gate["tracks"].get("footprint_refs"))
     castellation_violations = _castellation_geometry_violations(state, pcb)

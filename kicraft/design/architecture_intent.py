@@ -915,6 +915,159 @@ def _recipe_owns_enable_shunt(definition) -> bool:
     return jumper_pins == {("1", next(iter(private_enable_nets))), ("2", "gnd")}
 
 
+def _adopt_authored_enable_headers(payload: dict) -> None:
+    """Add the missing bias circuit to a dedicated, explicitly targeted EN header.
+
+    A bare connector wired to EN does not establish either jumper state. Only the
+    reviewed high-true devices below have a documented EN threshold and a safe
+    grounded-off state; a maximum pin voltage alone is not enough to infer that.
+    """
+    from kicraft.design.part_identity import canonical_physical_features, class_key
+
+    requirements = [row for row in payload.get("requirements") or [] if isinstance(row, dict)]
+    obligations = {
+        str(row.get("original_obligation_id") or ""): row
+        for row in payload.get("obligations") or [] if isinstance(row, dict)
+    }
+    signals = [row for row in payload.get("signals") or [] if isinstance(row, dict)]
+    rails = (payload.get("power") or {}).get("rails") or {}
+    if not isinstance(rails, dict):
+        return
+    definitions = {
+        definition.family: definition
+        for registered in registered_recipes()
+        if (definition := registered.definition).family
+    }
+    # Recommended input envelope and maximum guaranteed EN high threshold,
+    # respectively: TI TLV62569 datasheet §§6.3, 6.5 and Diodes AP63203
+    # datasheet recommended operating conditions and electrical characteristics.
+    high_true = {
+        "tlv62569dbvr": (2.5, 5.5, 1.2),
+        "ap63203wu-7": (3.8, 32.0, 1.23),
+    }
+
+    def endpoints(signal: dict) -> list[str]:
+        peers = signal.get("to")
+        return [str(signal.get("from") or ""), *(
+            str(peer or "") for peer in (peers if isinstance(peers, list) else [peers])
+        )]
+
+    for header in requirements:
+        if (
+            header.get("family") != "jumper-header"
+            or str(header.get("exact_part") or "").casefold() not in {"", "tsw-102-07-g-s"}
+            or any(header.get(key) for key in (
+                "parameters", "ties", "supply", "supply_bindings", "reference_bindings",
+                "interfaces", "programming",
+            ))
+        ):
+            continue
+        declared = header.get("declared_ports") or []
+        if declared and (
+            len(declared) != 2
+            or any(
+                not isinstance(row, dict) or row.get("supply_rail") or row.get("reference_domain")
+                for row in declared
+            )
+            or {(str(row.get("key") or ""), str(row.get("pin") or "")) for row in declared}
+            != {("pin1", "1"), ("pin2", "2")}
+        ):
+            continue
+        ids = [str(identifier) for identifier in header.get("obligation_ids") or []]
+        controls = [
+            obligations.get(identifier) for identifier in ids
+            if (row := obligations.get(identifier))
+            and row.get("kind") == "adjustability"
+            and str(row.get("parameter") or "").strip().casefold()
+            in {"enable", "power enable", "converter enable", "regulator enable"}
+            and "jumper" in canonical_physical_features(class_key(str(row.get("mechanism") or "")))
+        ]
+        if len(controls) != 1 or any(
+            identifier not in obligations
+            or (
+                obligations[identifier] is not controls[0]
+                and not (
+                    obligations[identifier].get("kind") == "physical"
+                    and "jumper" in canonical_physical_features(
+                        class_key(str(obligations[identifier].get("component_class") or ""))
+                    )
+                )
+            )
+            for identifier in ids
+        ):
+            continue
+        header_id = str(header.get("id") or "")
+        prefix = f"{header_id}."
+        if any(
+            isinstance(row, dict) and str(row.get("from") or "").startswith(prefix)
+            for row in rails.values()
+        ):
+            continue
+        touching = [signal for signal in signals if any(
+            endpoint.startswith(prefix) for endpoint in endpoints(signal)
+        )]
+        if len(touching) != 1:
+            continue
+        signal = touching[0]
+        if not signal.get("name") or sum(
+            row.get("name") == signal["name"] for row in signals
+        ) != 1:
+            continue
+        refs = endpoints(signal)
+        if len(refs) != 2 or refs.count(f"{header_id}.pin1") != 1:
+            continue
+        target_ref = next(ref for ref in refs if ref != f"{header_id}.pin1")
+        if not target_ref.endswith(".enable"):
+            continue
+        target_id = target_ref[:-len(".enable")]
+        targets = [row for row in requirements if row.get("id") == target_id]
+        if len(targets) != 1 or sum(target_ref in endpoints(row) for row in signals) != 1:
+            continue
+        target = targets[0]
+        definition = definitions.get(str(target.get("family") or ""))
+        if (
+            definition is None
+            or not any(port.name == "enable" for port in definition.ports)
+            or _recipe_owns_enable_shunt(definition)
+            or (target.get("ties") or {}).get("enable")
+            or (
+                target.get("exact_part")
+                and str(target["exact_part"]).casefold()
+                != str(definition.exact_part or "").casefold()
+            )
+        ):
+            continue
+        envelope = high_true.get(str(definition.exact_part or "").casefold())
+        supply = str(target.get("supply") or "")
+        rail = rails.get(supply)
+        if not envelope or not isinstance(rail, dict):
+            continue
+        voltage, source = rail.get("voltage"), str(rail.get("from") or "")
+        if (
+            type(voltage) not in (int, float)
+            or not envelope[0] <= voltage <= envelope[1]
+            or voltage < envelope[2]
+            or not source
+            or source.startswith(f"{target_id}.")
+        ):
+            continue
+        header.update({
+            "family": "switch-input",
+            "parameters": {"pull_policy": "external", "active_level": "high", "voltage": voltage},
+            "supply": supply,
+            "declared_ports": [],
+        })
+        if signal.get("from") == f"{header_id}.pin1":
+            signal["from"] = f"{header_id}.signal"
+        elif isinstance(signal.get("to"), list):
+            signal["to"] = [
+                f"{header_id}.signal" if ref == f"{header_id}.pin1" else ref
+                for ref in signal["to"]
+            ]
+        else:
+            signal["to"] = f"{header_id}.signal"
+
+
 def _complete_enable_jumper_requirements(payload: dict) -> dict:
     """Complete an unowned enable jumper using one unambiguous reviewed converter.
 
@@ -1149,6 +1302,23 @@ def _adopt_carrier_families(payload: dict) -> dict:
             continue
         exact = str(requirement.get("exact_part") or "").strip()
         record = reviewed_part(exact) if exact else None
+        if (
+            family == "switch-input"
+            and exact.casefold() == "tsw-102-07-g-s"
+            and any(
+                obligation.get("kind") == "adjustability"
+                and "jumper" in canonical_physical_features(
+                    str(obligation.get("mechanism") or "")
+                )
+                for obligation in _physical_obligations(requirement)
+            )
+        ):
+            # switch-input's jumper branch builds this exact reviewed header
+            # together with its bias resistor and removable shunt. Its normal
+            # reviewed_exact_parts list names momentary switches, not this
+            # obligation-dependent implementation. Replacing the composition
+            # with the bare connector drops the bias and its signal port.
+            continue
         if record is not None and _lowerer_realizes_exact_part(family, record.identity):
             # This family's own lowerer builds exactly this reviewed part. The record's class is
             # not another spelling of the family, it is the bare part inside the composition the
@@ -1361,6 +1531,7 @@ def complete_architecture_payload(payload: dict) -> dict:
     # and authored controls. The producer acts only on one unowned, unambiguous safe jumper fact.
     _complete_explicit_input_sources(payload)
     _complete_driver_logic_supplies(payload)
+    _adopt_authored_enable_headers(payload)
     _complete_enable_jumper_requirements(payload)
     _adopt_carrier_families(payload)
     _complete_terminal_returns(payload)
@@ -3494,6 +3665,37 @@ def derive_architecture(
     # Registered lowerers own a finite published contract. Once all architecture
     # bindings exist, reject an invalid known contract here rather than treating
     # its deterministic coverage miss as model-owned BOM work.
+    from kicraft.design.part_identity import canonical_physical_features, class_key
+
+    for requirement_id, requirement in sorted(requirements.items()):
+        if requirement.family != "switch-input" or not any(
+            obligation.kind == "adjustability"
+            and "jumper" in canonical_physical_features(class_key(obligation.mechanism))
+            for obligation in requirement.obligations
+        ):
+            continue
+        control_net = bindings.get(requirement_id, {}).get("vdd")
+        rail = intent.power.rails.get(control_net) if control_net else None
+        stated = requirement.parameters.get("voltage")
+        if stated is not None and (
+            type(stated) not in (int, float)
+            or rail is None or rail.from_ref is None or stated != rail.voltage
+        ):
+            _fail(
+                "unsafe_enable_jumper_control",
+                f"jumper {requirement_id!r} voltage must match its sourced control rail",
+                requirement_id=requirement_id, sheet=requirement.sheet,
+                evidence=[f"declared_voltage={stated!r}",
+                          f"control_voltage={getattr(rail, 'voltage', None)!r}"],
+            )
+            continue
+        if stated is None and rail is not None and rail.from_ref and 0 < rail.voltage <= 5.5:
+            requirements[requirement_id] = requirement.model_copy(update={
+                "parameters": {**requirement.parameters, "voltage": rail.voltage},
+            })
+            derived_notes.append(
+                f"{requirement_id}: control voltage {rail.voltage:g} V from {control_net} (derived)"
+            )
     for requirement_id, catalog in sorted(catalogs.items()):
         if catalog.source != "lowerer":
             continue

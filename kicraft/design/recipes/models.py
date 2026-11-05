@@ -34,6 +34,7 @@ class RecipeComponentGroup(BaseModel):
     assembly: bool = True
     mpn: str | None = None
     datasheet: str | None = None
+    sourcing_note: str | None = None
 
 
 class RecipePinSpec(BaseModel):

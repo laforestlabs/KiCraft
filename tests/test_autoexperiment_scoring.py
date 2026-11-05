@@ -11,6 +11,13 @@ from pathlib import Path
 import pytest
 
 from kicraft.cli.autoexperiment import (
+    HierarchyRound,
+    _accepted_leaf_artifacts,
+    _all_leaf_artifacts,
+    _leaf_progress_counts,
+    _planned_leaf_paths,
+    _write_live_status,
+    _write_round_detail,
     _extract_parent_board_dimensions,
     _read_composer_quality_score,
     _score_round,
@@ -34,6 +41,93 @@ def _write_parent_pipeline(
     path = tmp_path / "parent_pipeline.json"
     path.write_text(json.dumps(payload))
     return path
+
+@pytest.mark.parametrize("failed_artifact", [False, True])
+def test_planned_leaf_progress_includes_missing_or_failed_instance(
+    tmp_path: Path, failed_artifact: bool
+):
+    root = tmp_path / "root.kicad_sch"
+    sheets = "".join(
+        f' (sheet (uuid "{i}") (property "Sheetname" "Leaf{i}")'
+        ' (property "Sheetfile" "child.kicad_sch"))'
+        for i in range(5)
+    )
+    root.write_text(f'(kicad_sch (uuid "root"){sheets})')
+    (tmp_path / "child.kicad_sch").write_text('(kicad_sch (uuid "child"))')
+    paths = _planned_leaf_paths(root)
+    assert paths == {f"/{i}" for i in range(5)}
+
+    artifacts = tmp_path / ".experiments" / "subcircuits"
+    for i in range(5 if failed_artifact else 4):
+        directory = artifacts / f"leaf{i}"
+        directory.mkdir(parents=True)
+        directory.joinpath("metadata.json").write_text("{}")
+        directory.joinpath("solved_layout.json").write_text(json.dumps({
+            "sheet_name": f"Leaf{i}",
+            "instance_path": f"/{i}",
+            "validation": {"leaf_acceptance_result": {"accepted": i < 4}},
+        }))
+    all_leafs = _all_leaf_artifacts(tmp_path)
+    accepted = _accepted_leaf_artifacts(tmp_path)
+    total, count = _leaf_progress_counts(paths, accepted)
+    assert (total, count) == (5, 4)
+
+    score, _, _, tier = _score_round(
+        leaf_accepted=count, leaf_total=total, parent_routed=False,
+        parent_output_json=tmp_path / "missing.json",
+    )
+    assert tier == "partial_leaves"
+    assert score == pytest.approx(12.0)
+    status = tmp_path / "status.json"
+    _write_live_status(
+        status, tmp_path / "status.txt", phase="complete", rounds_total=1,
+        round_num=1, best_score=0, kept_count=0, latest_score=score,
+        latest_marker=None, start_ts=0, current_stage="done",
+        leaf_total=total, leaf_accepted=count, parent_routed=False,
+    )
+    assert json.loads(status.read_text())["hierarchy"]["leaf_total"] == 5
+    assert json.loads(status.read_text())["hierarchy"]["leaf_accepted"] == 4
+
+    result = HierarchyRound(
+        round_num=1, seed=1, mode="hierarchical", score=score, kept=False,
+        duration_s=0, leaf_total=total, leaf_accepted=count, tier=tier,
+    )
+    _write_round_detail(
+        tmp_path, result, accepted_leafs=accepted, all_leafs=all_leafs,
+        solve_exit_code=6, parent_route_exit_code=None, solve_stdout="",
+        solve_stderr="failed leaf", parent_route_stdout="", parent_route_stderr="",
+    )
+    detail = json.loads((tmp_path / "round_0001.json").read_text())
+    assert detail["hierarchy"]["leaf_total"] == 5
+    assert detail["hierarchy"]["leaf_accepted"] == 4
+    assert len(detail["all_leaf_artifacts"]) == (5 if failed_artifact else 4)
+    assert len(detail["accepted_leaf_artifacts"]) == 4
+
+
+def test_planned_leaf_progress_scopes_selected_parent_descendants(tmp_path: Path):
+    root = tmp_path / "root.kicad_sch"
+    root.write_text(
+        '(kicad_sch (uuid "root")'
+        ' (sheet (uuid "a") (property "Sheetname" "A")'
+        ' (property "Sheetfile" "branch.kicad_sch"))'
+        ' (sheet (uuid "b") (property "Sheetname" "B")'
+        ' (property "Sheetfile" "branch.kicad_sch")))'
+    )
+    (tmp_path / "branch.kicad_sch").write_text(
+        '(kicad_sch (uuid "branch")'
+        ' (sheet (uuid "one") (property "Sheetname" "One")'
+        ' (property "Sheetfile" "leaf.kicad_sch"))'
+        ' (sheet (uuid "two") (property "Sheetname" "Two")'
+        ' (property "Sheetfile" "leaf.kicad_sch")))'
+    )
+    (tmp_path / "leaf.kicad_sch").write_text('(kicad_sch (uuid "leaf"))')
+    selected = _planned_leaf_paths(root, "a")
+    assert selected == {"/a/one", "/a/two"}
+    assert _planned_leaf_paths(root, "/") == {
+        "/a/one", "/a/two", "/b/one", "/b/two",
+    }
+    accepted = [{"instance_path": "/a/one"}, {"instance_path": "/b/one"}]
+    assert _leaf_progress_counts(selected, accepted) == (2, 1)
 
 
 class TestReadComposerQualityScore:

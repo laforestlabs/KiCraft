@@ -897,12 +897,32 @@ def test_generic_named_mcu_keeps_a_reviewed_explicit_member_instead_of_the_defau
         assert any(row.code == "missing_recipe_requirement" for row in rejected.blocking)
 
 
-def test_rejected_first_draft_counts_a_contract_rejection_not_a_semantic_repair(tmp_path):
+def test_rejected_first_draft_counts_a_contract_rejection_not_a_semantic_repair(tmp_path, monkeypatch):
     """The rejected draft remains in the denominator and never counts as a commit."""
     from test_stage_driver_retry import _OK_INTENT, _ScriptedClient
 
     from kicraft.server.config import Settings
     from kicraft.server.session import run_session
+    import sqlite3
+    from test_jlcparts_catalog import _SCHEMA
+
+    # The architecture's real capacitor-voltage gate needs catalog parameters,
+    # even when this consumer test deliberately has no host catalog.
+    catalog = tmp_path / "ratings.sqlite3"
+    with sqlite3.connect(catalog) as con:
+        con.execute(_SCHEMA)
+        con.executemany(
+            "INSERT INTO jlc_components "
+            "(lcsc,mfr,package,manufacturer,library_type,stock,price,description,attributes) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            [
+                (77096, "GRM31CR71H475KA12L", "1206", "Murata", "expand", 0, "", "",
+                 json.dumps({"Capacitance": "4.7uF", "Voltage Rating": "50V"})),
+                (77093, "GRM31CR71E106KA12L", "1206", "Murata", "expand", 0, "", "",
+                 json.dumps({"Capacitance": "10uF", "Voltage Rating": "25V"})),
+            ],
+        )
+    monkeypatch.setenv("KICRAFT_JLCPARTS_DB", str(catalog))
 
     def _reply(payload: dict) -> dict:
         return {

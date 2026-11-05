@@ -1241,7 +1241,8 @@ def _render_section(sec: dict, accent: str) -> None:
         _render_assurance(sec.get("assurance") or {})
 
     elif kind == "progress":
-        pct = max(0, min(100, int(float(sec.get("percent", 0)))))
+        percent = sec.get("percent")
+        pct = None if percent is None else max(0, min(100, int(float(percent))))
         phase = sec.get("phase", "")
         action = sec.get("action", "")
         elapsed = sec.get("elapsed", "")
@@ -1254,18 +1255,20 @@ def _render_section(sec: dict, accent: str) -> None:
                     ui.label(phase).classes("text-sm font-semibold").style(f"color:{bar_color}")
                     if action:
                         ui.label(action).classes("text-xs").style(f"color:{_DIMMER}")
-            # Progress bar (pure CSS, no JS)
-            with (
-                ui.element("div")
-                .classes("w-full")
-                .style("height:8px;border-radius:4px;background:var(--kc-border);overflow:hidden")
-            ):
-                with ui.element("div").style(
-                    f"height:100%;width:{pct}%;border-radius:4px;"
-                    f"background:{bar_color};transition:width 0.5s"
+            # Unknown phase progress is not zero, and a candidate is not a
+            # completed build. Render a bar only for a measured scope.
+            if pct is not None:
+                with (
+                    ui.element("div")
+                    .classes("w-full")
+                    .style("height:8px;border-radius:4px;background:var(--kc-border);overflow:hidden")
                 ):
-                    pass
-            ui.label(f"{pct}%").classes("text-xs font-mono").style(f"color:{_DIMMER}")
+                    with ui.element("div").style(
+                        f"height:100%;width:{pct}%;border-radius:4px;"
+                        f"background:{bar_color};transition:width 0.5s"
+                    ):
+                        pass
+                ui.label(f"{pct}%").classes("text-xs font-mono").style(f"color:{_DIMMER}")
             # Elapsed / ETA line
             if elapsed or eta:
                 parts = []

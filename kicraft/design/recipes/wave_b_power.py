@@ -160,7 +160,7 @@ def _catalog_cap(role: str, value: str, quantity: int = 1) -> Group:
 # AP6320x EN is specifically documented as a high-voltage input and may be tied to its
 # 3.8--32 V VIN rail (DS41326 Rev. 3-2, pp. 4 and 10).
 _ENABLE_CONTROL_MAX_V: dict[str, float] = {
-    "tlv62569-3v3@1": 5.5,
+    "tlv62569-3v3@2": 5.5,
     "ap63203-3v3@1": 32.0,
     "ap63205-5v@1": 32.0,
     "tps54331-adjustable@2": 6.0,
@@ -949,7 +949,7 @@ def _buck(
 
 
 TLV62569_3V3 = _buck(
-    recipe="tlv62569-3v3@1",
+    recipe="tlv62569-3v3@2",
     family="tlv62569-3v3",
     part="TLV62569DBVR",
     symbol="tlv62569:TLV62569DBVR",
@@ -957,8 +957,55 @@ TLV62569_3V3 = _buck(
     datasheet="https://www.ti.com/lit/ds/symlink/tlv62569.pdf",
     pins_map={"vin": "4", "gnd": "2", "sw": "3", "fb": "5", "en": "1"},
     output_voltage=3.3,
-    rated_output_current_a=2.0,
+    rated_output_current_a=0.5,
+    inductor="2.2uH",
 )
+TLV62569_3V3 = TLV62569_3V3.model_copy(update={
+    "parts": tuple(
+        _part("inductor", "L", "2.2uH FXL0630-2R2-M",
+              "cjiang-fxl0630-2r2-m:FXL0630-2R2-M",
+              "cjiang-fxl0630-2r2-m:FXL0630_Cjiang_Recommended", mpn="FXL0630-2R2-M",
+              datasheet="https://datasheet.lcsc.com/datasheet/pdf/40dfb6cb4606b2ccaa4e89438a42f563.pdf?productCode=C167218").model_copy(
+                  update={"sourcing_note": "LCSC C167218"})
+        if part.role == "inductor" else
+        _catalog_cap("input_cap", "4.7uF 50V X7R", quantity=2).model_copy(
+            update={"sourcing_note": "LCSC C77096"})
+        if part.role == "input_cap" else
+        _catalog_cap("output_cap", "10uF 25V X7R", quantity=2).model_copy(
+            update={"sourcing_note": "LCSC C77093"})
+        if part.role == "output_cap" else
+        part.model_copy(update={"sourcing_note": "LCSC C141836"})
+        if part.role == "converter" else part
+        for part in TLV62569_3V3.parts
+    ),
+    "source_documents": TLV62569_3V3.source_documents + (
+        *_source("https://datasheet.lcsc.com/datasheet/pdf/40dfb6cb4606b2ccaa4e89438a42f563.pdf?productCode=C167218",
+                 "Cjiang FXL0630", "Electrical characteristics", "Recommended land pattern"),
+        *_source("https://jlcpcb.com/api/file/downloadByFileSystemAccessId/8588932779736240128",
+                 "Murata GRM31CR71E106KA12L", "Electrical characteristics"),
+        *_source("https://jlcpcb.com/api/file/downloadByFileSystemAccessId/8588893061610393600",
+                 "Murata GRM31CR71H475KA12L", "Electrical characteristics"),
+    ),
+    "electrical_assertions": TLV62569_3V3.electrical_assertions + (
+        Assertion(code="tlv62569_support_envelope", message=(
+            "This composition is limited to 0.5 A, not the IC's 2 A rating. "
+            "TI's table includes a 2.2 uH/22 uF nominal combination; these two "
+            "10 uF capacitors total 20 uF nominal, and their effective capacitance "
+            "under bias, temperature and tolerance and the actual loop stability "
+            "require validation. The FXL0630 manufacturer lists saturation and "
+            "heating test points as maximum/typical, not guaranteed minima."
+        )),
+        Assertion(code="tlv62569_operating_conditions", message=(
+            "At 5.25 V input, 1.76 uH and the 1.5 MHz typical switching frequency, "
+            "calculated ripple is approximately 0.464 A peak-to-peak at 3.3 V; "
+            "this is illustrative, not a worst-case guarantee. Feedback reference "
+            "and 1% divider tolerances imply approximately 3.208--3.450 V before "
+            "ripple or transients. Verify actual EN bias, startup, layout, ripple, "
+            "switching frequency, inductor saturation, dissipation and temperature "
+            "on the finished board; none is established by these typical values."
+        )),
+    ),
+})
 AP63203_3V3 = _power_recipe(
     recipe="ap63203-3v3@1",
     family="ap63203-3v3",
@@ -1344,6 +1391,81 @@ YLPTEC_K7803M_1000R3 = YLPTEC_K7803M_1000R3.model_copy(update={
             "max_mm": 4.5,
         })
         for role, net in (("input_cap", "input"), ("output_cap", "output"))
+    ),
+})
+
+# This is a separate motor-only source, not an upgrade of a logic supply.  The
+# converter's own output support remains on the raw side of the ideal diode.
+K7803M_3V3_REVERSE_BLOCKED = YLPTEC_K7803M_1000R3.model_copy(update={
+    "recipe": "k7803m-3v3-reverse-blocked@1",
+    "family": "k7803m-3v3-reverse-blocked",
+    "exact_part": None,
+    "protected_aliases": ("k7803m-3v3-reverse-blocked",),
+    "identity_aliases": (),
+    "internal_nets": ("raw_output", "gate"),
+    "parts": YLPTEC_K7803M_1000R3.parts + (
+        _part("reverse_controller", "U", "LTC4412ES6#TRPBF",
+              "Power_Management:LTC4412xS6", "Package_TO_SOT_SMD:TSOT-23-6",
+              mpn="LTC4412ES6#TRPBF",
+              datasheet="https://www.analog.com/media/en/technical-documentation/data-sheets/ltc4412.pdf").model_copy(update={"sourcing_note": "LCSC C514442"}),
+        _part("reverse_fet", "Q", "AO3401A", "Transistor_FET:AO3401A",
+              "Package_TO_SOT_SMD:SOT-23", mpn="AO3401A",
+              datasheet="https://www.aosmd.com/sites/default/files/res/datasheets/AO3401A.pdf").model_copy(update={"sourcing_note": "LCSC C15127"}),
+        _catalog_cap("reverse_decoupling", "4.7uF 50V X7R").model_copy(
+            update={"sourcing_note": "LCSC C77096"}
+        ),
+    ),
+    "pins": tuple(
+        pin.model_copy(update={"net": "raw_output"})
+        if (pin.role, pin.pin) in {("converter", "3"), ("output_cap", "1")} else pin
+        for pin in YLPTEC_K7803M_1000R3.pins
+    ) + (
+        Pin(role="reverse_controller", pin="1", net="raw_output"),
+        Pin(role="reverse_controller", pin="2", net="gnd"),
+        Pin(role="reverse_controller", pin="3", net="gnd"),
+        Pin(role="reverse_controller", pin="5", net="gate"),
+        Pin(role="reverse_controller", pin="6", net="output"),
+        Pin(role="reverse_fet", pin="1", net="gate"),
+        Pin(role="reverse_fet", pin="2", net="output"),
+        Pin(role="reverse_fet", pin="3", net="raw_output"),
+        Pin(role="reverse_decoupling", pin="1", net="raw_output"),
+        Pin(role="reverse_decoupling", pin="2", net="gnd"),
+    ),
+    "no_connects": (NoConnect(role="reverse_controller", pin="4"),),
+    "placement_constraints": tuple(
+        placement.model_copy(update={"parameters": {
+            **placement.parameters, "power_net": "raw_output",
+        }}) if placement.kind == "owned_bypass" and placement.role == "output_cap"
+        else placement
+        for placement in YLPTEC_K7803M_1000R3.placement_constraints
+    ) + (Placement(kind="owned_bypass", role="reverse_decoupling", parameters={
+        "anchor_role": "reverse_controller", "power_net": "raw_output",
+        "ground_net": "gnd", "max_mm": 3.0,
+    }),),
+    "source_documents": YLPTEC_K7803M_1000R3.source_documents + (
+        *_source("https://www.analog.com/media/en/technical-documentation/data-sheets/ltc4412.pdf",
+                 "LTC4412", "Pin Functions", "Electrical Characteristics", "Applications Information"),
+        *_source("https://www.aosmd.com/sites/default/files/res/datasheets/AO3401A.pdf",
+                 "AOS AO3401A", "Electrical Characteristics"),
+    ),
+    "electrical_assertions": YLPTEC_K7803M_1000R3.electrical_assertions + (
+        Assertion(code="motor_reverse_boundary", message=(
+            "For the separate 3.3 V motor rail only, LTC4412 VIN senses the raw module "
+            "output, SENSE the protected output, CTL is grounded and GATE drives the "
+            "AOS AO3401A with drain at raw and source at the motor. Reverse turn-off "
+            "is not instantaneous: the threshold is 10--32 mV and the 22 us maximum "
+            "is specified for a 1 nF test load, not this board. Reverse leakage and "
+            "transient reverse charge remain; module tolerance to that charge, effective "
+            "raw capacitance, motor current and switching waveforms require independent "
+            "verification. No arbitrary regenerative energy or surge guarantee is made."
+        )),
+        Assertion(code="motor_reverse_fet_envelope", message=(
+            "Composition remains limited to 0.5 A, 6 V <= VIN < 30 V. At 25 C AOS "
+            "specifies 85 milliohms maximum at -2.5 V gate drive; the controller "
+            "regulates forward drop around 20 mV when possible. Check actual voltage, "
+            "startup, temperature, SOA and thermal layout; this is not a stall-current "
+            "or guaranteed dynamic motor-current rating."
+        )),
     ),
 })
 
@@ -2629,6 +2751,7 @@ WAVE_B_POWER_RECIPES = (
     AP63205_5V,
     TPS54331_ADJUSTABLE,
     YLPTEC_K7803M_1000R3,
+    K7803M_3V3_REVERSE_BLOCKED,
     TPS54331_12V_1A,
     TPS552892_12V_2A,
     TPS552892_5V_2A,

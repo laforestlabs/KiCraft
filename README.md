@@ -710,7 +710,7 @@ Recovery BOOT/RESET controls do not replace requested user buttons. A generated
 board still needs its own routing, manufacturing exports and independent audit.
 
 Generic `STM32G0`/`STM32G030` requests use the reviewed
-`stm32g030k6t6-minimal@1` LQFP-32 construction (C529331). Its supply pair,
+`stm32g030k6t6-minimal@2` LQFP-32 construction (C529331). Its supply pair,
 reset/boot/SWD network and ADC/GPIO allocation are package-specific; the stock
 symbol's no-connect contacts 19/21 remain unused. Exact or saved
 `STM32G030F6P6` TSSOP-20 selections stay F6 rather than being relabelled or
@@ -782,7 +782,7 @@ Exact linear-regulator dissipation limits reject clearly excessive calculated
 loss. Passing that absolute-limit check is not board thermal qualification.
 The DRV8833 land no longer contains unspecified in-pad plated thermal holes;
 ordinary-process assembly does not imply a guaranteed motor stall/current rating.
-DRV8833 `@4` grounds AISEN/BISEN directly when current regulation is not requested;
+DRV8833 `@5` grounds AISEN/BISEN directly when current regulation is not requested;
 it does not claim winding-current regulation or infer a winding limit from the
 shared supply rating. Its externally low-biased control ports require MCU
 reset-pull compatibility. Documented C3 pin facts qualify automatic allocations;
@@ -791,18 +791,69 @@ Only explicitly MCU-bound control nets acquire those constraints; sheet
 membership never invents a physical MCU connection. Unregistered MCU cores
 cannot bypass a bound reset-control obligation through model-owned fallback.
 This is a DC reset-bias contract, not a power-ramp or firmware guarantee.
+Its motor-rail bulk capacitor is 100 µF/25 V, not a 6.3 V part below the
+reviewed TVS clamp envelope. The `k7803m-3v3-reverse-blocked@1` composition
+adds a qualified LTC4412/AO3401A reverse-blocking path and local controller
+bypass. Its protected motor output must remain separate from the MCU supply.
+The reviewed input is 6 V to below 30 V and the aggregate output limit is
+0.5 A. Finite controller turn-off is not a zero-reverse-charge guarantee,
+and neither the TVS nor the converter qualifies arbitrary motor regeneration.
 Board-wide counts already witnessed by distinct physical requirement owners
 remain at board scope even when those owners share a sheet; they are not
 multiplied into every local connector bank.
+
+`tlv62569-3v3@2` is a 0.5 A composition, not the IC's nominal 2 A rating.
+It uses the exact Cjiang FXL0630-2R2-M/C167218 2.2 µH land pattern and
+two 4.7 µF/50 V input plus two 10 µF/25 V output capacitors. Nominal
+capacitance and typical inductor current figures are not guaranteed
+effective capacitance or a board-level 2 A qualification.
+`ah49entr-g1-analog-hall@1` owns the AH49ENTR-G1 VCC/OUT/GND pins
+1/2/3, its manufacturer land pattern and a local 100 nF bypass. STM32G030K6
+`@2` uses a qualified six-contact SWD header; the older pin declaration
+is not an alternative electrical implementation. Both STM32G030 F6/K6
+constructions enforce the 100 nF local and 4.7 µF bulk capacitors against
+their MCU's actual supply/ground pad centers, each within 3 mm. A local
+100 nF capacitor does not discharge the bulk capacitor's separate obligation.
+
+An explicit all-connectors-on-one-edge requirement includes access-only
+connectors such as SWD. Generated constraints preserve those owners and
+the final native-board gate rejects missing, demoted or unmeasured owners;
+ordinary placement hints cannot waive the original requirement.
+Reviewed connector mating datums live in `kicraft.parts_library.footprint_opening`.
+The reviewed XFCN PM254V-11 2/4/8-contact headers mate along Z; their edge
+positions still require measurement, but an in-plane wire mouth is inapplicable.
+An unknown or horizontal connector does not gain that exemption.
+Enable-jumper ownership follows the committed functional block, not merely
+the nearest reviewed header. Fitted-on/removed-off control uses actual
+sourced rail voltage, an external bias and a qualified header/shunt pair.
+Owned bypass groups reserve constrained geometry first and search compact
+allowed owner orientations before locking soft poses. Pad locality,
+courtyard clearance, keepouts and final-board margins remain hard constraints.
+A lone edge header keeps its long axis parallel to the edge instead of
+unnecessarily bisecting the leaf. Perpendicular bank packing applies when
+at least two eligible single-row headers share that edge; explicit rotations
+and measured connector mouths still take precedence.
+Parent-outline repair includes full trace widths and via copper diameters,
+including connector-defined edges; manual and standard outlines remain
+authoritative rather than silently growing to fit.
+Leaf progress uses planned hierarchy instances, including missing or failed
+leaves during parent-only composition, rather than counting only saved successes.
+
+Native document viewers own isolated same-origin frame lifetimes so refresh,
+document switching and tab reparenting do not reconnect a vendor element
+with an existing shadow root. Route progress distinguishes completed work
+from search-budget usage; silkscreen counts complete logical labels rather
+than individual rendered pieces. None of these UI states certifies a product.
 
 ## Saved recipe and spend safety
 
 Saved selections migrate explicitly to the current recipe contract:
 `rp2040-minimal@1/@2` → `@3`, TPS54331 `@1` → `@2`, and the changed C3
 native-USB minimal recipes `@1` → `@2`. The already-qualified H4X UART recipe
-remains `@1`. DRV8833 `@1/@2/@3` instead require architecture regeneration
-and MCU reset requalification even when all port bindings are present:
-BOM-only relabeling cannot preserve a previously unsafe GPIO allocation.
+remains `@1`. DRV8833 `@1/@2/@3/@4`, TLV62569 `@1` and STM32G031K6
+`@1` instead require architecture regeneration against their current
+electrical and physical contracts. BOM-only relabeling cannot preserve a
+previously unsafe GPIO allocation, supply envelope or connector identity.
 DRV8833's fault pull-up uses an explicit MCU logic supply, never the motor rail.
 Ambiguous legacy parameters are refused rather than guessed.
 Derived BOMs carrying obsolete ownership must be regenerated upstream.
