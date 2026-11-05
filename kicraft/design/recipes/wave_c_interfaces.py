@@ -12,6 +12,7 @@ from .models import (
     RecipePort as Port,
     RecipeSourceDocument as Source,
 )
+from .wave_b_power import _catalog_cap
 
 _DATE = "2026-09-09"
 _C = ("Device:C", "Capacitor_SMD:C_0603_1608Metric")
@@ -224,7 +225,7 @@ MAX3485_RS485_NODE = _recipe(
 )
 
 DRV8833_DUAL_MOTOR = _recipe(
-    recipe="drv8833-dual-motor@5",
+    recipe="drv8833-dual-motor@6",
     family="dual-dc-motor-driver",
     exact="DRV8833PWPR",
     safety=True,
@@ -252,6 +253,8 @@ DRV8833_DUAL_MOTOR = _recipe(
         _part("vm_bulk", "C", "100uF 25V, UCM1E101MCL1GS", "Device:C_Polarized",
               "Capacitor_SMD:CP_Elec_6.3x5.8", mpn="UCM1E101MCL1GS",
               datasheet="https://www.nichicon.com/getmedia/f527b3ab-1197-491e-9b2c-7ca4b61e1e20/e-ucm5-11.pdf").model_copy(update={"sourcing_note": "LCSC C729678"}),
+        _catalog_cap("vm_ceramic", "22uF 16V X7R").model_copy(
+            update={"sheet_role": "interface"}),
         _part("vm_decoupling", "C", "100nF 16V X7R, CL10B104KO8NNNC", "Device:C",
               "Capacitor_SMD:C_0603_1608Metric", mpn="CL10B104KO8NNNC").model_copy(update={"sourcing_note": "LCSC C66501"}),
         _passive("vcp_cap", "C", "10nF"),
@@ -290,6 +293,7 @@ DRV8833_DUAL_MOTOR = _recipe(
             Pin(role=role, pin="1", net=net)
             for role, net in (
                 ("vm_bulk", "vm"),
+                ("vm_ceramic", "vm"),
                 ("vm_decoupling", "vm"),
                 ("vcp_cap", "vcp"),
                 ("vint_cap", "vint"),
@@ -297,7 +301,7 @@ DRV8833_DUAL_MOTOR = _recipe(
         ),
         *(
             Pin(role=role, pin="2", net="gnd")
-            for role in ("vm_bulk", "vm_decoupling", "vint_cap")
+            for role in ("vm_bulk", "vm_ceramic", "vm_decoupling", "vint_cap")
         ),
         Pin(role="vcp_cap", pin="2", net="vm"),
         Pin(role="control_pulldown", index=0, pin="1", net="ain1"),
@@ -313,7 +317,13 @@ DRV8833_DUAL_MOTOR = _recipe(
         Pin(role="motor_tvs", pin="1", net="vm"),
         Pin(role="motor_tvs", pin="2", net="gnd"),
     ),
-    source="https://www.ti.com/lit/ds/symlink/drv8833.pdf",
+    source=Source(
+        url="https://www.ti.com/lit/ds/symlink/drv8833.pdf",
+        title="DRV8833 data sheet",
+        revision="current",
+        reviewed_date="2026-11-05",
+        sections=("Pin Functions", "Power Supply Recommendations", "Layout Guidelines"),
+    ),
     assertions=(
         Assertion(
             code="motor_current_thermal_bound",
@@ -321,10 +331,24 @@ DRV8833_DUAL_MOTOR = _recipe(
         ),
         Assertion(
             code="motor_clamp_and_bulk_envelope",
-            message="SMBJ5.0A has 5 V standoff and 9.2 V maximum clamp only at its specified pulse current and waveform. Nominal VM must not exceed 5 V. The 100 uF 25 V bulk and 16 V bypass cover that specified clamp voltage, not unlimited motor energy; capacitor bias, ripple and lifetime, TVS pulse energy, repeated events, and the motor and source's transient response require independent validation.",
+            message="SMBJ5.0A has 5 V standoff and 9.2 V maximum clamp only at its specified pulse current and waveform. Nominal VM must not exceed 5 V. The 100 uF 25 V bulk, 22 uF 16 V X7R ceramic and 100 nF 16 V bypass cover that specified clamp voltage, not unlimited motor energy. The VM ceramic implements the data-sheet nominal minimum 10 uF local bypass; no delivery-MPN effective-capacitance minimum is asserted. Capacitor bias, ripple and lifetime, TVS pulse energy, repeated events, and the motor and source's transient response require independent validation.",
         ),
     ),
 )
+DRV8833_DUAL_MOTOR = DRV8833_DUAL_MOTOR.model_copy(update={
+    "placement_constraints": DRV8833_DUAL_MOTOR.placement_constraints + tuple(
+        Placement(kind="owned_bypass", role=role, parameters={
+            "anchor_role": "driver", "power_net": power, "ground_net": return_net,
+            "max_mm": 3.0,
+        })
+        for role, power, return_net in (
+            ("vm_ceramic", "vm", "gnd"),
+            ("vm_decoupling", "vm", "gnd"),
+            ("vcp_cap", "vcp", "vm"),
+            ("vint_cap", "vint", "gnd"),
+        )
+    ),
+})
 
 
 

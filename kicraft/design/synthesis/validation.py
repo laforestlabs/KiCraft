@@ -2330,7 +2330,7 @@ def check_reviewed_device_support_networks(bom) -> CheckResult:
     nets = _nets_by_ref(bom)
     bad: list[str] = []
     for driver in bom.parts:
-        if getattr(driver, "recipe_id", None) != "drv8833-dual-motor@5" or getattr(driver, "recipe_role", None) != "driver":
+        if getattr(driver, "recipe_id", None) != "drv8833-dual-motor@6" or getattr(driver, "recipe_role", None) != "driver":
             continue
         pins = nets.get(driver.ref, {})
         vm, ground = pins.get("12"), pins.get("13")
@@ -2342,6 +2342,7 @@ def check_reviewed_device_support_networks(bom) -> CheckResult:
         for role, identity, minimum_voltage in (
             ("vm_bulk", "ucm1e101mcl1gs", 9.2),
             ("vm_decoupling", "cl10b104ko8nnnc", 9.2),
+            ("vm_ceramic", "emk316bb7226ml-t", 9.2),
         ):
             cap = owned.get(role)
             record = _reviewed_identity_for_bom_part(cap) if cap is not None else None
@@ -2640,7 +2641,7 @@ def check_reviewed_input_operating_ranges(architecture, bom) -> CheckResult:
                 and isinstance(source_v, (int, float)) and 6 <= source_v < 30 and pins.get("3")):
             rail_voltages.setdefault(pins["3"], 3.3)
     for part in bom.parts:
-        if (getattr(part, "recipe_id", None) == "drv8833-dual-motor@5"
+        if (getattr(part, "recipe_id", None) == "drv8833-dual-motor@6"
                 and getattr(part, "recipe_role", None) == "driver"):
             vm = nets.get(part.ref, {}).get("12")
             voltage = rail_voltages.get(vm)

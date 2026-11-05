@@ -518,6 +518,150 @@ def test_ldo_owned_bypasses_compile_from_actual_recipe_and_reject_bad_wiring(
         _recipe_local_bypasses(architecture, bom)
 
 
+def _reverse_blocked_compiler_fixture():
+    from types import SimpleNamespace
+
+    from kicraft.design.models import BOM, RecipeSelection
+    from kicraft.design.recipes.registry import expand_selections
+
+    selections = [
+        RecipeSelection(
+            recipe="k7803m-3v3-reverse-blocked@1", instance=instance,
+            sheets={"power": "POWER"},
+            port_bindings={"input": "VMOTOR", "gnd": "GND", "output": "DRIVER_RAIL"},
+            requirement_ids=[f"req_{instance}"],
+        )
+        for instance in ("left", "right")
+    ]
+    expansions = expand_selections(selections)
+    bom = BOM(
+        parts=[part for expansion in expansions for part in expansion.parts],
+        connections=[net for expansion in expansions for net in expansion.connections],
+        recipe_ownership=[expansion.ownership for expansion in expansions],
+    )
+    architecture = SimpleNamespace(
+        recipe_selections=selections, power_nets=["VMOTOR", "GND", "DRIVER_RAIL"],
+        requirements=[],
+    )
+    roles = [{p.recipe_role: p.ref for p in expansion.parts} for expansion in expansions]
+    return architecture, bom, roles
+
+
+def test_reverse_blocked_scoped_bypasses_compile_to_native_placement(tmp_path):
+    import json
+
+    from kicraft.design.synthesis.autoplacer import write_autoplacer_json
+
+    architecture, bom, roles = _reverse_blocked_compiler_fixture()
+    path = write_autoplacer_json(tmp_path, "motor", architecture, bom)
+    rules = json.loads(path.read_text())["local_bypasses"]
+    assert len(rules) == 6
+    by_cap = {rule["bypass_ref"]: rule for rule in rules}
+    for refs in roles:
+        for cap, owner, power, grounds, distance in (
+            ("input_cap", "converter", "1", ["2"], 4.5),
+            ("output_cap", "converter", "3", ["2"], 4.5),
+            ("reverse_decoupling", "reverse_controller", "1", ["2", "3"], 3.0),
+        ):
+            assert by_cap[refs[cap]] == {
+                "owner_ref": refs[owner], "bypass_ref": refs[cap],
+                "power_pins": [power, "1"], "ground_pins": [grounds, "2"],
+                "max_distance_mm": distance,
+            }
+    raw_nets = []
+    for refs in roles:
+        nets = {
+            net.net_name for net in bom.connections for ep in net.endpoints
+            if (ep.ref, ep.pin) in {
+                (refs["converter"], "3"), (refs["output_cap"], "1"),
+                (refs["reverse_controller"], "1"), (refs["reverse_decoupling"], "1"),
+            }
+        }
+        assert len(nets) == 1
+        raw_nets.append(nets.pop())
+    assert raw_nets[0] != raw_nets[1]
+    assert not set(raw_nets) & {"VMOTOR", "GND", "DRIVER_RAIL"}
+
+
+@pytest.mark.parametrize("damage", [
+    "cross_instance_graph_and_manifest", "input_graph", "ground_graph",
+    "raw_output_cap_graph", "raw_reverse_controller_graph", "manifest_net",
+    "manifest_owner", "manifest_requirement", "manifest_binding",
+    "duplicate_graph_pin", "duplicate_manifest_pin", "part_identity",
+])
+def test_reverse_blocked_compiler_rejects_malformed_graph_and_ownership(tmp_path, damage):
+    from kicraft.design.synthesis.autoplacer import write_autoplacer_json
+
+    architecture, bom, roles = _reverse_blocked_compiler_fixture()
+    left, right = roles
+    manifest = bom.recipe_ownership[0]
+
+    def connection(ref, pin):
+        return next(net for net in bom.connections if any(
+            (ep.ref, ep.pin) == (ref, pin) for ep in net.endpoints
+        ))
+
+    def owned(ref, pin):
+        return next(row for row in manifest.pins if (row.ref, row.pin) == (ref, pin))
+
+    if damage == "cross_instance_graph_and_manifest":
+        target = connection(right["converter"], "3").net_name
+        original = connection(left["converter"], "3").net_name
+        connection(left["converter"], "3").net_name = target
+        for row in manifest.pins:
+            if row.net == original:
+                row.net = target
+    elif damage == "input_graph":
+        connection(left["input_cap"], "1").net_name = "WRONG_INPUT"
+    elif damage == "ground_graph":
+        connection(left["reverse_controller"], "2").net_name = "WRONG_GROUND"
+    elif damage in {"raw_output_cap_graph", "raw_reverse_controller_graph"}:
+        ref = left["output_cap" if damage == "raw_output_cap_graph" else "reverse_controller"]
+        net = connection(ref, "1")
+        endpoint = next(ep for ep in net.endpoints if (ep.ref, ep.pin) == (ref, "1"))
+        net.endpoints = [ep for ep in net.endpoints if ep is not endpoint]
+        bom.connections.append(net.model_copy(update={"net_name": "WRONG_RAW", "endpoints": [endpoint]}))
+    elif damage == "manifest_net":
+        owned(left["reverse_decoupling"], "1").net = "WRONG_RAW"
+    elif damage == "manifest_owner":
+        owned(left["output_cap"], "1").owner_id = "wrong@1"
+    elif damage == "manifest_requirement":
+        owned(left["reverse_decoupling"], "1").requirement_id = "wrong"
+    elif damage == "manifest_binding":
+        manifest.port_bindings = {**manifest.port_bindings, "input": "WRONG_INPUT"}
+    elif damage == "duplicate_graph_pin":
+        net = connection(left["output_cap"], "1")
+        bom.connections.append(net.model_copy(deep=True))
+    elif damage == "duplicate_manifest_pin":
+        manifest.pins.append(owned(left["output_cap"], "1").model_copy(deep=True))
+    else:
+        next(part for part in bom.parts if part.ref == left["converter"]).mpn = "WRONG"
+    with pytest.raises(ValueError):
+        write_autoplacer_json(tmp_path, "motor", architecture, bom)
+
+
+def test_reverse_blocked_compiler_rejects_unknown_reviewed_logical_net(monkeypatch):
+    from kicraft.design.recipes import registry
+    from kicraft.design.synthesis.autoplacer import _recipe_local_bypasses
+
+    architecture, bom, _ = _reverse_blocked_compiler_fixture()
+    definition = registry.get_recipe(architecture.recipe_selections[0].recipe)
+    bad = definition.model_copy(update={
+        "pins": tuple(
+            pin.model_copy(update={"net": "unknown_raw"})
+            if pin.net == "raw_output" else pin for pin in definition.pins
+        ),
+        "placement_constraints": tuple(
+            rule.model_copy(update={"parameters": {**rule.parameters, "power_net": "unknown_raw"}})
+            if rule.kind == "owned_bypass" and rule.parameters["power_net"] == "raw_output"
+            else rule for rule in definition.placement_constraints
+        ),
+    })
+    monkeypatch.setattr(registry, "get_recipe", lambda _recipe: bad)
+    with pytest.raises(ValueError, match="unknown bypass net"):
+        _recipe_local_bypasses(architecture, bom)
+
+
 def test_me6211_recipe_compiler_and_solver_place_both_native_caps_together():
     from itertools import combinations
     from types import SimpleNamespace

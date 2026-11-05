@@ -930,12 +930,12 @@ def test_electrical_fix_versions_migrate_saved_selection_without_mutation(old, n
     with pytest.raises(ValueError, match="unknown parameters"):
         migrate_recipe_selection(saved.model_copy(update={"parameters": {"unexpected": 1}}))
 
-@pytest.mark.parametrize("old", ["drv8833-dual-motor@1", "drv8833-dual-motor@2", "drv8833-dual-motor@3", "drv8833-dual-motor@4"])
+@pytest.mark.parametrize("old", ["drv8833-dual-motor@1", "drv8833-dual-motor@2", "drv8833-dual-motor@3", "drv8833-dual-motor@4", "drv8833-dual-motor@5"])
 @pytest.mark.parametrize("complete", [False, True])
 def test_legacy_motor_requires_architecture_regeneration(old, complete):
     from kicraft.design.stage_state import legacy_recipe_resume_stage
 
-    definition = get_recipe("drv8833-dual-motor@5")
+    definition = get_recipe("drv8833-dual-motor@6")
     selection = RecipeSelection(
         recipe=old, instance="motor", sheets={"interface": "MOTOR"},
         port_bindings={port.name: port.name.upper() for port in definition.ports
@@ -956,7 +956,7 @@ def test_legacy_motor_requires_architecture_regeneration(old, complete):
 
 
 def test_drv8833_charge_pump_capacitor_is_between_vcp_and_vm():
-    definition = get_recipe("drv8833-dual-motor@5")
+    definition = get_recipe("drv8833-dual-motor@6")
     selection = RecipeSelection(
         recipe=definition.recipe, instance="motor", sheets={"interface": "MOTOR"},
         port_bindings={port.name: port.name.upper() for port in definition.ports if port.required},
@@ -982,7 +982,7 @@ def test_drv8833_charge_pump_capacitor_is_between_vcp_and_vm():
 def _protected_motor_evidence():
     from kicraft.design.models import Architecture
 
-    motor = get_recipe("drv8833-dual-motor@5")
+    motor = get_recipe("drv8833-dual-motor@6")
     selections = [
         RecipeSelection(recipe="k7803m-3v3-reverse-blocked@1", instance="supply",
                         sheets={"power": "POWER"}, requirement_ids=["supply"],
@@ -1024,6 +1024,36 @@ def _move_evidence_pin(bom, ref, pin, target):
                                 if (ep.ref, ep.pin) != (ref, pin)]
     bom.connections.append(NetConnection(sheet="POWER", net_name=target,
                                          endpoints=[PinEndpoint(ref=ref, pin=pin)]))
+
+
+@pytest.mark.parametrize("damage", ["missing", "upstream", "small", "polarized"])
+def test_motor_requires_qualified_local_vm_ceramic_on_driver_rail(damage):
+    from kicraft.design.synthesis.validation import (
+        _reviewed_identity_for_bom_part, check_reviewed_device_support_networks,
+    )
+
+    _, bom = _protected_motor_evidence()
+    assert check_reviewed_device_support_networks(bom).ok
+    ceramic = next(part for part in bom.parts if part.recipe_role == "vm_ceramic")
+    record = _reviewed_identity_for_bom_part(ceramic)
+    assert record.operating_limits["capacitance_f"] >= 10e-6
+    if damage == "missing":
+        bom.parts.remove(ceramic)
+    elif damage == "upstream":
+        converter = next(part for part in bom.parts if part.recipe_role == "converter")
+        raw = next(connection.net_name for connection in bom.connections
+                   if any(pin.ref == converter.ref and pin.pin == "3"
+                          for pin in connection.endpoints))
+        _move_evidence_pin(bom, ceramic.ref, "1", raw)
+    elif damage == "small":
+        ceramic.mpn = "CL10B104KO8NNNC"
+        ceramic.value = "100nF 16V X7R"
+        ceramic.footprint = "Capacitor_SMD:C_0603_1608Metric"
+    else:
+        bulk = next(part for part in bom.parts if part.recipe_role == "vm_bulk")
+        ceramic.mpn, ceramic.value = bulk.mpn, bulk.value
+        ceramic.symbol, ceramic.footprint = bulk.symbol, bulk.footprint
+    assert not check_reviewed_device_support_networks(bom).ok
 
 
 @pytest.mark.parametrize(("role", "pin", "target"), [

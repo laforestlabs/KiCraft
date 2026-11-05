@@ -800,7 +800,7 @@ Exact linear-regulator dissipation limits reject clearly excessive calculated
 loss. Passing that absolute-limit check is not board thermal qualification.
 The DRV8833 land no longer contains unspecified in-pad plated thermal holes;
 ordinary-process assembly does not imply a guaranteed motor stall/current rating.
-DRV8833 `@5` grounds AISEN/BISEN directly when current regulation is not requested;
+DRV8833 `@6` grounds AISEN/BISEN directly when current regulation is not requested;
 it does not claim winding-current regulation or infer a winding limit from the
 shared supply rating. Its externally low-biased control ports require MCU
 reset-pull compatibility. Documented C3 pin facts qualify automatic allocations;
@@ -816,6 +816,14 @@ bypass. Its protected motor output must remain separate from the MCU supply.
 The reviewed input is 6 V to below 30 V and the aggregate output limit is
 0.5 A. Finite controller turn-off is not a zero-reverse-charge guarantee,
 and neither the TVS nor the converter qualifies arbitrary motor regeneration.
+Its protected VM rail also owns an exact 22 µF/16 V X7R ceramic
+(EMK316BB7226ML-T), rather than counting the converter's upstream output
+capacitor or the separate aluminum bulk as the local ceramic bypass.
+VM ceramic, 100 nF, VINT and VCP capacitors have exact-pin constraints
+within 3 mm; the charge-pump capacitor returns to VM, not GND.
+This establishes the nominal bypass construction, not a guaranteed biased
+capacitance or transient-performance result. Saved driver versions 1–5 require
+architecture regeneration, not a relabel of the old BOM or wiring.
 Board-wide counts already witnessed by distinct physical requirement owners
 remain at board scope even when those owners share a sheet; they are not
 multiplied into every local connector bank.
@@ -842,6 +850,10 @@ within 3 mm. Locality does not establish capacitor ratings, effective biased
 capacitance, ESR or regulator stability. Those remain selected-part obligations;
 in particular, AMS1117's generic nominal capacitors are not blanket qualified.
 
+Owned-bypass pin proof uses the canonical expanded recipe, including
+instance-scoped internal nets, not just public port bindings. Saved ownership
+labels or wiring alone cannot establish that proof.
+
 An explicit all-connectors-on-one-edge requirement includes access-only
 connectors such as SWD. Generated constraints preserve those owners and
 the final native-board gate rejects missing, demoted or unmeasured owners;
@@ -861,6 +873,9 @@ round and reaches the existing bounded larger-canvas ladder. Placement-only
 mode cannot accept it; malformed ownership, missing pads and mismatched nets
 remain hard errors. No canvas-fill, round-count, time, clearance or final-board
 requirement is relaxed.
+Unexpected synthesis exceptions retain their concrete type and cause in a
+native-failure report rather than fabricating an ERC result. The original
+exception is re-raised and fresh-output invalidation is unchanged.
 
 A lone edge header keeps its long axis parallel to the edge instead of
 unnecessarily bisecting the leaf. Perpendicular bank packing applies when

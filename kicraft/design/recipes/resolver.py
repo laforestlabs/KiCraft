@@ -1609,7 +1609,7 @@ def _protected_motor_sources(
             [_recipe_for_exact(driver.exact_part, recipes)]
             if driver.exact_part else _family_recipes(driver.family, recipes)
         )
-        if not any(row and row.definition.recipe == "drv8833-dual-motor@5" for row in matches):
+        if not any(row and row.definition.recipe == "drv8833-dual-motor@6" for row in matches):
             continue
         vm = driver.ports.get("vm")
         sources = [

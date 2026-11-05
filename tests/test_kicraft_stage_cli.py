@@ -142,8 +142,10 @@ def test_catalog_inductor_requires_reviewed_identity_and_footprint_pair():
 def test_synthesis_failure_invalidates_freshness_only_after_emission(tmp_path, monkeypatch, started):
     from kicraft.design import cli_app
     from kicraft.design.models import ArtifactPaths, ConversationState
+    from kicraft.server.session import classify_build_failure
 
-    state_path = tmp_path / "state.json"
+    state_path = tmp_path / ".kicraft" / "state.json"
+    state_path.parent.mkdir()
     project = tmp_path / "project"
     receipt = project / ".kicraft" / "synthesis-generated.json"
     receipt.parent.mkdir(parents=True)
@@ -168,13 +170,14 @@ def test_synthesis_failure_invalidates_freshness_only_after_emission(tmp_path, m
     if started:
         assert state.artifacts.status == "failed"
         assert state.artifacts.fab_zip is None
-        summary = json.loads((tmp_path / "synthesis_check.json").read_text())
+        summary = json.loads((state_path.parent / "synthesis_check.json").read_text())
         assert summary["status"] == "failed"
-        assert summary["checks"][0]["report_path"] is None
+        # A native exception must not spend a provider call repairing the circuit.
+        assert classify_build_failure(tmp_path, rc=1).action == "none"
     else:
         assert state.artifacts.status == "ok"
         assert state.artifacts.fab_zip == project / "fab.zip"
-        assert not (tmp_path / "synthesis_check.json").exists()
+        assert not (state_path.parent / "synthesis_check.json").exists()
 
 
 def test_ambiguous_legacy_architecture_can_be_repaired_without_mutating_saved_state(tmp_path):

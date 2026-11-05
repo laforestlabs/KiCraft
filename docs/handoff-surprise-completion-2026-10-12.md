@@ -19,9 +19,9 @@ This is not the approved plan's separate fixed-six pilot. The two fresh
 full 60-brief arms remain **not measured**; diagnostic native boards and
 selected GUI winners must never be spliced into them.
 
-Pushed/deployed checkpoint `c438c37` includes the broad review repairs, qualified
-compact TLV62569 support, parent connector-datum/bank geometry and honest
-generation-only GUI captions. The previous checkpoints and failures are retained.
+Broad review checkpoint `c438c37` includes qualified compact TLV62569 support,
+parent connector-datum/bank geometry and honest generation-only GUI captions.
+The previous checkpoints and failures are retained.
 Coverage and execution evidence are under `coverage_assignments.json`, the
 per-finding reports and bounded verification receipts.
 
@@ -34,8 +34,44 @@ ADC operating-contract warning. The model chose external Hall inputs/ME6211,
 not the earlier onboard-Hall/TLV native diagnostic. All original 1150 files
 are unchanged. `live_gui_after97/run_01_record.json`, both final audit reports,
 `GUI1150_OUTCOME99.json`, and the actual GUI download/byte-match receipt
-`GUI1150_DOWNLOAD100_RECEIPT.json` preserve the first attempt. There are now
-**18 actual GUI submissions**, still no accepted GUI product.
+`GUI1150_DOWNLOAD100_RECEIPT.json` preserve the first attempt. Including Motor
+1151 there are **19 actual GUI submissions**, still no accepted GUI product.
+
+**The original Motor first attempt 1151 / KC-XT5V4Y fails**, not a gain.
+On deployed `e2e88b0`, the unchanged prompt reaches native synthesis but its
+reverse-blocked converter's private `raw_output` net is incorrectly looked up
+as a public port: `ValueError: driver_regulator: unproven bypass pin U3.3`.
+Both internal build attempts (361/362), the terminal state and all evidence
+remain intact. The two registered first attempts are therefore **0 / 2**,
+not replaceable by corrected diagnostics. Actual terminal priced spend and
+stored summary both equal **$0.013908494**, proving the inclusive-ledger fix
+on the live path; its temporary reservations settled with no new uncertainty.
+The consumer repair validates pin ownership against canonical recipe expansion,
+including instance-scoped nets, without changing the circuit or net labels.
+Unexpected native failures now retain their real cause instead of falsely
+reporting an ERC result. Integrated isolated regressions pass **128 / 128**.
+Cold `native_tail111` completes the zero-provider private whole path in 739.79s:
+real synthesis, frozen good/seed0 replay, 41/41 parts, 751 traces and 111 vias.
+Fresh all-severity DRC has **0 errors, 0 opens and 4 warnings**, not zero warnings.
+Independent fabrication passes with those warnings explicitly dispositioned;
+electrical remains **HOLD**, not a gain. The driver has no ≥10 µF ceramic
+directly on protected VM; C2's 100 nF is 7.337 mm from VM, and the charge-pump
+capacitor is 5.762/7.032 mm from VCP/VM. All prior seven constraints pass but
+none covers U1's bypass network. `AuditNative111Electrical_FINAL.json/md`,
+`AuditNative111Fabrication_FINAL.json/md` and `native111_FINAL_CUSTODY.json`
+preserve the complete failed electrical approach.
+
+`STRATEGY118_DRIVER_MANUFACTURER_SUPPORT.json` records the material repair:
+immutable driver `@6` adds exact qualified C385906/EMK316BB7226ML-T
+22 µF/16 V ceramic directly on VM/GND and exact-pin, unchanged 3 mm constraints
+for VM ceramic/100 nF, VINT and VCP; VCP returns to VM, not GND. Versions 1–5
+require actual architecture regeneration. **470 affected regressions pass**,
+including missing/upstream/100 nF/polarized replacement rejection. Actual
+source-owned architecture/BOM/wiring commits and native synthesis119 pass with
+**42 parts and all 11 bypass contracts**; original prompt, intent, functional
+specification, requirement ports and original1151 remain unchanged.
+New full native placement/routing/fabrication and independent acceptance are
+still pending; neither tests nor synthesis clears the electrical HOLD.
 
 The source-owned follow-up repairs both input/output LDO bypass ownership with
 immutable `@2` cutover, typed external ADC source obligations and native operating
@@ -114,26 +150,34 @@ Existing focused UI coverage passed 72 cases, and actual 1150 visibly retained
 its warnings under “Generation complete”. The real download button delivered
 4,438,370 bytes matching the retained original ZIP SHA256; successful download
 does not clear the electrical HOLD. Old 1149 correctly remains a stale preview,
-without rewriting its original state. New producer repairs are not yet deployed.
+without rewriting its original state. After the immutable LDO recipe cutover,
+actual GUI 1150 also correctly becomes a stale preview with no stale download;
+its original state hash remains unchanged.
 
-Long-lived production services are at **`c438c37`**, web **878140** and worker
-**878181**, after canonical deployment and health verification
-(`DEPLOY_c438c37_RECEIPT97.json`). Fresh subprocesses can read the current
-uncommitted checkout, so this is not a pristine old-source runtime.
-No additional paid job is admitted until whole-path proof, independent final
-artifact audits, terminal bounded verification, commit/push and idle canonical
-cutover. The original preregistered Motor first attempt is not submitted.
-Any corrected Hall GUI follow-up must be separately registered and must never
-replace 1150's first attempt or enter the primary measurement.
+Long-lived production services are at **`e2e88b06eb9588ee05543c8045c3e67272b3d780`**,
+web **902012** and worker **902060**, after commit/push and canonical deployment
+(`DEPLOY_e2e88b0_RECEIPT109.json`). The restart disclosed two transient local
+connection refusals; no zero-downtime claim is made. Fresh subprocesses can
+read the current uncommitted compiler/classification repair, so this is not a
+pristine committed-source runtime. The first Motor job is terminal.
+Any corrected Hall or Motor GUI follow-up needs separate changed-source
+registration/admission and must never replace either first attempt or enter
+the primary measurement. No further provider job is currently admitted.
 
 Disk admission protects **4 GiB** plus double expected remaining writes;
 every phase has bounded forecasts and protected original/failure/source evidence.
-At native101 termination (04:44 UTC), free space was **4,776,214,528 bytes**.
-Verified unused browser downloads recovered **666,329,088 actual filesystem
-bytes**; generated passing-fixture reclamation is separately receipted, including
-**189,583,360 bytes** in verification100. No production logs are truncated.
-Priced provider spend is **$0.308880208** plus **$0.071923564** unresolved
-exposure, conservatively **$0.380803772**. Actual 1150 inclusive ledger cost is
+At 06:00 UTC, an actual admission check refused new work with only about 26 MB
+above the protected floor. Installer caches proved too small to solve it.
+`CURRENT_KERNEL_DELETED_READER_RELEASE110_RESULT.json` records safely closing
+only this review kernel's idle read-only handle to an already-unlinked obsolete
+catalog inode: **390,782,976 actual filesystem bytes recovered**, no unlink,
+catalog refresh, production restart or named-catalog metadata change.
+Free space became **4,711,596,032 bytes** before subsequent bounded work.
+Gross actual reclamation through passing-fixture cleanup110 is
+**3,593,510,912 bytes**, including generated/reclaimed passing test fixtures;
+this is not a net initial-disk gain. No production logs are truncated.
+Priced provider spend is **$0.322788702** plus **$0.071923564** unresolved
+exposure, conservatively **$0.394712266**. Actual 1150 inclusive ledger cost is
 **$0.014793295**, not its original summary's $0.012270695; the original row is
 preserved, not backfilled. The $0.60/run and $12/session ceilings and lower
 production caps are unchanged; **$8** remains reserved for gated measurement.

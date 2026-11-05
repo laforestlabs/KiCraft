@@ -4917,7 +4917,7 @@ def _run_synth_with_freshness(state, state_path: Path, project_dir: Path, **kwar
     before = _synthesis_attempt_id(project_dir)
     try:
         return run_synth(state, project_dir, **kwargs)
-    except Exception:
+    except Exception as exc:
         after = _synthesis_attempt_id(project_dir)
         if after is not None and after != before:
             if state.artifacts is not None:
@@ -4929,7 +4929,8 @@ def _run_synth_with_freshness(state, state_path: Path, project_dir: Path, **kwar
                 _persist_artifacts(state, state_path, state.artifacts)
             _write_synthesis_check(
                 state_path, state.project_stem,
-                [CheckResult(name="9.12 ERC", ok=False, message="synthesis did not complete")],
+                [CheckResult(name="Native synthesis", ok=False,
+                             message=f"{type(exc).__name__}: {exc}")],
                 ok=False,
             )
             _write_build_gate(state_path, {

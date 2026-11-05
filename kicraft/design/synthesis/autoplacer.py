@@ -128,9 +128,12 @@ def _same_edge_connector_zones(refs, component_zones, placement):
 
 def _recipe_local_bypasses(architecture: Architecture, bom: BOM) -> list[dict]:
     """Resolve reviewed recipe pin contracts from selection, manifest and wiring."""
-    from kicraft.design.recipes.registry import get_recipe
+    from kicraft.design.recipes.registry import expand_recipe, get_recipe
 
-    actual = {(ep.ref, ep.pin): net.net_name for net in bom.connections for ep in net.endpoints}
+    actual = {}
+    for connection in bom.connections:
+        for endpoint in connection.endpoints:
+            actual.setdefault((endpoint.ref, endpoint.pin), []).append(connection.net_name)
     result = []
     for selection in architecture.recipe_selections:
         try:
@@ -152,7 +155,13 @@ def _recipe_local_bypasses(architecture: Architecture, bom: BOM) -> list[dict]:
                  and p.recipe_instance == selection.instance and p.resolution_source == "recipe"]
         if {p.ref for p in parts} != set(manifest.refs):
             raise ValueError(f"{selection.instance}: bypass recipe component ownership mismatch")
-        pins = {(p.ref, p.pin): p for p in manifest.pins}
+        # Re-expand the selected recipe through the producer, not the saved
+        # manifest: internal nets are instance-scoped by that same producer.
+        canonical = expand_recipe(selection)
+        canonical_roles = {p.recipe_role: p.ref for p in canonical.parts}
+        canonical_pins = {(p.ref, p.pin): p.net for p in canonical.ownership.pins}
+        ports = {port.name: port for port in definition.ports}
+        declared_nets = set(ports) | set(definition.internal_nets)
 
         def role_part(role):
             groups = [g for g in definition.parts if g.role == role]
@@ -181,14 +190,25 @@ def _recipe_local_bypasses(architecture: Architecture, bom: BOM) -> list[dict]:
                 raise ValueError(f"{selection.instance}: invalid reviewed bypass pins")
             for ref, numbers, logical in ((owner.ref, op, power), (owner.ref, og, ground),
                                            (cap.ref, cp, power), (cap.ref, cg, ground)):
-                net = selection.port_bindings.get(logical)
+                if logical not in declared_nets:
+                    raise ValueError(f"{selection.instance}: unknown bypass net {logical}")
+                port = ports.get(logical)
+                if (logical not in selection.port_bindings
+                        and logical not in definition.internal_nets
+                        and (port is None or not port.default_tie
+                             or not selection.port_bindings.get(port.default_tie))):
+                    raise ValueError(f"{selection.instance}: unbound bypass net {logical}")
+                role = owner.recipe_role if ref == owner.ref else cap.recipe_role
+                canonical_ref = canonical_roles.get(role)
                 for number in numbers:
-                    row = pins.get((ref, number))
+                    net = canonical_pins.get((canonical_ref, number))
+                    rows = [p for p in manifest.pins if (p.ref, p.pin) == (ref, number)]
+                    row = rows[0] if len(rows) == 1 else None
                     if (not net or row is None or row.owner != "recipe"
                             or row.owner_id != selection.recipe
                             or (row.requirement_id not in selection.requirement_ids
                                 if selection.requirement_ids else row.requirement_id is not None)
-                            or row.net != net or actual.get((ref, number)) != net):
+                            or row.net != net or actual.get((ref, number)) != [net]):
                         raise ValueError(f"{selection.instance}: unproven bypass pin {ref}.{number}")
             result.append({
                 "owner_ref": owner.ref, "bypass_ref": cap.ref,
