@@ -22,6 +22,7 @@ from kicraft.design.models import (
     RecipeResolutionRecord,
     STM32G030_ADC_SOURCE_MAX_OHM,
     RecipeSelection,
+    is_power_or_ground_name,
 )
 from kicraft.design.part_identity import (
     canonical_physical_features,
@@ -1409,8 +1410,67 @@ def _unowned_endpoint_diagnostics(
 
 def _external_adc_contracts(
     result: ResolutionResult, definitions: dict[str, RecipeDefinition],
+    existing_contracts: list[ExternalADCContract] | None = None,
+    power_nets: Iterable[str] = (),
 ) -> None:
-    """Bind exposed connector ports to reviewed STM32G030 ADC pin allocations."""
+    """Bind exposed ADC ports only when their signal has no onboard producer."""
+    existing = {
+        (row.connector_requirement, row.connector_port, row.net)
+        for row in existing_contracts or ()
+    }
+    outputs: dict[str, set[str]] = defaultdict(set)
+    for producer in result.selections:
+        for port in definitions[producer.recipe].ports:
+            if port.direction == "output" and port.name in producer.port_bindings:
+                outputs[producer.port_bindings[port.name]].add(
+                    f"recipe {producer.instance}.{port.name} ({producer.recipe})"
+                )
+    lowerers = {
+        family: lowerer
+        for lowerer in registered_lowerers()
+        for family in lowerer.families
+    }
+    for producer in result.requirements:
+        lowerer = lowerers.get(producer.family)
+        if producer.role == "connector" or lowerer is None:
+            continue
+        for port, net in producer.ports.items():
+            if lowerer_port_direction(lowerer, port) == "output":
+                outputs[net].add(f"lowerer {producer.id}.{port}")
+    for producer in result.requirements:
+        if producer.role == "connector" or producer.declared_interface is None:
+            continue
+        for port in producer.declared_interface.ports:
+            if port.direction == "output" and port.key in producer.ports:
+                outputs[producer.ports[port.key]].add(
+                    f"requirement {producer.id}.{port.key}"
+                )
+    adc_nets = {
+        allocation.net for selection in result.selections
+        if definitions[selection.recipe].exact_part in {"STM32G030F6P6", "STM32G030K6T6"}
+        for allocation in selection.pin_allocations if allocation.capability == "adc"
+    }
+    rails = set(power_nets)
+    for connector in result.requirements:
+        sources = [row for row in connector.obligations if row.kind == "external_analog_source"]
+        if connector.role != "connector" or not sources:
+            continue
+        for port, net in connector.ports.items():
+            if net in adc_nets or net in rails or is_power_or_ground_name(net):
+                continue
+            if outputs.get(net):
+                result.blocking.append(ResolutionDiagnostic(
+                    code="external_analog_driver_ownership_conflict",
+                    requirement_id=connector.id, sheet=connector.sheet,
+                    message=(
+                        f"External analog source at connector {connector.id}.{port} "
+                        f"on net {net!r} conflicts with an onboard output. Remove the "
+                        "competing driver or reconcile the original source contract."
+                    ),
+                    evidence=sorted(outputs[net]) + [
+                        f"source_obligation={row.original_obligation_id}" for row in sources
+                    ],
+                ))
     for selection in result.selections:
         definition = definitions[selection.recipe]
         if definition.exact_part not in {"STM32G030F6P6", "STM32G030K6T6"}:
@@ -1424,6 +1484,53 @@ def _external_adc_contracts(
                 continue
             for connector in result.requirements:
                 if connector.role != "connector" or allocation.net not in connector.ports.values():
+                    continue
+                sources = [row for row in connector.obligations if row.kind == "external_analog_source"]
+                for port, net in connector.ports.items():
+                    if net != allocation.net:
+                        continue
+                    declared = next(
+                        (row for row in connector.declared_interface.ports if row.key == port),
+                        None,
+                    ) if connector.declared_interface else None
+                    committed = (connector.id, port, net) in existing
+                    if declared and declared.direction == "output" and (sources or committed):
+                        result.blocking.append(ResolutionDiagnostic(
+                            code="external_adc_scope_conflict",
+                            requirement_id=connector.id, sheet=connector.sheet,
+                            message=(
+                                f"Connector {connector.id}.{port} on net {net!r} is declared "
+                                "as an output but also has a committed external ADC source "
+                                "contract. Preserve and reconcile the original interface."
+                            ),
+                            evidence=[row.original_obligation_id for row in sources],
+                        ))
+                    if declared and declared.direction == "output" and not sources and not committed:
+                        # An explicitly declared monitor is not an external source.
+                        continue
+                    if outputs.get(net):
+                        result.blocking.append(ResolutionDiagnostic(
+                            code="external_adc_driver_ownership_conflict",
+                            requirement_id=connector.id, sheet=connector.sheet,
+                            message=(
+                                f"Connector {connector.id}.{port} on net {net!r} is an "
+                                "external ADC input (or has ambiguous scope), but an onboard "
+                                "output also drives that net. Remove the competing producer "
+                                "for an external input, or explicitly declare a genuine "
+                                "onboard monitor output without an external-source contract."
+                            ),
+                            evidence=sorted(outputs[net]) + [
+                                f"source_obligation={row.original_obligation_id}" for row in sources
+                            ],
+                        ))
+                if outputs.get(allocation.net):
+                    continue
+                if connector.declared_interface and all(
+                    any(p.key == key and p.direction == "output"
+                        for p in connector.declared_interface.ports)
+                    and not sources and (connector.id, key, net) not in existing
+                    for key, net in connector.ports.items() if net == allocation.net
+                ):
                     continue
                 stated = [
                     row for row in connector.obligations
@@ -1490,6 +1597,18 @@ def _external_adc_contracts(
                         "requirements and calibrate after power-up as recommended. Firmware to "
                         "configure this is not provided; no rate or accuracy is promised (defaulted)."
                     )
+    for prior in existing_contracts or ():
+        if prior not in result.external_adc_contracts:
+            result.blocking.append(ResolutionDiagnostic(
+                code="external_adc_contract_not_preserved",
+                requirement_id=prior.connector_requirement,
+                message=(
+                    f"Committed external ADC contract {prior.connector_requirement}."
+                    f"{prior.connector_port} on net {prior.net!r} cannot be reproduced "
+                    "unchanged. Reconcile the upstream interface rather than dropping it."
+                ),
+                evidence=list(prior.source_obligation_ids),
+            ))
 
 
 
@@ -2785,7 +2904,9 @@ def resolve_architecture_recipes(
     resolved_requirements = {row.id: row for row in result.requirements}
     result.requirements = [resolved_requirements.get(row.id, row) for row in requirements]
     _bind_analog_adc_limits(result, definitions, architecture_model.rail_voltages)
-    _external_adc_contracts(result, definitions)
+    _external_adc_contracts(
+        result, definitions, architecture_model.external_adc_contracts, architecture_model.power_nets,
+    )
     result.records.sort(key=lambda record: record.requirement_id)
     selected_requirement_ids = {
         requirement_id

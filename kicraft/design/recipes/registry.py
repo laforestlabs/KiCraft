@@ -169,7 +169,9 @@ def migrate_recipe_selection(value: object) -> RecipeSelection:
     if replacement is not None and (
         selection.recipe.startswith("drv8833-dual-motor@")
         or selection.recipe in {
-            "tlv62569-3v3@1", "tlv62569-3v3@2", "stm32g030k6t6-minimal@1",
+            "tlv62569-3v3@1", "tlv62569-3v3@2",
+            "stm32g030f6p6-minimal@1", "stm32g030k6t6-minimal@1",
+            "stm32g030k6t6-minimal@2",
             "me6211-3v3@1", "mcp1700-3v3@1", "ams1117-3v3@1",
         }
     ):

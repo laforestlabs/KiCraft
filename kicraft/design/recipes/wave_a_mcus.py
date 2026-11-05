@@ -1076,7 +1076,7 @@ _ATTINY1604_DATASHEET = (
 
 
 STM32G030F6P6_MINIMAL = RecipeDefinition(
-    recipe="stm32g030f6p6-minimal@1",
+    recipe="stm32g030f6p6-minimal@2",
     family="stm32g0",
     exact_part="STM32G030F6P6",
     default_for_family=False,
@@ -1193,6 +1193,12 @@ STM32G030F6P6_MINIMAL = RecipeDefinition(
             "max_mm": 3.0,
         })
         for role in ("local_decoupling", "bulk_decoupling")
+    ) + (
+        # Conservative engineering locality bound, not a numerical ST mandate.
+        PlacementConstraint(kind="owned_bypass", role="reset_capacitor", parameters={
+            "anchor_role": "mcu", "power_net": "nrst", "ground_net": "gnd",
+            "max_mm": 3.0,
+        }),
     ),
     electrical_assertions=(
         Assertion(code="stm32g0_supply_3v3", message="STM32G030F6P6 VDD/VDDA is a 3.3 V rail within its 2.0–3.6 V operating range"),
@@ -1210,7 +1216,7 @@ STM32G030F6P6_MINIMAL = RecipeDefinition(
 # from the F6 TSSOP: notably SWD and I2C are on different contacts.
 _STM32G030K6T6_DATASHEET = "https://www.st.com/resource/en/datasheet/stm32g030k8.pdf"
 STM32G030K6T6_MINIMAL = STM32G030F6P6_MINIMAL.model_copy(update={
-    "recipe": "stm32g030k6t6-minimal@2",
+    "recipe": "stm32g030k6t6-minimal@3",
     "exact_part": "STM32G030K6T6",
     "default_for_family": True,
     "protected_aliases": ("STM32G0", "STM32G030"),
@@ -1804,7 +1810,7 @@ def expand_wave_a_mcu(resolved):
         for port, pin in definition.fixed_port_pins.items():
             if port in bindings and pin not in allocated_pins:
                 pins.append(Pin(role="mcu", pin=pin, net=port))
-    if definition.recipe in {"stm32g030f6p6-minimal@1", "stm32g030k6t6-minimal@2", "attiny1604-ssn-minimal@1"}:
+    if definition.recipe in {"stm32g030f6p6-minimal@2", "stm32g030k6t6-minimal@3", "attiny1604-ssn-minimal@1"}:
         i2c_ports = {"i2c_scl", "i2c_sda"}
         bound_i2c = i2c_ports.intersection(bindings)
         ads_enabled = resolved.parameters.get("adc_expansion") == "ads1115x2"

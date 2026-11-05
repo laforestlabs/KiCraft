@@ -310,7 +310,7 @@ def _usb_bridge_artifact(defect=None):
              "usb_dm": "USB_DM", "tx": "HOST_TO_MCU", "rx": "MCU_TO_HOST"},
         ),
         (
-            "stm32g030f6p6-minimal@1", "mcu", {"mcu": "MCU"},
+            "stm32g030f6p6-minimal@2", "mcu", {"mcu": "MCU"},
             {"vdd": "+3V3", "gnd": "GND", "uart_rx": "HOST_TO_MCU", "uart_tx": "MCU_TO_HOST"},
         ),
     ]

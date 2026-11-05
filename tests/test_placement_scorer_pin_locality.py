@@ -136,7 +136,7 @@ def test_owned_bypasses_follow_their_own_ic_on_a_shared_rail():
 
 
 @pytest.mark.parametrize("recipe", [
-    "stm32g030f6p6-minimal@1", "stm32g030k6t6-minimal@2",
+    "stm32g030f6p6-minimal@2", "stm32g030k6t6-minimal@3",
 ])
 def test_stm32g0_local_bypass_does_not_excuse_distant_bulk_capacitor(recipe):
     from types import SimpleNamespace
@@ -158,12 +158,18 @@ def test_stm32g0_local_bypass_does_not_excuse_distant_bulk_capacitor(recipe):
     owner = _ic(owner_ref, 20, 20.5, [
         _pad(owner_ref, "4", 23, 20, "+3V3"),
         _pad(owner_ref, "5", 23, 21, "GND"),
+        _pad(owner_ref, "6", 23, 22, next(
+            pin.net for pin in expansion.ownership.pins
+            if pin.ref == owner_ref and pin.pin == "6")),
     ])
     caps = []
-    for role, x in (("local_decoupling", 25), ("bulk_decoupling", 70)):
+    reset_net = next(pin.net for pin in expansion.ownership.pins
+                     if pin.ref == owner_ref and pin.pin == "6")
+    for role, x in (("local_decoupling", 25), ("bulk_decoupling", 70),
+                    ("reset_capacitor", 80)):
         ref = roles[role]
         caps.append(_cap(ref, x, 20.5, [
-            _pad(ref, "1", x, 20, "+3V3"),
+            _pad(ref, "1", x, 20, reset_net if role == "reset_capacitor" else "+3V3"),
             _pad(ref, "2", x, 21, "GND"),
         ]))
     state = _state([owner, *caps])
@@ -177,8 +183,105 @@ def test_stm32g0_local_bypass_does_not_excuse_distant_bulk_capacitor(recipe):
     owner_pads = {pad.pad_id: pad for pad in state.components[owner_ref].pads}
     for cap in caps:
         pads = {pad.pad_id: pad for pad in state.components[cap.ref].pads}
-        assert owner_pads["4"].pos.dist(pads["1"].pos) <= 3
+        anchor_pin = "6" if cap.ref == roles["reset_capacitor"] else "4"
+        assert owner_pads[anchor_pin].pos.dist(pads["1"].pos) <= 3
         assert owner_pads["5"].pos.dist(pads["2"].pos) <= 3
+
+
+@pytest.mark.parametrize(("recipe", "part", "x", "ys", "width", "height"), [
+    ("stm32g030f6p6-minimal@2", "STM32G030F6P6", -2.8625,
+     (-0.975, -0.325, 0.325), 7.75, 7.05),
+    ("stm32g030k6t6-minimal@3", "STM32G030K6T6", -4.175,
+     (-0.4, 0.4, 1.2), 10.41, 10.41),
+])
+@pytest.mark.parametrize("bound_reset", [False, True])
+def test_stm32_reset_owned_pin_pair_compiles_and_places_native_geometry(
+        recipe, part, x, ys, width, height, bound_reset):
+    from types import SimpleNamespace
+
+    from kicraft.autoplacer.brain.placement_solver import PlacementSolver
+    from kicraft.design.models import BOM, RecipeSelection
+    from kicraft.design.recipes.registry import expand_recipe
+    from kicraft.design.synthesis.autoplacer import _recipe_local_bypasses
+
+    ports = {"vdd": "+3V3", "gnd": "GND"}
+    if bound_reset:
+        ports["nrst"] = "HOST_RESET"
+    selection = RecipeSelection(recipe=recipe, instance="core",
+                                sheets={"mcu": "MCU"}, port_bindings=ports)
+    expansion = expand_recipe(selection)
+    bom = BOM(parts=expansion.parts, connections=expansion.connections,
+              recipe_ownership=[expansion.ownership])
+    roles = {p.recipe_role: p for p in expansion.parts}
+    assert roles["mcu"].mpn == part
+    assert roles["reset_capacitor"].value == "100nF"
+    rules = _recipe_local_bypasses(SimpleNamespace(recipe_selections=[selection]), bom)
+    assert len(rules) == 3
+    by_ref = {rule["bypass_ref"]: rule for rule in rules}
+    for role, pin in (("local_decoupling", "4"), ("bulk_decoupling", "4"),
+                      ("reset_capacitor", "6")):
+        rule = by_ref[roles[role].ref]
+        assert rule == {"owner_ref": roles["mcu"].ref, "bypass_ref": roles[role].ref,
+                        "power_pins": [pin, "1"], "ground_pins": [["5"], "2"],
+                        "max_distance_mm": 3.0}
+
+    owner_ref = roles["mcu"].ref
+    cap_ref = roles["reset_capacitor"].ref
+    reset_net = next(p.net for p in expansion.ownership.pins
+                     if p.ref == owner_ref and p.pin == "6")
+    if bound_reset:
+        assert reset_net == "HOST_RESET"
+    else:
+        assert reset_net not in ("+3V3", "GND", "HOST_RESET")
+    # KiCad TSSOP/LQFP pin centers and courtyard bounding extents; 0603 courtyard.
+    owner = Component(
+        ref=owner_ref, value=part, pos=Point(30, 30), rotation=0, layer=Layer.FRONT,
+        width_mm=width, height_mm=height, kind="ic", body_center=Point(30, 30),
+        pads=[_pad(owner_ref, pin, 30 + x, 30 + y, net)
+              for pin, y, net in zip(("4", "5", "6"), ys, ("+3V3", "GND", reset_net))],
+    )
+    cap = Component(
+        ref=cap_ref, value="100nF", pos=Point(70, 30), rotation=0, layer=Layer.FRONT,
+        width_mm=3.01, height_mm=1.51, kind="passive", body_center=Point(70, 30),
+        pads=[_pad(cap_ref, "1", 69.225, 30, reset_net),
+              _pad(cap_ref, "2", 70.775, 30, "GND")],
+    )
+    state = _state([owner, cap])
+    PlacementSolver(state, {"local_bypasses": [by_ref[cap_ref]],
+                            "legality_clearance_mm": 0.2})._place_local_bypasses(state.components)
+    owner_pads = {p.pad_id: p for p in state.components[owner_ref].pads}
+    cap_pads = {p.pad_id: p for p in state.components[cap_ref].pads}
+    assert owner_pads["6"].pos.dist(cap_pads["1"].pos) <= 3
+    assert owner_pads["5"].pos.dist(cap_pads["2"].pos) <= 3
+    owner_min, owner_max = state.components[owner_ref].bbox(0.1)
+    cap_min, cap_max = state.components[cap_ref].bbox(0.1)
+    assert (owner_max.x <= cap_min.x + 1e-9 or cap_max.x <= owner_min.x + 1e-9
+            or owner_max.y <= cap_min.y + 1e-9 or cap_max.y <= owner_min.y + 1e-9)
+
+
+@pytest.mark.parametrize(("old", "new"), [
+    ("stm32g030f6p6-minimal@1", "stm32g030f6p6-minimal@2"),
+    ("stm32g030k6t6-minimal@1", "stm32g030k6t6-minimal@3"),
+    ("stm32g030k6t6-minimal@2", "stm32g030k6t6-minimal@3"),
+])
+def test_stm32_old_ownership_requires_real_regeneration(old, new):
+    from kicraft.design.models import RecipeSelection
+    from kicraft.design.recipe_versions import legacy_recipe_replacement
+    from kicraft.design.recipes.registry import expand_recipe, migrate_recipe_selection
+    from kicraft.design.stage_state import legacy_recipe_resume_stage
+
+    saved = RecipeSelection(recipe=old, instance="core", sheets={"mcu": "MCU"},
+                            port_bindings={"vdd": "+3V3", "gnd": "GND"})
+    assert legacy_recipe_replacement(old) == new
+    with pytest.raises(ValueError, match="architecture regeneration"):
+        migrate_recipe_selection(saved)
+    with pytest.raises(ValueError, match="architecture regeneration"):
+        expand_recipe(saved)
+    assert saved.recipe == old
+    assert legacy_recipe_resume_stage({
+        "architecture": {"recipe_selections": [saved.model_dump()]}, "bom": {"parts": []},
+    }) == "architecture"
+    assert legacy_recipe_resume_stage({"bom": {"recipe_ownership": [{"recipe": old}]}}) == "bom"
 
 
 def test_buck_input_capacitor_cannot_remain_far_from_its_actual_supply_pins():

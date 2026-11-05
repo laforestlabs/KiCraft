@@ -712,12 +712,16 @@ Recovery BOOT/RESET controls do not replace requested user buttons. A generated
 board still needs its own routing, manufacturing exports and independent audit.
 
 Generic `STM32G0`/`STM32G030` requests use the reviewed
-`stm32g030k6t6-minimal@2` LQFP-32 construction (C529331). Its supply pair,
-reset/boot/SWD network and ADC/GPIO allocation are package-specific; the stock
-symbol's no-connect contacts 19/21 remain unused. Exact or saved
-`STM32G030F6P6` TSSOP-20 selections stay F6 rather than being relabelled or
-silently migrated. This is manufacturer/nominal library qualification, not an
-independent acceptance of a newly generated board.
+`stm32g030k6t6-minimal@3` LQFP-32 construction (C529331). Exact
+`STM32G030F6P6` requests use `stm32g030f6p6-minimal@2` TSSOP-20 rather than
+being relabelled K6. Both constructions own supply and NRST bypass placement:
+each capacitor terminal must be within 3 mm of its corresponding MCU pad.
+The reset limit is a conservative engineering bound implementing ST's
+close-placement guidance, not a numerical manufacturer specification. The K6
+symbol's no-connect contacts 19/21 remain unused. Earlier F6/K6 recipe versions
+require real architecture/BOM regeneration; saved selections are not silently
+relabelled. These are construction constraints, not independent acceptance
+of a newly generated board.
 
 Direct external ADC inputs on the reviewed STM32G030 F6/K6 constructions carry
 source-owned connector/net/pin and supply/reference bindings into architecture
@@ -734,6 +738,13 @@ source limits above 2 V are conservatively refused against the MCU operating
 minimum, not because the regulated rail normally falls to 2 V. Original-prose
 extraction is not guaranteed; independent original-requirements audit remains
 necessary.
+
+External-input contracts also require exclusive signal ownership. An onboard
+sensor or other active output cannot share an externally driven ADC input net;
+both architecture resolution and the composed wired graph check this.
+An explicitly scoped onboard-sensor monitor output is different from an external
+sensor input. Previously committed external-input contracts cannot be dropped
+or relabelled as monitors to make a contradictory circuit pass.
 
 An exact reviewed ordering code in a requirement's family field selects its
 existing native construction and canonical family, rather than a model-owned

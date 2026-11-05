@@ -1174,6 +1174,53 @@ def _nets_by_ref(bom):
     return out
 
 
+def check_external_adc_driver_ownership(architecture, bom) -> CheckResult:
+    """Check the wired graph, including model-owned parts, against external sources."""
+    info, _ = _pin_info_by_ref(bom)
+    parts = {part.ref: part for part in bom.parts if part.assembly}
+    drivers: dict[str, set[str]] = defaultdict(set)
+    for connection in bom.connections:
+        for endpoint in connection.endpoints:
+            part = parts.get(endpoint.ref)
+            if part is None:
+                continue
+            pin = info.get(endpoint.ref, {}).get(endpoint.pin, {})
+            if pin.get("type") in {"output", "power_out", "open_collector", "open_emitter"}:
+                drivers[connection.net_name].add(
+                    f"{endpoint.ref}.{endpoint.pin} ({part.value or part.symbol}, "
+                    f"{pin.get('name') or pin.get('type')})"
+                )
+    sources = {
+        (row.connector_requirement, row.connector_port, row.net)
+        for row in architecture.external_adc_contracts
+    }
+    rails = set(architecture.power_nets)
+    for connector in architecture.requirements:
+        if connector.role != "connector" or not any(
+            row.kind == "external_analog_source" for row in connector.obligations
+        ):
+            continue
+        sources.update(
+            (connector.id, port, net) for port, net in connector.ports.items()
+            if net not in rails and not is_power_or_ground_name(net)
+        )
+    bad = []
+    for connector, port, net in sorted(sources):
+        for driver in sorted(drivers.get(net, ())):
+            bad.append(
+                f"{connector}.{port} on net {net!r}: external analog source "
+                f"conflicts with onboard driver {driver}"
+            )
+    return CheckResult(
+        name="external analog driver ownership",
+        ok=not bad,
+        message=("external analog source nets have no onboard output driver" if not bad
+                 else "external analog source shares a net with an onboard output; "
+                      "remove the competing driver or reconcile the upstream interface"),
+        offenders=bad,
+    )
+
+
 # ---------- §9.15 topology-safe offender context (KC-VKUT5H A1) ----------
 #
 # A bare "net X wires only REF.PIN" sentence did not let the wiring stage fix
@@ -5998,6 +6045,8 @@ def collect_validations(
         results.append(check_single_net_per_pin(bom))
         results.append(check_family_wiring_contracts(bom))
         results.append(check_mcu_programming_access(bom, architecture))
+        if architecture is not None:
+            results.append(check_external_adc_driver_ownership(architecture, bom))
         results.append(
             check_connectivity(
                 project_dir,
@@ -6644,6 +6693,7 @@ def check_composed_wiring(
     if architecture is not None:
         checks.extend([
             check_inter_sheet_nets_realized(architecture, bom),
+            check_external_adc_driver_ownership(architecture, bom),
             check_typed_led_current_paths(architecture, bom),
             check_reviewed_input_operating_ranges(architecture, bom),
             check_reviewed_analog_input_ranges(architecture, bom),

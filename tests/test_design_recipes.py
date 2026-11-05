@@ -5517,7 +5517,7 @@ def _mcu_recipe_nets(expansion):
 
 
 def test_stm32g030_complete_artifact_has_swd_reset_boot_and_bypass():
-    definition = get_recipe("stm32g030f6p6-minimal@1")
+    definition = get_recipe("stm32g030f6p6-minimal@2")
     expansion = expand_recipe(
         RecipeSelection(
             recipe=definition.recipe,
@@ -5559,8 +5559,8 @@ def test_stm32g030k6_native_graph_and_four_adc_resources():
     from kicraft.design.recipes.pin_allocator import allocate_requirement_pins
     from kicraft.design.part_identity import reviewed_part
 
-    definition = get_recipe("stm32g030k6t6-minimal@2")
-    f6 = get_recipe("stm32g030f6p6-minimal@1")
+    definition = get_recipe("stm32g030k6t6-minimal@3")
+    f6 = get_recipe("stm32g030f6p6-minimal@2")
     assert sum("adc" in pin.capabilities for pin in definition.allocatable_pins) == 14
     assert sum("adc" in pin.capabilities for pin in f6.allocatable_pins) == 8
     assert {"19", "21"}.isdisjoint({pin.pin for pin in definition.allocatable_pins})
@@ -5617,6 +5617,7 @@ def test_stm32g030k6_native_graph_and_four_adc_resources():
 
 def test_stm32g0_family_resolution_preserves_exact_and_saved_f6():
     from kicraft.design.part_identity import matches_part_identity
+    from kicraft.design.stage_state import legacy_recipe_resume_stage
     from kicraft.design.recipes.resolver import resolve_architecture_recipes
 
     payload = {
@@ -5641,7 +5642,11 @@ def test_stm32g0_family_resolution_preserves_exact_and_saved_f6():
                 if part.recipe_role == "mcu").footprint == "Package_SO:TSSOP-20_4.4x6.5mm_P0.65mm"
     saved = RecipeSelection(recipe="stm32g030f6p6-minimal@1", instance="old",
                             sheets={"mcu": "MCU"}, port_bindings={"vdd": "+3V3", "gnd": "GND"})
-    assert next(part for part in expand_recipe(saved).parts if part.recipe_role == "mcu").mpn == "STM32G030F6P6"
+    with pytest.raises(ValueError):
+        expand_recipe(saved)
+    assert legacy_recipe_resume_stage({
+        "architecture": {"recipe_selections": [saved.model_dump()]},
+    }) == "architecture"
     assert not matches_part_identity("STM32G030F6P6", "STM32G030K6T6")
 
 
@@ -5680,7 +5685,7 @@ def test_stm32g030_mux_allocator_reserves_only_bound_documented_peripherals():
     from kicraft.design.models import CircuitRequirement
     from kicraft.design.recipes.pin_allocator import allocate_requirement_pins
 
-    definition = get_recipe("stm32g030f6p6-minimal@1")
+    definition = get_recipe("stm32g030f6p6-minimal@2")
     adc_ports = {f"adc_{index}": f"ADC_{index}" for index in range(8)}
     direct = CircuitRequirement(
         id="g0", sheet="MCU", role="mcu_core", family="stm32g0",
@@ -5726,8 +5731,8 @@ def test_attiny1604_mux_and_updi_boundaries_are_explicit():
 @pytest.mark.parametrize(
     "recipe,expected_pins",
     [
-        ("stm32g030f6p6-minimal@1", {"i2c_scl": "1", "i2c_sda": "2"}),
-        ("stm32g030k6t6-minimal@2", {"i2c_scl": "32", "i2c_sda": "1"}),
+        ("stm32g030f6p6-minimal@2", {"i2c_scl": "1", "i2c_sda": "2"}),
+        ("stm32g030k6t6-minimal@3", {"i2c_scl": "32", "i2c_sda": "1"}),
         ("attiny1604-ssn-minimal@1", {"i2c_scl": "13", "i2c_sda": "12"}),
     ],
 )
@@ -5757,7 +5762,7 @@ def test_new_mcu_i2c_artifact_owns_one_pullup_per_documented_line(recipe, expect
     }
 
 
-@pytest.mark.parametrize("recipe", ["stm32g030f6p6-minimal@1", "stm32g030k6t6-minimal@2", "attiny1604-ssn-minimal@1"])
+@pytest.mark.parametrize("recipe", ["stm32g030f6p6-minimal@2", "stm32g030k6t6-minimal@3", "attiny1604-ssn-minimal@1"])
 def test_new_mcu_conditional_ads1115_pair_has_distinct_addresses_and_eight_endpoints(recipe):
     expansion = expand_recipe(
         RecipeSelection(
@@ -5779,7 +5784,7 @@ def test_new_mcu_conditional_ads1115_pair_has_distinct_addresses_and_eight_endpo
     )
 
 
-@pytest.mark.parametrize("recipe", ["stm32g030f6p6-minimal@1", "stm32g030k6t6-minimal@2", "attiny1604-ssn-minimal@1"])
+@pytest.mark.parametrize("recipe", ["stm32g030f6p6-minimal@2", "stm32g030k6t6-minimal@3", "attiny1604-ssn-minimal@1"])
 def test_new_mcu_conditional_mcp23017_owns_sixteen_explicit_outputs(recipe):
     expansion = expand_recipe(
         RecipeSelection(
@@ -5798,7 +5803,7 @@ def test_new_mcu_i2c_rejects_single_wire_pseudo_bus():
     with pytest.raises(ValueError, match="requires both i2c_scl and i2c_sda"):
         expand_recipe(
             RecipeSelection(
-                recipe="stm32g030f6p6-minimal@1",
+                recipe="stm32g030f6p6-minimal@2",
                 instance="bad_i2c",
                 sheets={"mcu": "MCU"},
                 port_bindings={"vdd": "+3V3", "gnd": "GND", "i2c_scl": "I2C_SCL"},
@@ -6394,3 +6399,203 @@ def test_reset_control_explicit_conflict_and_unknown_mcu_fail_closed():
             get_recipe("attiny402-updi-minimal@1"), neutral,
             required_reset_controls=controls,
         )
+
+
+def _adc_ownership_fixture(*, onboard=False, monitor=False, typed_source=False):
+    """Four-channel 1152-shaped connector/ADC graph, with optional producers."""
+    from kicraft.design.models import CircuitRequirement
+    from kicraft.design.recipes.resolver import ResolutionResult, _external_adc_contracts
+    from kicraft.design.recipes.wave_a_mcus import STM32G030K6T6_MINIMAL
+    from kicraft.design.recipes.wave_f_sensing import AH49ENTR_G1_ANALOG_HALL
+
+    mcu = RecipeSelection(
+        recipe=STM32G030K6T6_MINIMAL.recipe, instance="mcu", sheets={"mcu": "MCU"},
+        port_bindings={"vdd": "+3V3", "gnd": "GND", **{
+            f"adc_{i}": f"HALL_{i + 1}" for i in range(4)
+        }},
+        pin_allocations=[
+            {"net": f"HALL_{i + 1}", "pin": str(i + 7), "capability": "adc"}
+            for i in range(4)
+        ],
+    )
+    connectors = [
+        CircuitRequirement(
+            id=f"terminal{i}", sheet="CONNECTORS", role="connector", family="screw-terminal",
+            ports={"positive": f"HALL_{i}", "negative": "GND"},
+            declared_interface={"ports": [
+                {"key": "positive", "direction": "output" if monitor else "passive",
+                 "function": "signal monitor" if monitor else "sensor signal", "pin": "1"},
+                {"key": "negative", "direction": "passive", "function": "return", "pin": "2"},
+            ]},
+            obligations=([{"kind": "external_analog_source",
+                           "original_obligation_id": f"source-{i}"}] if typed_source else []),
+        )
+        for i in range(1, 5)
+    ]
+    selections = [mcu]
+    definitions = {mcu.recipe: STM32G030K6T6_MINIMAL}
+    if onboard:
+        definitions[AH49ENTR_G1_ANALOG_HALL.recipe] = AH49ENTR_G1_ANALOG_HALL
+        selections.extend(
+            RecipeSelection(
+                recipe=AH49ENTR_G1_ANALOG_HALL.recipe, instance=f"sensor{i}",
+                sheets={"sensor": "SENSORS"},
+                port_bindings={"vdd": "+3V3", "gnd": "GND", "out": f"HALL_{i}"},
+            )
+            for i in range(1, 5)
+        )
+    result = ResolutionResult(requirements=connectors, selections=selections)
+    _external_adc_contracts(result, definitions)
+    return result, definitions
+
+
+def test_external_adc_rejects_four_onboard_driver_conflicts_and_keeps_source_facts():
+    result, _ = _adc_ownership_fixture(onboard=True, typed_source=True)
+    conflicts = [row for row in result.blocking
+                 if row.code == "external_adc_driver_ownership_conflict"]
+    assert len(conflicts) == 4
+    for i, conflict in enumerate(conflicts, 1):
+        assert conflict.requirement_id == f"terminal{i}"
+        assert f"HALL_{i}" in conflict.message
+        assert any(f"sensor{i}.out" in item for item in conflict.evidence)
+        assert result.requirements[i - 1].obligations[0].original_obligation_id == f"source-{i}"
+    assert not result.external_adc_contracts
+    ambiguous, _ = _adc_ownership_fixture(onboard=True)
+    assert len([row for row in ambiguous.blocking
+                if row.code == "external_adc_driver_ownership_conflict"]) == 4
+
+
+def test_external_adc_accepts_external_only_and_explicit_onboard_monitor():
+    external, _ = _adc_ownership_fixture(typed_source=True)
+    assert not external.blocking
+    assert [row.source_obligation_ids for row in external.external_adc_contracts] == [
+        [f"source-{i}"] for i in range(1, 5)
+    ]
+    monitor, _ = _adc_ownership_fixture(onboard=True, monitor=True)
+    assert not monitor.blocking
+    assert not monitor.external_adc_contracts
+    contradictory, _ = _adc_ownership_fixture(onboard=True, monitor=True, typed_source=True)
+    assert any(row.code == "external_adc_scope_conflict" for row in contradictory.blocking)
+
+
+def test_external_adc_refuses_relabel_of_preexisting_contract():
+    from kicraft.design.recipes.resolver import _external_adc_contracts
+
+    external, _ = _adc_ownership_fixture()
+    monitor, definitions = _adc_ownership_fixture(onboard=True, monitor=True)
+    _external_adc_contracts(monitor, definitions, external.external_adc_contracts)
+    assert any(row.code == "external_adc_scope_conflict" for row in monitor.blocking)
+    assert any(row.code == "external_adc_contract_not_preserved" for row in monitor.blocking)
+
+
+def test_external_adc_graph_gate_includes_model_owned_driver_and_not_passive_or_input(monkeypatch):
+    from kicraft.design.models import Architecture, BomPart, NetConnection
+    from kicraft.design.synthesis import validation
+
+    result, _ = _adc_ownership_fixture()
+    architecture = Architecture(
+        sheets=[{"name": "SENSORS", "stem": "SENSORS", "function": "Acquisition"}],
+        power_nets=["GND"], inter_sheet_nets=[],
+        external_adc_contracts=result.external_adc_contracts,
+    )
+    parts = [
+        BomPart(ref=ref, value=ref, symbol=f"Example:{ref}", footprint="Test:Test", sheet="SENSORS")
+        for ref in ("U1", "U2", "R1", "U3")
+    ]
+    bom = BOM.model_construct(parts=parts, connections=[
+        NetConnection(net_name="HALL_1", sheet="SENSORS", endpoints=[
+            {"ref": "U1", "pin": "1"}, {"ref": "U2", "pin": "1"},
+            {"ref": "R1", "pin": "1"},
+        ]),
+        NetConnection(net_name="BUFFER_OUT", sheet="SENSORS", endpoints=[{"ref": "U3", "pin": "1"}]),
+    ])
+    monkeypatch.setattr(validation, "_pin_info_by_ref", lambda _: ({
+        "U1": {"1": {"type": "output", "name": "OUT"}},
+        "U2": {"1": {"type": "input", "name": "IN"}},
+        "R1": {"1": {"type": "passive", "name": "~"}},
+        "U3": {"1": {"type": "output", "name": "OUT"}},
+    }, {}))
+    check = validation.check_external_adc_driver_ownership(architecture, bom)
+    assert not check.ok and len(check.offenders) == 1
+    assert all(token in check.offenders[0] for token in ("terminal1.positive", "HALL_1", "U1.1"))
+    bom.connections[0].endpoints.pop(0)
+    assert validation.check_external_adc_driver_ownership(architecture, bom).ok
+
+
+def test_public_resolver_refuses_onboard_producers_on_four_external_adc_nets():
+    from kicraft.design.models import Architecture, CircuitRequirement
+    from kicraft.design.recipes.resolver import apply_architecture_recipe_resolution, RecipeResolutionError
+
+    sheets = [
+        {"name": name, "stem": name, "function": function}
+        for name, function in (("CONNECTORS", "Sensor terminals"),
+                               ("MCU", "Acquisition"), ("SENSORS", "Onboard sensors"))
+    ]
+    terminals = [
+        CircuitRequirement(id=f"term{i}", sheet="CONNECTORS", role="connector",
+                           family="screw-terminal",
+                           ports={"positive": f"HALL_{i}", "negative": "GND"})
+        for i in range(1, 5)
+    ]
+    mcu = CircuitRequirement(
+        id="mcu", sheet="MCU", role="mcu_core", family="stm32g0",
+        exact_part="STM32G030K6T6", interfaces=["adc"],
+        ports={"vdd": "+3V3", "gnd": "GND",
+               **{f"adc_{i - 1}": f"HALL_{i}" for i in range(1, 5)}},
+    )
+    sensors = [
+        CircuitRequirement(id=f"sensor{i}", sheet="SENSORS", role="sensor",
+                           family="hall-effect", exact_part="AH49ENTR-G1",
+                           ports={"vdd": "+3V3", "gnd": "GND", "out": f"HALL_{i}"})
+        for i in range(1, 5)
+    ]
+    nets = [{"name": f"HALL_{i}", "endpoints": [
+        {"sheet": "CONNECTORS", "direction": "bidirectional"},
+        {"sheet": "MCU", "direction": "input"},
+        {"sheet": "SENSORS", "direction": "output"},
+    ]} for i in range(1, 5)]
+    architecture = Architecture(
+        mcu_present=True, rail_voltages={"+3V3": 3.3, "GND": 0.0},
+        power_nets=["+3V3", "GND"], sheets=sheets, inter_sheet_nets=nets,
+        requirements=[*terminals, mcu, *sensors],
+    )
+    with pytest.raises(RecipeResolutionError) as exc:
+        apply_architecture_recipe_resolution(architecture)
+    conflicts = [row for row in exc.value.diagnostics
+                 if row.code == "external_adc_driver_ownership_conflict"]
+    assert {row.requirement_id for row in conflicts} == {f"term{i}" for i in range(1, 5)}
+    external = architecture.model_copy(update={
+        "sheets": architecture.sheets[:2],
+        "requirements": [*terminals, mcu],
+        "inter_sheet_nets": [
+            net.model_copy(update={"endpoints": net.endpoints[:2]})
+            for net in architecture.inter_sheet_nets
+        ],
+    })
+    resolved = apply_architecture_recipe_resolution(external)
+    assert {row.net for row in resolved.external_adc_contracts} == {f"HALL_{i}" for i in range(1, 5)}
+
+
+def test_declared_buffer_input_does_not_drive_its_external_source_net():
+    from kicraft.design.models import CircuitRequirement
+    from kicraft.design.recipes.resolver import ResolutionResult, _external_adc_contracts
+
+    external, definitions = _adc_ownership_fixture(typed_source=True)
+    buffer = CircuitRequirement(
+        id="buffer", sheet="BUFFER", role="sensor", family="custom-buffer",
+        ports={"input": "HALL_1", "output": "BUFFER_OUT"},
+        declared_interface={"ports": [
+            {"key": "input", "direction": "input", "function": "buffer input"},
+            {"key": "output", "direction": "output", "function": "buffer output"},
+        ]},
+    )
+    result = ResolutionResult(requirements=[*external.requirements, buffer],
+                              selections=external.selections)
+    _external_adc_contracts(result, definitions)
+    assert not result.blocking and len(result.external_adc_contracts) == 4
+    buffer.ports["output"] = "HALL_1"
+    conflict = ResolutionResult(requirements=[*external.requirements, buffer],
+                                selections=external.selections)
+    _external_adc_contracts(conflict, definitions)
+    assert any(row.code == "external_adc_driver_ownership_conflict"
+               and "requirement buffer.output" in row.evidence for row in conflict.blocking)

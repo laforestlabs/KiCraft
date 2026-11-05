@@ -35,7 +35,8 @@ not the earlier onboard-Hall/TLV native diagnostic. All original 1150 files
 are unchanged. `live_gui_after97/run_01_record.json`, both final audit reports,
 `GUI1150_OUTCOME99.json`, and the actual GUI download/byte-match receipt
 `GUI1150_DOWNLOAD100_RECEIPT.json` preserve the first attempt. Including Motor
-1151 there are **19 actual GUI submissions**, still no accepted GUI product.
+1151 and the separate Hall correction1152 there are **20 actual GUI submissions**,
+still **zero accepted GUI products**.
 
 **The original Motor first attempt 1151 / KC-XT5V4Y fails**, not a gain.
 On deployed `e2e88b0`, the unchanged prompt reaches native synthesis but its
@@ -73,6 +74,39 @@ specification, requirement ports and original1151 remain unchanged.
 New full native placement/routing/fabrication and independent acceptance are
 still pending; neither tests nor synthesis clears the electrical HOLD.
 
+**Changed-source GUI correction1152 / KC-KJKH6X independently FAILS electrically**,
+although fabrication passes. It is a separately registered first attempt on
+`6b34baf`, not a replacement for1150 or either original targeted first attempt.
+The unchanged Hall brief ran for 12m16.94s, produced 24 parts/301 traces, and
+fresh all-severity DRC reports 0 violations/0 opens. Those are not acceptance.
+Four onboard AH49 outputs directly share the four terminal/ADC nets which the
+committed functional description and typed contracts call external sensor inputs.
+The original neutral prompt could support onboard sensors only with honest
+upstream monitor-output scope; committed external-input requirements cannot be
+reinterpreted to flip this board's result. The reset capacitor is also
+15.412 mm from NRST/14.919 mm from MCU ground, contrary to close-placement
+guidance (no numerical manufacturer limit is claimed).
+`AuditGUI1152Electrical_FINAL.json/md`, `AuditGUI1152Fabrication_FINAL.json/md`,
+`GUI1152_ACTUAL_OUTCOME123.json`, `GUI1152_FINAL_CUSTODY121.json` and the
+actual single-click download receipt preserve the complete result. The actual
+4,549,457-byte downloaded project ZIP exactly matches the original; KiCanvas
+visibly rendered the board. **Correction outcome 0/1; no pilot/primary gain.**
+
+The materially different source repair enforces external-input driver ownership
+at both architecture resolution and the complete wired graph; explicitly scoped
+onboard monitors remain distinct, and committed external contracts cannot be lost.
+Fresh G030 F6@2/K6@3 constructions own the NRST capacitor's exact signal/return
+pads with a 3 mm engineering bound; retired versions force real regeneration,
+not relabelling. Integrated affected verification129 passes **567/567**.
+Real failed-board consumer132 rejects all four actual1152 conflicts at both
+gates without changing original bytes. Fresh actual architecture/BOM/wiring
+CLI130 accepts the external-only 16-part path while preserving the original
+brief, intent, functional description and every requirement port.
+New whole physical/export/audit proof for these latest changes is **not complete**.
+The 42-part Motor source likewise still needs its new full physical proof.
+Frozen current verification135 covers 6,437 nodes and is running; do not cite
+earlier green suites as its result.
+
 The source-owned follow-up repairs both input/output LDO bypass ownership with
 immutable `@2` cutover, typed external ADC source obligations and native operating
 notes, and terminal cost read-back including late review/silkscreen calls.
@@ -98,7 +132,9 @@ members match loose exports; STEP truthfully omits J1. The native root carries
 the bounded external ADC operating setup, not a supplied/configured firmware
 or measured-performance promise. Both input/source custodies closed unchanged.
 `native103_INDEPENDENT_ACCEPTANCE108.json` binds the reports and actual files.
-This closes the default external-input/LDO native path, **not a new GUI gain**.
+These are historical diagnostic reports, **not a new GUI gain**. They predate
+the later NRST locality finding and do not accept the latest source or a
+future board; new physical/audit proof remains necessary.
 The current affected capacity/geometry consumers passed 67 cases; the corrected
 real-constructor/native-netlist regression passed separately. Its earlier
 invalid fixture failures remain recorded. Fresh final inventory107 is collected;
@@ -154,15 +190,16 @@ without rewriting its original state. After the immutable LDO recipe cutover,
 actual GUI 1150 also correctly becomes a stale preview with no stale download;
 its original state hash remains unchanged.
 
-Long-lived production services are at **`e2e88b06eb9588ee05543c8045c3e67272b3d780`**,
-web **902012** and worker **902060**, after commit/push and canonical deployment
-(`DEPLOY_e2e88b0_RECEIPT109.json`). The restart disclosed two transient local
-connection refusals; no zero-downtime claim is made. Fresh subprocesses can
-read the current uncommitted compiler/classification repair, so this is not a
-pristine committed-source runtime. The first Motor job is terminal.
-Any corrected Hall or Motor GUI follow-up needs separate changed-source
-registration/admission and must never replace either first attempt or enter
-the primary measurement. No further provider job is currently admitted.
+The latest canonical deployment is **`6b34baf35a95f66ded72c386ef28c8949728e847`**,
+web **916931** and worker **916972** (`DEPLOY_6b34baf_RECEIPT120.json`).
+Its restart disclosed two transient localhost connection refusals; there is no
+zero-downtime claim. The newer external-input ownership and reset-locality source
+repairs are currently uncommitted/not canonically deployed. Fresh subprocesses
+can read them, so the running checkout is not a pristine committed-source runtime.
+All real GUI/provider and physical jobs are terminal; only bounded isolated
+verification135 is active. Further physical/provider work needs fresh admission;
+existing forecasts and protected headroom must not be reduced to force it.
+No full-60 gate expansion is permitted.
 
 Disk admission protects **4 GiB** plus double expected remaining writes;
 every phase has bounded forecasts and protected original/failure/source evidence.
