@@ -1,7 +1,7 @@
 # Surprise-me completion: continuation handoff
 
 Date: **2026-10-12 (UTC)**.
-Status: **2026-11-04–05 codebase-review/live-GUI follow-up in progress; no new accepted GUI product yet; full 60-brief comparison not measured**.
+Status: **2026-11-04–05 review/live-GUI follow-up reached the disk-safety stop; zero new accepted GUI products; full 60-brief comparison not measured**.
 
 ## Codebase review and actual GUI follow-up — 2026-11-04–05
 
@@ -104,8 +104,12 @@ CLI130 accepts the external-only 16-part path while preserving the original
 brief, intent, functional description and every requirement port.
 New whole physical/export/audit proof for these latest changes is **not complete**.
 The 42-part Motor source likewise still needs its new full physical proof.
-Frozen current verification135 covers 6,437 nodes and is running; do not cite
-earlier green suites as its result.
+Real native synthesis137 also passes on that fresh 16-part path and emits
+all five exact-pad bypass contracts, including NRST; no source/input/original
+bytes change. This is a compiler smoke, not completed placement or acceptance.
+Final frozen verification135 exercises **all 6,437 cases: 6,421 passed,
+0 failures, 0 errors, 16 skipped**, in 430.52s. Its source closure includes
+all current runtime, deploy and test files, not an earlier checkpoint.
 
 The source-owned follow-up repairs both input/output LDO bypass ownership with
 immutable `@2` cutover, typed external ADC source obligations and native operating
@@ -190,16 +194,23 @@ without rewriting its original state. After the immutable LDO recipe cutover,
 actual GUI 1150 also correctly becomes a stale preview with no stale download;
 its original state hash remains unchanged.
 
-The latest canonical deployment is **`6b34baf35a95f66ded72c386ef28c8949728e847`**,
-web **916931** and worker **916972** (`DEPLOY_6b34baf_RECEIPT120.json`).
-Its restart disclosed two transient localhost connection refusals; there is no
-zero-downtime claim. The newer external-input ownership and reset-locality source
-repairs are currently uncommitted/not canonically deployed. Fresh subprocesses
-can read them, so the running checkout is not a pristine committed-source runtime.
-All real GUI/provider and physical jobs are terminal; only bounded isolated
-verification135 is active. Further physical/provider work needs fresh admission;
-existing forecasts and protected headroom must not be reduced to force it.
-No full-60 gate expansion is permitted.
+The final behavioral source checkpoint is committed, pushed and canonically
+deployed: **`84be60971c1b38c4e3b820ee3f1ac779cc49aade`**,
+web **931470**, worker **931519** (`DEPLOY_84be609141_RECEIPT.json`).
+All 1,842 runtime/deploy/test source files match frozen verification135 after
+restart. Canonical health passes for HTTP and the newly ready worker. Two
+transient localhost connection refusals occurred; there is no zero-downtime claim.
+Actual authenticated `kicraft.io/?project=1152` was reloaded and exercised:
+the retired construction is honestly a stale preview with no download, and
+the saved functional-stage diagram renders after loading/tab navigation.
+`gui142_final_deployed_readonly.json/png` and
+`gui143_final_functional_loaded.json/png` preserve the surface observations.
+An early screenshot caught a temporary empty panel; the loaded functional panel
+does not have that defect. Original1152's state SHA remains unchanged.
+The owned browser tab is closed; all provider/physical/verification jobs are
+terminal. Further physical/provider work requires fresh admission, not reduced
+forecasts. The final handoff documentation is a subsequent documentation-only
+commit; it does not change these tested/deployed runtime bytes.
 
 Disk admission protects **4 GiB** plus double expected remaining writes;
 every phase has bounded forecasts and protected original/failure/source evidence.
@@ -210,14 +221,30 @@ only this review kernel's idle read-only handle to an already-unlinked obsolete
 catalog inode: **390,782,976 actual filesystem bytes recovered**, no unlink,
 catalog refresh, production restart or named-catalog metadata change.
 Free space became **4,711,596,032 bytes** before subsequent bounded work.
-Gross actual reclamation through passing-fixture cleanup110 is
-**3,593,510,912 bytes**, including generated/reclaimed passing test fixtures;
-this is not a net initial-disk gain. No production logs are truncated.
-Priced provider spend is **$0.322788702** plus **$0.071923564** unresolved
-exposure, conservatively **$0.394712266**. Actual 1150 inclusive ledger cost is
+Gross actual reclamation through final passing-fixture and verified-cache
+cleanup138 is **3,852,697,600 bytes**, including generated/reclaimed passing
+test fixtures; this is not a net initial-disk gain. No production logs,
+originals, retained failures or measured source snapshots are deleted.
+Priced design-provider spend is **$0.340922937** plus **$0.071923564** unresolved
+exposure, conservatively **$0.412846501**. Actual 1150 inclusive ledger cost is
 **$0.014793295**, not its original summary's $0.012270695; the original row is
 preserved, not backfilled. The $0.60/run and $12/session ceilings and lower
 production caps are unchanged; **$8** remains reserved for gated measurement.
+
+`SAFETY_ADMISSION139.json` records the final physical/provider stop before
+cutover: **4,449,714,176 bytes free**, protecting **4 GiB plus double remaining
+writes and 8 MiB global overhead**. Even crediting already-written immutable
+seeds, unchanged forecasts require **4,534,067,200 bytes** for Motor's cold tail,
+**4,562,231,296** for Hall's cold tail, and **4,580,179,968** for a new Hall GUI
+job. None was admitted. Safe passing fixtures, empty generated stores, idle
+own-kernel obsolete reader and verified download/scene caches are exhausted;
+NumPy dependency-test bytecode inventory found no eligible files. Root-owned
+APT cache lacks privilege/complete active-use proof, unrelated kernel527199 is
+protected, and the boot volume is not scratch space. Independent safe tests,
+native-compiler smoke, source cutover and GUI observation were completed instead.
+There is no admitted work left running and no weakened acceptance/reservation.
+Current terminal counts, elapsed time, final free space and exact artifact
+references are in `FINAL_HANDOFF144.json` under the evidence root.
 
 ## Board-outcomes execution — 2026-11-03–04 closeout
 
