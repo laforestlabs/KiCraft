@@ -732,7 +732,7 @@ def test_explicit_power_repairs_preserve_functions_nets_and_real_hardware(round1
     assert original_nets <= set(canonical["power_nets"])
     if repair["id"] == "power_input":
         (selection,) = canonical["recipe_selections"]
-        assert selection["recipe"] == "ams1117-3v3@1"
+        assert selection["recipe"] == "ams1117-3v3@2"
         assert selection["requirement_ids"] == ["power_input"]
         assert selection["port_bindings"] == {"input": "VIN5", "output": "+3V3", "gnd": "GND"}
         assert [unit.requirement_ids for unit in units] == [("power_connector",)]

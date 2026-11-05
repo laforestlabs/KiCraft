@@ -311,11 +311,42 @@ def _fit_title(title: str, max_chars: int = 60) -> str:
     return f"{cut}…"
 
 
+def _external_adc_notes(architecture: Architecture, bom: BOM) -> list[str]:
+    notes: list[str] = []
+    for contract in architecture.external_adc_contracts:
+        requirement = next(r for r in architecture.requirements if r.id == contract.connector_requirement)
+        connector_refs = {
+            part.ref for part in bom.parts
+            if part.sheet == requirement.sheet and part.ref.startswith("J")
+            and (part.lowering_requirement_id in (None, requirement.id))
+        }
+        mcu_refs = {
+            part.ref for part in bom.parts
+            if part.recipe_instance == contract.mcu_instance and part.recipe_role == "mcu"
+        }
+        endpoints = {
+            (ep.ref, ep.pin) for connection in bom.connections
+            if connection.net_name == contract.net for ep in connection.endpoints
+        }
+        connectors = sorted((ref, pin) for ref, pin in endpoints if ref in connector_refs)
+        mcus = sorted((ref, pin) for ref, pin in endpoints
+                      if ref in mcu_refs and pin == contract.mcu_pin)
+        if not connectors or not mcus:
+            raise ValueError(f"External ADC contract {contract.net}: missing wired connector or MCU pin")
+        notes.append(
+            f"{', '.join(f'{ref}.{pin}' for ref, pin in connectors)} / {contract.net}"
+            f" -> {', '.join(f'{ref}.{pin}' for ref, pin in mcus)}"
+            f" (VSSA={contract.reference_net}, VREF+/VDD={contract.supply_net})"
+        )
+    return notes
+
+
 def _emit_root(
     project_stem: str,
     project_dir: Path,
     sheet_insts: list[_SheetInstance],
     architecture: Architecture,
+    bom: BOM,
     project_title: str,
 ) -> Path:
     root_uuid = _uuid()
@@ -325,6 +356,20 @@ def _emit_root(
     sheet_height = 30.48   # 24 * 1.27
     sheet_gap = 15.24      # 12 * 1.27
     rows: list[str] = []
+    adc_notes = _external_adc_notes(architecture, bom)
+    if adc_notes:
+        contract = architecture.external_adc_contracts[0]
+        adc_notes.extend([
+            "ADC inputs: VSSA (ground) to actual VREF+/VDD rail, not 5 V tolerant.",
+            "No drive when MCU supply is unpowered or invalid; source must be high impedance.",
+            f"Total Thevenin source <= {contract.source_impedance_max_ohm:g} ohms; "
+            f"{contract.resolution_bits}-bit ADC, "
+            f"{contract.adc_clock_min_hz / 1e6:g}–{contract.adc_clock_max_hz / 1e6:g} MHz, "
+            f"{contract.sample_cycles:g} sampling cycles.",
+            f"BOOSTEN on below {contract.boost_threshold_v:g} V VDDA; off at or above.",
+            "Follow DS12991 ADC startup requirements; calibration after power-up recommended.",
+            "Firmware to configure ADC is not provided; no rate or accuracy is promised.",
+        ])
     # Lay sheets out horizontally, centered on the smallest page that fits:
     # a lone sheet symbol parked in the corner of an A3 reads as a draft,
     # not a finished drawing. The pin stubs + labels extend half a gap past
@@ -338,6 +383,8 @@ def _emit_root(
         si.sheet.name: _sheet_required_height(si, sheet_height) for si in sheet_insts
     }
     content_h = max(sheet_heights.values(), default=sheet_height)
+    notes_h = 3.0 * len(adc_notes)
+    content_h += notes_h
     if content_w <= 297.0 - 2 * 25.4 and content_h <= 210.0 - 2 * 25.4:
         paper, page_w, page_h = "A4", 297.0, 210.0
     else:
@@ -349,13 +396,19 @@ def _emit_root(
     pin_records: list[tuple[str, float, float]] = []
     for i, si in enumerate(sheet_insts):
         x = start_x + i * (sheet_width + sheet_gap)
-        y = start_y
+        y = start_y + notes_h
         block, recs = _emit_sheet_block(
             si, x, y, sheet_width, sheet_heights[si.sheet.name], project_stem
         )
         rows.append(block)
         pin_records.extend(recs)
         sheet_origins[si.sheet.name] = (x, y)
+    for idx, note in enumerate(adc_notes):
+        rows.append(
+            f'\t(text "{_q(note)}" (at 20 {_fmt(start_y + idx * 3.0)} 0) '
+            f'(effects (font (size 1 1)) (justify left)) '
+            f'(uuid "{_uuid_seeded(f"adc-note/{idx}", project_stem)}"))'
+        )
 
     # Connect same-named signal sheet pins across sheets: a short stub + a
     # local label off each pin. Same-named local labels merge on the root
@@ -1250,6 +1303,7 @@ def emit_schematic(
         project_dir,
         sheet_insts,
         architecture,
+        bom,
         project_title=title or project_stem,
     )
     if on_written is not None:

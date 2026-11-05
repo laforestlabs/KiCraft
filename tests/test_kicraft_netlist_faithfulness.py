@@ -64,6 +64,60 @@ def test_clean_project_passes(tmp_path, bmp280_state) -> None:
     assert res.ok, f"{res.message}: {res.offenders}"
 
 
+@needs_kicad
+def test_external_adc_contract_preserves_native_hierarchical_netlist(tmp_path) -> None:
+    from kicraft.design.models import (
+        Architecture, BOM, CircuitRequirement, FunctionalBlock, FunctionalSpec, IntentSlot,
+    )
+    from kicraft.design.recipes import apply_architecture_recipe_resolution
+    from kicraft.server.stage_work_units import probe_architecture_construction
+
+    intent = IntentSlot(goal="Externally powered 3.3 V ADC carrier",
+                        inferred_expertise="expert")
+    architecture = apply_architecture_recipe_resolution(Architecture(
+        mcu_present=True, rail_voltages={"+3V3": 3.3, "GND": 0.0},
+        power_nets=["+3V3", "GND"],
+        sheets=[
+            {"name": "INPUT", "stem": "INPUT", "function": "Power and signal input"},
+            {"name": "MCU", "stem": "MCU", "function": "ADC"},
+        ],
+        inter_sheet_nets=[{"name": "ANALOG", "endpoints": [
+            {"sheet": "INPUT", "direction": "output"},
+            {"sheet": "MCU", "direction": "input"},
+        ]}],
+        requirements=[
+            CircuitRequirement(id="term", sheet="INPUT", role="connector",
+                               family="screw-terminal",
+                               functional_blocks=["ADC"],
+                               ports={"positive": "ANALOG", "negative": "GND"}),
+            CircuitRequirement(id="host", sheet="INPUT", role="connector",
+                               functional_blocks=["ADC"],
+                               family="pin-header", ports={"pin1": "+3V3", "pin2": "GND"}),
+            CircuitRequirement(id="mcu", sheet="MCU", role="mcu_core", family="stm32g0",
+                               exact_part="STM32G030K6T6", interfaces=["adc"],
+                               functional_blocks=["ADC"],
+                               ports={"vdd": "+3V3", "gnd": "GND", "adc_0": "ANALOG"}),
+        ],
+    ), intent)
+    spec = FunctionalSpec(blocks=[
+        FunctionalBlock(name="ADC", category="interface", purpose="External ADC input"),
+    ])
+    construction = probe_architecture_construction({
+        "project_stem": "ADC_CARRIER", "intent": intent.model_dump(mode="json"),
+        "functional_spec": spec.model_dump(mode="json"),
+        "architecture": architecture.model_dump(mode="json"),
+    })
+    state = ConversationState(
+        project_stem="ADC_CARRIER", intent=intent, architecture=architecture,
+        bom=BOM.model_validate(construction), functional_spec=spec,
+    )
+
+    run(state, tmp_path)
+    result = check_netlist_faithfulness(tmp_path, state.project_stem, state.bom)
+
+    assert result.ok, f"{result.message}: {result.offenders}"
+
+
 def test_compare_flags_cross_net_merge(bmp280_state) -> None:
     """The merge branch, unit-level: pins of two BOM nets sharing neither a
     name nor an endpoint land in one extracted net (what a global/hier label

@@ -129,7 +129,10 @@ from kicraft.autoplacer.brain.leaf_tidiness import (
     parts_from_components,
     pin_distances_mm,
 )
-from kicraft.autoplacer.brain.placement_solver import PlacementSolver
+from kicraft.autoplacer.brain.placement_solver import (
+    LocalBypassPlacementError,
+    PlacementSolver,
+)
 from kicraft.autoplacer.brain.leaf_routing import route_local_subcircuit
 from kicraft.autoplacer.brain.subcircuit_render_diagnostics import (
     trim_losing_round_diagnostics,
@@ -1181,12 +1184,38 @@ def _solve_leaf_subcircuit(
                 # shorts or courtyards deserves its full routing budget.
                 and _only_adjacency_failures(failure_reasons)
             )
-            result = _solve_one_round(
-                extraction, round_cfg, seed, round_index, route,
-                place_quality_best_mm=(
-                    _place_quality_best if _gate_allowed else None
-                ),
-            )
+            try:
+                result = _solve_one_round(
+                    extraction, round_cfg, seed, round_index, route,
+                    place_quality_best_mm=(
+                        _place_quality_best if _gate_allowed else None
+                    ),
+                )
+            except LocalBypassPlacementError as exc:
+                # Capacity rejection must reach the existing bounded canvas
+                # ladder, not abort before its larger geometry is attempted.
+                # Malformed ownership/pad/net errors remain hard failures.
+                result = SolveRoundResult(
+                    round_index=round_index,
+                    seed=seed,
+                    score=0.0,
+                    placement=PlacementScore(),
+                    components=extraction.local_state.components,
+                    routed=False,
+                    routing={
+                        "enabled": route,
+                        "skipped": True,
+                        "failed": True,
+                        "reason": "local_bypass_capacity",
+                        "validation": {
+                            "accepted": False,
+                            "rejection_stage": "placement_locality",
+                            "rejection_message": str(exc),
+                        },
+                    },
+                    placement_diagnostics={"placement_completed": False},
+                )
+                print(f"  placement capacity rejection: {exc}")
             _round_median = result.placement_diagnostics.get("median_pin_mm")
             if _round_median is not None:
                 _place_quality_best = min(_place_quality_best, float(_round_median))
@@ -1198,7 +1227,10 @@ def _solve_leaf_subcircuit(
             validation = routing.get("validation", {}) or {}
 
             # -- Structured round acceptance via leaf_acceptance gates --
-            if not route:
+            if validation.get("rejection_stage") == "placement_locality":
+                accepted = False
+                round_acceptance = None
+            elif not route:
                 # No routing requested -- placement-only round is always accepted
                 accepted = True
                 round_acceptance = None
@@ -1273,6 +1305,7 @@ def _solve_leaf_subcircuit(
                         "round_index": result.round_index,
                         "seed": result.seed,
                         "reason": str(reason),
+                        "message": str(validation.get("rejection_message") or ""),
                         "router": str(routing.get("router", "") or ""),
                         "failed": bool(routing.get("failed", False)),
                         "failed_internal_nets": list(

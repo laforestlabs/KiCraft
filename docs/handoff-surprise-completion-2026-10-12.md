@@ -19,15 +19,57 @@ This is not the approved plan's separate fixed-six pilot. The two fresh
 full 60-brief arms remain **not measured**; diagnostic native boards and
 selected GUI winners must never be spliced into them.
 
-Source checkpoint `105ee9b` preserves the broad review fixes; pushed checkpoint
-`fca9db4` adds the qualified compact TLV62569 input support and refuses old
-`@1/@2` graphs without upstream regeneration. Source-owned qualified Hall
-pin mappings, exact STM32G030 support, both MCU bypasses, motor supply/protection,
-native inductor lands, all-connector edge ownership and full copper envelopes
-are repaired. Coverage and execution evidence are under `coverage_assignments.json`,
-the per-finding reports and bounded verification receipts.
+Pushed/deployed checkpoint `c438c37` includes the broad review repairs, qualified
+compact TLV62569 support, parent connector-datum/bank geometry and honest
+generation-only GUI captions. The previous checkpoints and failures are retained.
+Coverage and execution evidence are under `coverage_assignments.json`, the
+per-finding reports and bounded verification receipts.
 
-**Current physical outcome:** native77 exported fabrication files but failed
+**Fresh actual GUI first attempt 1150 / KC-D3JH79 is HOLD**, not a gain.
+The unchanged Hall prompt completed generation in 8m58s with 16 parts, routed
+all three leaves, and exported a byte-bound project/fabrication package.
+Independent fabrication-domain audit passes; electrical audit rejects the
+uncompiled 3 mm LDO output-capacitor obligation and retains the missing external
+ADC operating-contract warning. The model chose external Hall inputs/ME6211,
+not the earlier onboard-Hall/TLV native diagnostic. All original 1150 files
+are unchanged. `live_gui_after97/run_01_record.json`, both final audit reports,
+`GUI1150_OUTCOME99.json`, and the actual GUI download/byte-match receipt
+`GUI1150_DOWNLOAD100_RECEIPT.json` preserve the first attempt. There are now
+**18 actual GUI submissions**, still no accepted GUI product.
+
+The source-owned follow-up repairs both input/output LDO bypass ownership with
+immutable `@2` cutover, typed external ADC source obligations and native operating
+notes, and terminal cost read-back including late review/silkscreen calls.
+Actual architecture/BOM/wiring CLI requalification in `whole_path99/1150`
+preserves the original intent, functional specification, all ports and 16 parts.
+The first native attempt (`native100`) exposed malformed schematic text;
+the required text angle is corrected. `native101` then passes synthesis but
+fails physical completion: the 13.2 mm power canvas cannot reserve the LDO,
+both capacitors and locked edge header, and the exception bypassed the existing
+bounded larger-canvas ladder. Both failures are retained, not rerun unchanged.
+`STRATEGY103_OWNED_GROUP_CANVAS.json` records the materially different source
+repair: preserve capacity failures as explicitly rejected/unrouted rounds so
+the existing geometry ladder can run; bad ownership/pad/net data still fails.
+No clearance, locality, edge, final-size, round-count or wall-budget gate is relaxed.
+
+Cold **native103 now passes both independent final static domains**:
+16 parts, 69 logical contacts/71 physical pads with no mapping mismatches,
+249 traces and 32 vias, fresh all-severity DRC **0 violations / 0 opens**.
+The board is **82.674400 × 24.954765 mm** by outline centerlines; all six
+connectors meet the same-edge criterion. LDO C2's longest owned-pad distance
+is **2.950424 mm**, within the unchanged 3 mm bound. All 19 fabrication ZIP
+members match loose exports; STEP truthfully omits J1. The native root carries
+the bounded external ADC operating setup, not a supplied/configured firmware
+or measured-performance promise. Both input/source custodies closed unchanged.
+`native103_INDEPENDENT_ACCEPTANCE108.json` binds the reports and actual files.
+This closes the default external-input/LDO native path, **not a new GUI gain**.
+The current affected capacity/geometry consumers passed 67 cases; the corrected
+real-constructor/native-netlist regression passed separately. Its earlier
+invalid fixture failures remain recorded. Fresh final inventory107 is collected;
+the final current whole-suite execution is still pending.
+
+
+**Earlier native diagnostic chain:** native77 exported fabrication files but failed
 independent electrical acceptance for its remote buck input capacitors.
 Fresh actual architecture/BOM/wiring CLI regeneration in `whole_path84/1149`
 preserves the original Hall brief, intent, functional specification and every
@@ -61,33 +103,40 @@ rejection/commit-accounting scenario passes, without changing runtime behavior.
 The failed full run remains preserved. Final bounded verification94 completed
 all **6,374** cases: **6,358 passed, 0 failures, 0 errors, 16 skipped**.
 
-The actual old GUI visibly called a nonfunctional, review-required Hall board
-“Design complete”. The shared completion caption/badges now say generation is
-complete, not that the product is independently accepted; the unverified
-assurance label no longer calls an unverified package fabrication-ready.
-This is presentation only: statuses, warnings, original records and acceptance
-gates are unchanged. Three incidental wording assertions were removed, not
-repinned. The physical producer remains byte-identical to native90; these final
-caption changes follow the full94 run and receive focused existing UI coverage
-and actual-site visual verification before new paid work.
+Verification100 subsequently completed all **6,399** cases: **6,383 passed,
+0 failures, 0 errors, 16 skipped**, in 444.95s. This precedes the native text-angle
+and capacity-propagation fixes and is **not the final verdict on those changes**.
 
-Long-lived production services are still at `7a8118e`; fresh subprocesses and
-static files can use the checkout, so this is not a pristine old-source runtime.
-No post-fix GUI job is admitted until whole-path proof, independent final
+The actual old GUI visibly called a nonfunctional, review-required Hall board
+“Design complete”. Deployed completion captions now distinguish generation from
+independent product acceptance, without changing statuses, warnings or gates.
+Existing focused UI coverage passed 72 cases, and actual 1150 visibly retained
+its warnings under “Generation complete”. The real download button delivered
+4,438,370 bytes matching the retained original ZIP SHA256; successful download
+does not clear the electrical HOLD. Old 1149 correctly remains a stale preview,
+without rewriting its original state. New producer repairs are not yet deployed.
+
+Long-lived production services are at **`c438c37`**, web **878140** and worker
+**878181**, after canonical deployment and health verification
+(`DEPLOY_c438c37_RECEIPT97.json`). Fresh subprocesses can read the current
+uncommitted checkout, so this is not a pristine old-source runtime.
+No additional paid job is admitted until whole-path proof, independent final
 artifact audits, terminal bounded verification, commit/push and idle canonical
-deployment complete. `targeted_GUI_after55_REGISTRATION.json` retains the exact
-unchanged Hall then Motor prompts for two serial actual-site diagnostics,
-not a new primary arm.
+cutover. The original preregistered Motor first attempt is not submitted.
+Any corrected Hall GUI follow-up must be separately registered and must never
+replace 1150's first attempt or enter the primary measurement.
 
 Disk admission protects **4 GiB** plus double expected remaining writes;
-new GUI admission reserves **256 MiB per project** plus fixed evidence overhead.
-All originals, failed/interrupted attempts, source snapshots and production logs
-are protected. Verified unused browser downloads recovered **666,329,088 actual
-filesystem bytes**; passed-only fixture disposal is separately receipted.
-At the 01:40 UTC checkpoint, priced provider spend was **$0.294086913** plus
-**$0.071923564** unresolved exposure, conservatively **$0.366010477**.
-The $0.60/run and $12/session ceilings and all lower production caps remain
-unchanged; **$8** remains reserved for gated primary measurement.
+every phase has bounded forecasts and protected original/failure/source evidence.
+At native101 termination (04:44 UTC), free space was **4,776,214,528 bytes**.
+Verified unused browser downloads recovered **666,329,088 actual filesystem
+bytes**; generated passing-fixture reclamation is separately receipted, including
+**189,583,360 bytes** in verification100. No production logs are truncated.
+Priced provider spend is **$0.308880208** plus **$0.071923564** unresolved
+exposure, conservatively **$0.380803772**. Actual 1150 inclusive ledger cost is
+**$0.014793295**, not its original summary's $0.012270695; the original row is
+preserved, not backfilled. The $0.60/run and $12/session ceilings and lower
+production caps are unchanged; **$8** remains reserved for gated measurement.
 
 ## Board-outcomes execution — 2026-11-03–04 closeout
 

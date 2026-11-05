@@ -684,7 +684,7 @@ def _three_pin_ldo(
 ) -> RecipeDefinition:
     no_connects = (NoConnect(role="regulator", pin=extra_nc),) if extra_nc else ()
     enable = (Pin(role="regulator", pin=enable_pin, net="enable"),) if enable_pin else ()
-    return _power_recipe(
+    definition = _power_recipe(
         recipe=recipe,
         family=family,
         exact_part=part,
@@ -717,15 +717,26 @@ def _three_pin_ldo(
         assertions=(
             Assertion(
                 code="ldo_stability_caps",
-                message=f"Input {cin} and output {cout} capacitors satisfy the exact regulator stability requirements",
+                message=(f"Input {cin} and output {cout} are nominal; verify selected capacitor "
+                         "voltage ratings, effective capacitance, ESR and regulator stability "
+                         "over the operating conditions"),
             ),
             *extra_assertions,
         ),
     )
+    return definition.model_copy(update={
+        "placement_constraints": definition.placement_constraints + tuple(
+            Placement(kind="owned_bypass", role=role, parameters={
+                "anchor_role": "regulator", "power_net": net, "ground_net": "gnd",
+                "max_mm": 3.0,
+            })
+            for role, net in (("input_cap", "input"), ("output_cap", "output"))
+        ),
+    })
 
 
 ME6211_3V3 = _three_pin_ldo(
-    recipe="me6211-3v3@1",
+    recipe="me6211-3v3@2",
     family="me6211-3v3",
     part="ME6211C33M5G-N",
     symbol="me6211c33:ME6211C33M5G-N",
@@ -741,7 +752,7 @@ ME6211_3V3 = _three_pin_ldo(
     enable_pin="3",
 )
 MCP1700_3V3 = _three_pin_ldo(
-    recipe="mcp1700-3v3@1",
+    recipe="mcp1700-3v3@2",
     family="mcp1700-3v3",
     part="MCP1700T-3302E/TT",
     symbol="Regulator_Linear:MCP1700x-330xxTT",
@@ -755,7 +766,7 @@ MCP1700_3V3 = _three_pin_ldo(
     rated_output_current_a=0.25,
 )
 AMS1117_3V3 = _three_pin_ldo(
-    recipe="ams1117-3v3@1",
+    recipe="ams1117-3v3@2",
     family="ams1117-3v3",
     part="AMS1117-3.3",
     symbol="Regulator_Linear:AMS1117-3.3",

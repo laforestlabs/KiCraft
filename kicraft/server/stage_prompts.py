@@ -78,6 +78,14 @@ def _stage_extra(stage: str) -> str:
             "`prototyping-area` -- no component class can carry it. Record engineering "
             "assumptions separately. A model default or auto-answer cannot authorize "
             "a material substitution."
+            "\n- When the brief explicitly specifies an external analog SIGNAL's voltage "
+            "range, source impedance, sampling performance, or whether it can drive while "
+            "the board is unpowered, preserve those stated facts in an "
+            "`external_analog_source` obligation. Use minimum_v/maximum_v in volts, "
+            "source_impedance_ohm, minimum_sample_rate_hz, maximum_error_v, and "
+            "may_drive_unpowered; leave every unstated field null. This is the signal at "
+            "the external connector, not the host power supply voltage. Never infer a "
+            "5 V signal from a 5 V host supply or invent a range or sequencing condition."
         )
     if stage == "functional_spec":
         return (
@@ -102,6 +110,8 @@ def _stage_extra(stage: str) -> str:
             "in more than one place. Never emit an obligation row or a paraphrase of one: a "
             "requirement that names an id no committed stage carries is refused. A unique reviewed "
             "physical owner is assigned for you when the evidence proves exactly one candidate. "
+            "An `external_analog_source` obligation must be owned by its physical signal "
+            "connector requirement; also name other implementing owners as needed. "
             "A `quantity`, `fabrication`, or "
             "`negative` board-wide fact needs no owner. A `quantitative` row needs an owner unless "
             "it explicitly measures the board/PCB outline with a geometric unit (for example board "

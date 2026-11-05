@@ -463,6 +463,27 @@ class ExternalInterfaceObligation(BaseModel):
         return value.strip().casefold().replace("_", "-") if isinstance(value, str) else value
 
 
+class ExternalAnalogSourceObligation(BaseModel):
+    """Original external signal conditions, not the board's power-input rating."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["external_analog_source"]
+    original_obligation_id: str = Field(pattern=r"^[a-z][a-z0-9_-]{0,63}$")
+    minimum_v: float | None = Field(default=None, allow_inf_nan=False)
+    maximum_v: float | None = Field(default=None, allow_inf_nan=False)
+    may_drive_unpowered: bool | None = None
+    source_impedance_ohm: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    minimum_sample_rate_hz: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    maximum_error_v: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def _ordered_range(self):
+        if self.minimum_v is not None and self.maximum_v is not None and self.minimum_v > self.maximum_v:
+            raise ValueError("external analog source voltage bounds must be ordered")
+        return self
+
+
 class QuantityObligation(BaseModel):
     """A required number of independently present implementation items."""
 
@@ -728,6 +749,7 @@ def obligation_requires_requirement_owner(obligation: object) -> bool:
 RequirementObligation = Annotated[
     PhysicalObligation
     | ExternalInterfaceObligation
+    | ExternalAnalogSourceObligation
     | QuantityObligation
     | AdjustabilityObligation
     | ConversionObligation
@@ -880,6 +902,40 @@ class ArchitectureAdvisory(BaseModel):
     evidence: list[str] = Field(default_factory=list)
 
 
+# Conservative DS12991 Tables 54–55 conditions for the reviewed G030 packages.
+STM32G030_ADC_SOURCE_MAX_OHM = 1000.0
+STM32G030_ADC_CLOCK_MIN_HZ = 140_000.0
+STM32G030_ADC_CLOCK_MAX_HZ = 16_000_000.0
+STM32G030_ADC_SAMPLE_CYCLES = 160.5
+STM32G030_ADC_BOOST_THRESHOLD_V = 2.4
+
+
+class ExternalADCContract(BaseModel):
+    """Reviewed direct ADC input bound to a board connector port and supply domains."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    connector_requirement: str
+    connector_port: str
+    net: str
+    mcu_instance: str
+    mcu_pin: str
+    mcu_part: str
+    reference_net: str
+    supply_net: str
+    datasheet: str
+    source_obligation_ids: list[str] = Field(default_factory=list)
+    unpowered_source_high_impedance: Literal[True] = True
+    sampling_settling_per_datasheet: Literal[True] = True
+    source_impedance_max_ohm: float = STM32G030_ADC_SOURCE_MAX_OHM
+    adc_clock_min_hz: float = STM32G030_ADC_CLOCK_MIN_HZ
+    adc_clock_max_hz: float = STM32G030_ADC_CLOCK_MAX_HZ
+    sample_cycles: float = STM32G030_ADC_SAMPLE_CYCLES
+    resolution_bits: int = 12
+    boost_threshold_v: float = STM32G030_ADC_BOOST_THRESHOLD_V
+    rate_or_accuracy_promised: Literal[False] = False
+
+
 class Architecture(BaseModel):
     model_config = ConfigDict(allow_inf_nan=False)
 
@@ -897,6 +953,7 @@ class Architecture(BaseModel):
     # Approved standard whose fixed connector map is owned by requirements.
     standard_form_factor: str | None = None
     recipe_selections: list[RecipeSelection] = Field(default_factory=list)
+    external_adc_contracts: list[ExternalADCContract] = Field(default_factory=list)
     requirements: list[CircuitRequirement] = Field(default_factory=list)
     # Canonical original facts survive recipe resolution and all later stage normalization. The
     # compiler writes them from the committed intent/spec set; each owner-requiring row was named
@@ -1016,6 +1073,18 @@ class Architecture(BaseModel):
                 expected.get((row.kind, row.original_obligation_id), row)
                 for row in requirement.obligations
             ]
+        for row in self.obligations:
+            if row.kind == "external_analog_source" and not any(
+                requirement.role == "connector"
+                and any(owned_row.kind == row.kind
+                        and owned_row.original_obligation_id == row.original_obligation_id
+                        for owned_row in requirement.obligations)
+                for requirement in self.requirements
+            ):
+                raise ValueError(
+                    "External analog source obligations must be owned by the physical signal "
+                    f"connector: {row.original_obligation_id}"
+                )
         return self
 
     @model_validator(mode="after")

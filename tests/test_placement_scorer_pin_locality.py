@@ -476,6 +476,175 @@ def test_converter_input_and_output_caps_fit_together_outside_body():
         assert not (ct.x < pb.x and cb.x > pt.x and ct.y < pb.y and cb.y > pt.y)
 
 
+@pytest.mark.parametrize(("recipe", "vin", "ground", "vout"), [
+    ("me6211-3v3@2", "1", "2", "5"),
+    ("mcp1700-3v3@2", "3", "1", "2"),
+    ("ams1117-3v3@2", "3", "1", "2"),
+])
+def test_ldo_owned_bypasses_compile_from_actual_recipe_and_reject_bad_wiring(
+    recipe, vin, ground, vout,
+):
+    from types import SimpleNamespace
+
+    from kicraft.design.models import BOM, RecipeSelection
+    from kicraft.design.recipes.registry import expand_recipe
+    from kicraft.design.synthesis.autoplacer import _recipe_local_bypasses
+
+    selection = RecipeSelection(
+        recipe=recipe, instance="supply", sheets={"power": "POWER"},
+        port_bindings={"input": "HOST_5V", "gnd": "RETURN", "output": "RAIL_3V3"},
+    )
+    expansion = expand_recipe(selection)
+    bom = BOM(parts=expansion.parts, connections=expansion.connections,
+              recipe_ownership=[expansion.ownership])
+    architecture = SimpleNamespace(recipe_selections=[selection])
+    roles = {part.recipe_role: part.ref for part in expansion.parts}
+    rules = _recipe_local_bypasses(architecture, bom)
+    assert len(rules) == 2
+    by_cap = {rule["bypass_ref"]: rule for rule in rules}
+    for role, pin in (("input_cap", vin), ("output_cap", vout)):
+        rule = by_cap[roles[role]]
+        assert rule["owner_ref"] == roles["regulator"]
+        assert rule["power_pins"] == [pin, "1"]
+        assert rule["ground_pins"] == [[ground], "2"]
+        assert rule["max_distance_mm"] == 3.0
+
+    # Corrupt the actual output-cap connection, not the recipe declaration.
+    output = next(net for net in bom.connections if any(
+        ep.ref == roles["output_cap"] and ep.pin == "1" for ep in net.endpoints
+    ))
+    output.net_name = "WRONG_RAIL"
+    with pytest.raises(ValueError, match="unproven bypass pin"):
+        _recipe_local_bypasses(architecture, bom)
+
+
+def test_me6211_recipe_compiler_and_solver_place_both_native_caps_together():
+    from itertools import combinations
+    from types import SimpleNamespace
+
+    from kicraft.autoplacer.brain.placement_solver import PlacementSolver
+    from kicraft.design.models import BOM, RecipeSelection
+    from kicraft.design.recipes.registry import expand_recipe
+    from kicraft.design.synthesis.autoplacer import _recipe_local_bypasses
+
+    selection = RecipeSelection(
+        recipe="me6211-3v3@2", instance="supply", sheets={"power": "POWER"},
+        port_bindings={"input": "HOST_5V", "gnd": "RETURN", "output": "RAIL_3V3"},
+    )
+    expansion = expand_recipe(selection)
+    bom = BOM(parts=expansion.parts, connections=expansion.connections,
+              recipe_ownership=[expansion.ownership])
+    roles = {part.recipe_role: part.ref for part in expansion.parts}
+    rules = _recipe_local_bypasses(SimpleNamespace(recipe_selections=[selection]), bom)
+    owner_ref = roles["regulator"]
+    # Actual 1150 SOT-23-5 and 0603 courtyard extents include line width.
+    # The 1150 C2 center was 3.732 mm away and its GND pad 4.870 mm away.
+    owner = Component(
+        ref=owner_ref, value="ME6211", pos=Point(20, 20), rotation=0,
+        layer=Layer.FRONT, width_mm=2.95, height_mm=1.61, kind="ic",
+        body_center=Point(20, 20),
+        pads=[_pad(owner_ref, pin, 20 + dx, 20 + dy, net)
+              for pin, dx, dy, net in (
+                  ("1", -0.95, 1.15, "HOST_5V"),
+                  ("2", 0, 1.15, "RETURN"),
+                  ("5", -0.95, -1.15, "RAIL_3V3"),
+              )],
+    )
+
+    def capacitor(role, y):
+        ref = roles[role]
+        net = "HOST_5V" if role == "input_cap" else "RAIL_3V3"
+        return Component(
+            ref=ref, value="1uF", pos=Point(19.45, y), rotation=0,
+            layer=Layer.FRONT, width_mm=3.01, height_mm=1.51, kind="passive",
+            body_center=Point(19.45, y),
+            pads=[_pad(ref, "1", 18.675, y, net),
+                  _pad(ref, "2", 20.225, y, "RETURN")],
+        )
+
+    def assert_group(comps):
+        for rule in rules:
+            op = {p.pad_id: p for p in comps[owner_ref].pads}
+            cp = {p.pad_id: p for p in comps[rule["bypass_ref"]].pads}
+            assert op[rule["power_pins"][0]].pos.dist(cp["1"].pos) <= 3
+            assert op["2"].pos.dist(cp["2"].pos) <= 3
+        for a, b in combinations(comps.values(), 2):
+            at, ab = a.bbox(0.1)
+            bt, bb = b.bbox(0.1)
+            assert ab.x <= bt.x + 1e-9 or bb.x <= at.x + 1e-9 or (
+                ab.y <= bt.y + 1e-9 or bb.y <= at.y + 1e-9
+            )
+
+    # Independently established joint witness at the hard 0.2 mm gap.
+    witness = [owner, capacitor("input_cap", 21.8), capacitor("output_cap", 18.2)]
+    assert_group({c.ref: c for c in witness})
+    obstacle = _cap("R99", 30, 20, [])
+    obstacle.locked = True
+    state = _state([owner, capacitor("input_cap", 30), capacitor("output_cap", 30), obstacle])
+    solver = PlacementSolver(state, {
+        "local_bypasses": rules, "edge_margin_mm": 2.0,
+        "placement_clearance_mm": 2.84, "legality_clearance_mm": 0.2,
+        "courtyard_overlap_min_gap_mm": 0.2,
+    })
+    solver._reserve_local_bypasses(state.components)
+    group = {ref: component for ref, component in state.components.items() if ref != "R99"}
+    assert_group(group)
+    for component in group.values():
+        at, ab = component.bbox(2.84 / 2)
+        bt, bb = obstacle.bbox(2.84 / 2)
+        assert ab.x <= bt.x + 1e-9 or bb.x <= at.x + 1e-9 or (
+            ab.y <= bt.y + 1e-9 or bb.y <= at.y + 1e-9
+        )
+
+
+def test_ams1117_recipe_rejects_a_board_with_no_legal_cap_space():
+    from types import SimpleNamespace
+
+    from kicraft.autoplacer.brain.placement_solver import PlacementSolver
+    from kicraft.design.models import BOM, RecipeSelection
+    from kicraft.design.recipes.registry import expand_recipe
+    from kicraft.design.synthesis.autoplacer import _recipe_local_bypasses
+
+    selection = RecipeSelection(
+        recipe="ams1117-3v3@2", instance="supply", sheets={"power": "POWER"},
+        port_bindings={"input": "VIN", "gnd": "GND", "output": "VOUT"},
+    )
+    expansion = expand_recipe(selection)
+    bom = BOM(parts=expansion.parts, connections=expansion.connections,
+              recipe_ownership=[expansion.ownership])
+    roles = {part.recipe_role: part.ref for part in expansion.parts}
+    rules = _recipe_local_bypasses(SimpleNamespace(recipe_selections=[selection]), bom)
+    ref = roles["regulator"]
+    # Native SOT-223-3_TabPin2 courtyard and pin centers; 0603 caps retain
+    # the recipe footprint, not a hypothetical smaller substitute.
+    owner = Component(
+        ref=ref, value="AMS1117", pos=Point(5, 4.5), rotation=0, layer=Layer.FRONT,
+        width_mm=8.85, height_mm=7.25, kind="ic", body_center=Point(5, 4.5),
+        pads=[_pad(ref, pin, x, y, net) for pin, x, y, net in (
+            ("1", 1.85, 2.2, "GND"), ("2", 1.85, 4.5, "VOUT"),
+            ("3", 1.85, 6.8, "VIN"),
+        )],
+    )
+    caps = []
+    for role, net in (("input_cap", "VIN"), ("output_cap", "VOUT")):
+        cap_ref = roles[role]
+        caps.append(Component(
+            ref=cap_ref, value="C", pos=Point(5, 4.5), rotation=0, layer=Layer.FRONT,
+            width_mm=3.01, height_mm=1.51, kind="passive", body_center=Point(5, 4.5),
+            pads=[_pad(cap_ref, "1", 4.225, 4.5, net),
+                  _pad(cap_ref, "2", 5.775, 4.5, "GND")],
+        ))
+    state = BoardState(components={c.ref: c for c in (owner, *caps)},
+                       board_outline=(Point(0, 0), Point(10, 9)))
+    solver = PlacementSolver(state, {
+        "local_bypasses": rules, "edge_margin_mm": 0,
+        "placement_clearance_mm": 2.84, "legality_clearance_mm": 0.2,
+        "courtyard_overlap_min_gap_mm": 0.2,
+    })
+    with pytest.raises(ValueError, match="no (joint )?legal placement"):
+        solver._place_local_bypasses(state.components)
+
+
 def test_reservation_precedes_free_passive_packing_and_survives_legalizer():
     from kicraft.autoplacer.brain.placement_solver import PlacementSolver
 

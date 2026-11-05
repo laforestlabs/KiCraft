@@ -30,6 +30,7 @@ import pytest
 
 from kicraft.server import web
 from kicraft.server.accounts import AccountStore
+from kicraft.server.spend_guard import SpendGuard
 
 
 @pytest.fixture
@@ -758,3 +759,53 @@ def test_ensure_bom_prices_fetches_in_background(monkeypatch):
         assert web._PRICE_CACHE.get(key) == {"unit_price": 0.5, "lcsc": "C1",
                                              "stock": 1}
         assert key not in web._PRICE_INFLIGHT
+
+
+def test_finalized_project_includes_post_design_review_and_silkscreen_charges(
+        store, user_id, tmp_path, monkeypatch):
+    settings = web.Settings(api_key="offline-test", ledger_path=tmp_path / "ledger.db")
+    monkeypatch.setattr(web.Settings, "from_env", classmethod(lambda cls: settings))
+    monkeypatch.setattr(web.notify, "notify_run_event", lambda *args, **kwargs: None)
+    guard = SpendGuard(settings)
+    pid = seed_project(store, user_id, "late auxiliary charges")
+    run_id = f"p{pid}-first-attempt"
+    guard.record("offline-test", 100, 50, 0.01,
+                 meta={"run_id": run_id, "stage": "architecture"})
+    state = {
+        "project_id": pid, "user_id": user_id, "attempt_generation": 0,
+        "brief": "late auxiliary charges", "ok": True, "spend": 0.01,
+    }
+    guard.record("offline-test", 100, 50, 0.002,
+                 meta={"run_id": run_id, "stage": "electrical_review"})
+    guard.record("offline-test", 100, 50, 0.003,
+                 meta={"run_id": run_id, "stage": "silk_plan"})
+    guard.record("offline-test", 100, 50, 0.4,
+                 meta={"run_id": f"p{pid + 1}-unrelated", "stage": "silk_plan"})
+
+    web._persist_project(state)
+
+    project = store.get_project(pid)
+    assert project.status == "ok"
+    assert project.cost_usd == pytest.approx(0.015)
+    assert state["spend"] == pytest.approx(project.cost_usd)
+
+
+def test_ledger_read_failure_keeps_known_cost_and_does_not_leave_project_running(
+        store, user_id, tmp_path, monkeypatch):
+    unreadable_ledger = tmp_path / "ledger-directory"
+    unreadable_ledger.mkdir()
+    settings = web.Settings(api_key="offline-test", ledger_path=unreadable_ledger)
+    monkeypatch.setattr(web.Settings, "from_env", classmethod(lambda cls: settings))
+    monkeypatch.setattr(web.notify, "notify_run_event", lambda *args, **kwargs: None)
+    pid = seed_project(store, user_id, "failed generation with unavailable ledger")
+    state = {
+        "project_id": pid, "user_id": user_id, "attempt_generation": 0,
+        "brief": "failed generation with unavailable ledger", "spend": 0.04,
+        "ok": False,
+    }
+
+    web._persist_project(state)
+
+    project = store.get_project(pid)
+    assert project.status == "failed"
+    assert project.cost_usd == pytest.approx(0.04)

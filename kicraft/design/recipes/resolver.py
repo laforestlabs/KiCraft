@@ -17,8 +17,10 @@ from kicraft.design.lowering import (
 )
 from kicraft.design.models import (
     Architecture,
+    ExternalADCContract,
     CircuitRequirement,
     RecipeResolutionRecord,
+    STM32G030_ADC_SOURCE_MAX_OHM,
     RecipeSelection,
 )
 from kicraft.design.part_identity import (
@@ -80,6 +82,7 @@ class ResolutionResult(BaseModel):
     protected_identities: list[str] = Field(default_factory=list)
     records: list[RecipeResolutionRecord] = Field(default_factory=list)
     requirements: list[CircuitRequirement] = Field(default_factory=list)
+    external_adc_contracts: list[ExternalADCContract] = Field(default_factory=list)
 
 
 class RecipeResolutionError(ValueError):
@@ -1404,6 +1407,92 @@ def _unowned_endpoint_diagnostics(
     ]
 
 
+def _external_adc_contracts(
+    result: ResolutionResult, definitions: dict[str, RecipeDefinition],
+) -> None:
+    """Bind exposed connector ports to reviewed STM32G030 ADC pin allocations."""
+    for selection in result.selections:
+        definition = definitions[selection.recipe]
+        if definition.exact_part not in {"STM32G030F6P6", "STM32G030K6T6"}:
+            continue
+        supply = selection.port_bindings.get("vdd")
+        ground = selection.port_bindings.get("gnd")
+        if not supply or not ground:
+            continue
+        for allocation in selection.pin_allocations:
+            if allocation.capability != "adc":
+                continue
+            for connector in result.requirements:
+                if connector.role != "connector" or allocation.net not in connector.ports.values():
+                    continue
+                stated = [
+                    row for row in connector.obligations
+                    if row.kind == "quantitative"
+                    and re.search(r"\b(?:adc|analog|signal|input)\b.*\bvoltage\b", row.quantity, re.I)
+                ]
+                if stated:
+                    result.blocking.append(ResolutionDiagnostic(
+                        code="external_adc_requirement_unverified",
+                        requirement_id=connector.id, sheet=connector.sheet,
+                        message="A stated external ADC voltage requirement needs a reviewed "
+                                "conditioning circuit or explicit verification; the default "
+                                "rail-relative input contract cannot replace it.",
+                        evidence=[row.original_obligation_id for row in stated],
+                    ))
+                    continue
+                sources = [row for row in connector.obligations if row.kind == "external_analog_source"]
+                # DS12991 operating VDD minimum is 2.0 V; on these packages
+                # VREF+ is VDD. Absolute bounds above that minimum cannot be
+                # guaranteed against the actual rail, even on a nominal 3.3 V design.
+                incompatible = [
+                    row for row in sources
+                    if (row.minimum_v is not None and not 0 <= row.minimum_v <= 2.0)
+                    or (row.maximum_v is not None and not 0 <= row.maximum_v <= 2.0)
+                    or row.may_drive_unpowered is True
+                    or (row.source_impedance_ohm is not None
+                        and row.source_impedance_ohm > STM32G030_ADC_SOURCE_MAX_OHM)
+                    or row.minimum_sample_rate_hz is not None
+                    or row.maximum_error_v is not None
+                ]
+                if incompatible:
+                    result.blocking.append(ResolutionDiagnostic(
+                        code="external_adc_requirement_unverified",
+                        requirement_id=connector.id, sheet=connector.sheet,
+                        message="The direct ADC input cannot establish the stated source "
+                                "voltage, unpowered drive, source impedance, rate or error "
+                                "requirement; a reviewed compatible interface is required.",
+                        evidence=[row.original_obligation_id for row in incompatible],
+                    ))
+                    continue
+                for port, net in connector.ports.items():
+                    if net != allocation.net:
+                        continue
+                    contract = ExternalADCContract(
+                        connector_requirement=connector.id, connector_port=port,
+                        net=net, mcu_instance=selection.instance, mcu_pin=allocation.pin,
+                        mcu_part=definition.exact_part, reference_net=ground,
+                        supply_net=supply,
+                        source_obligation_ids=[row.original_obligation_id for row in sources],
+                        datasheet=next(part.datasheet for part in definition.parts if part.role == "mcu"),
+                    )
+                    result.external_adc_contracts.append(contract)
+                    result.assumptions.append(
+                        f"{connector.id}.{port} ({net}) directly drives {definition.exact_part} "
+                        f"pin {allocation.pin}: external ADC input must stay between {ground} "
+                        f"(VSSA) and the actual {supply} (VREF+/VDD), not 5 V tolerant. "
+                        "When the MCU is unpowered or its rail is not valid, the source must "
+                        "be high impedance and must not drive the input. The total Thevenin source "
+                        f"impedance must be <= {contract.source_impedance_max_ohm:g} ohms; use "
+                        f"{contract.resolution_bits}-bit ADC at {contract.adc_clock_min_hz / 1e6:g}–"
+                        f"{contract.adc_clock_max_hz / 1e6:g} MHz and {contract.sample_cycles:g} "
+                        f"sampling cycles. Enable BOOSTEN below {contract.boost_threshold_v:g} V "
+                        "VDDA and disable it at or above that voltage; follow DS12991 startup "
+                        "requirements and calibrate after power-up as recommended. Firmware to "
+                        "configure this is not provided; no rate or accuracy is promised (defaulted)."
+                    )
+
+
+
 def _bind_analog_adc_limits(
     result: ResolutionResult,
     definitions: dict[str, RecipeDefinition],
@@ -2696,6 +2785,7 @@ def resolve_architecture_recipes(
     resolved_requirements = {row.id: row for row in result.requirements}
     result.requirements = [resolved_requirements.get(row.id, row) for row in requirements]
     _bind_analog_adc_limits(result, definitions, architecture_model.rail_voltages)
+    _external_adc_contracts(result, definitions)
     result.records.sort(key=lambda record: record.requirement_id)
     selected_requirement_ids = {
         requirement_id
@@ -2744,6 +2834,7 @@ def apply_architecture_recipe_resolution(
             or any(row.role == "mcu_core" for row in requirements),
             "requirements": requirements,
             "recipe_selections": result.selections,
+            "external_adc_contracts": result.external_adc_contracts,
             "recipe_resolution": result.records,
             "unresolved_requirement_ids": result.unresolved_requirements,
             "protected_identities": result.protected_identities,

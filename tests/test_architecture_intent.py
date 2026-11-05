@@ -4443,3 +4443,170 @@ def test_motor_logic_supply_uses_connected_mcu_rail_not_motor_supply():
                                        "family": "esp32-s3-wroom-1-module", "supply": "VBAT"})
     completed["signals"].append({"name": "CMD2", "from": "mcu2.output_cmd", "to": "drv.ain2"})
     assert "logic_vdd" not in complete_architecture_payload(completed)["requirements"][1].get("supply_bindings", {})
+
+
+def _external_adc_resolution(obligations=()):
+    from kicraft.design.models import CircuitRequirement, RecipeSelection
+    from kicraft.design.recipes.resolver import ResolutionResult, _external_adc_contracts
+    from kicraft.design.recipes.wave_a_mcus import STM32G030K6T6_MINIMAL
+
+    requirement = CircuitRequirement(
+        id="term", sheet="INPUT", role="connector", family="screw-terminal",
+        ports={"positive": "ANALOG", "negative": "GND"}, obligations=list(obligations),
+    )
+    selection = RecipeSelection(
+        recipe=STM32G030K6T6_MINIMAL.recipe, instance="core", sheets={"mcu": "MCU"},
+        port_bindings={"vdd": "VLOGIC", "gnd": "GND", "adc_0": "ANALOG"},
+        pin_allocations=[{"net": "ANALOG", "pin": "7", "capability": "adc"}],
+    )
+    result = ResolutionResult(requirements=[requirement], selections=[selection])
+    _external_adc_contracts(result, {selection.recipe: STM32G030K6T6_MINIMAL})
+    return result
+
+
+def test_external_adc_bound_to_reviewed_pin_and_actual_rails():
+    result = _external_adc_resolution()
+    assert not result.blocking
+    contract, = result.external_adc_contracts
+    assert (contract.connector_requirement, contract.connector_port, contract.net) == (
+        "term", "positive", "ANALOG",
+    )
+    assert (contract.mcu_instance, contract.mcu_pin, contract.reference_net, contract.supply_net) == (
+        "core", "7", "GND", "VLOGIC",
+    )
+
+
+@pytest.mark.parametrize("source", [
+    {"minimum_v": -0.01}, {"minimum_v": 2.01}, {"maximum_v": 2.01},
+    {"may_drive_unpowered": True}, {"minimum_sample_rate_hz": 1000},
+    {"maximum_error_v": 0.01}, {"source_impedance_ohm": 1000.01},
+])
+def test_explicit_adc_requirements_are_not_replaced_by_default(source):
+    result = _external_adc_resolution(obligations=[{
+        "kind": "external_analog_source", "original_obligation_id": "source", **source,
+    }])
+    assert any(row.code == "external_adc_requirement_unverified" for row in result.blocking)
+
+
+@pytest.mark.parametrize("source_impedance", [0, 1000])
+def test_external_adc_compatible_stated_source_is_retained(source_impedance):
+    result = _external_adc_resolution(obligations=[{
+        "kind": "external_analog_source", "original_obligation_id": "source",
+        "minimum_v": 0, "maximum_v": 2, "may_drive_unpowered": False,
+        "source_impedance_ohm": source_impedance,
+    }])
+    assert not result.blocking
+    assert result.external_adc_contracts[0].source_obligation_ids == ["source"]
+
+
+def test_external_adc_typed_voltage_requirement_is_not_replaced():
+    result = _external_adc_resolution(obligations=[{
+        "kind": "quantitative", "original_obligation_id": "signal-voltage",
+        "quantity": "signal voltage", "relation": "maximum", "value": 5, "unit": "V",
+    }])
+    assert any(row.code == "external_adc_requirement_unverified" for row in result.blocking)
+
+
+def test_external_adc_notes_bind_actual_wiring_and_refuse_missing_endpoint(tmp_path):
+    from kicraft.design.models import Architecture, BOM, BomPart, NetConnection
+    from kicraft.design.synthesis.emitter import _emit_root, _external_adc_notes
+
+    result = _external_adc_resolution()
+    architecture = Architecture.model_construct(
+        requirements=result.requirements, external_adc_contracts=result.external_adc_contracts,
+    )
+    bom = BOM.model_construct(
+        parts=[
+            BomPart(ref="J3", value="terminal", symbol="Connector:Test", footprint="Test:Test",
+                    sheet="INPUT", lowering_requirement_id="term"),
+            BomPart(ref="U2", value="mcu", symbol="MCU:Test", footprint="Test:Test",
+                    sheet="MCU", recipe_instance="core", recipe_role="mcu"),
+        ],
+        connections=[
+            NetConnection(net_name="ANALOG", sheet="INPUT", endpoints=[{"ref": "J3", "pin": "1"}]),
+            NetConnection(net_name="ANALOG", sheet="MCU", endpoints=[{"ref": "U2", "pin": "7"}]),
+        ],
+    )
+    notes = _external_adc_notes(architecture, bom)
+    assert len(notes) == 1 and all(item in notes[0] for item in ("J3.1", "U2.7", "ANALOG", "VLOGIC"))
+    root = _emit_root("TEST", tmp_path, [], architecture, bom, "TEST")
+    assert all(item in root.read_text() for item in ("J3.1", "U2.7", "ANALOG", "VLOGIC"))
+    bom.connections[1].endpoints[0].pin = "8"
+    with pytest.raises(ValueError):
+        _external_adc_notes(architecture, bom)
+    bom.connections[1].endpoints[0].pin = "7"
+    bom.connections.pop()
+    with pytest.raises(ValueError):
+        _external_adc_notes(architecture, bom)
+
+
+def test_external_adc_contract_survives_recipe_resolution():
+    from kicraft.design.models import Architecture, CircuitRequirement
+    from kicraft.design.recipes import apply_architecture_recipe_resolution
+
+    architecture = Architecture(
+        mcu_present=True, rail_voltages={"+3V3": 3.3, "GND": 0.0},
+        power_nets=["+3V3", "GND"],
+        sheets=[
+            {"name": "INPUT", "stem": "INPUT", "function": "External signal"},
+            {"name": "MCU", "stem": "MCU", "function": "ADC"},
+        ],
+        inter_sheet_nets=[{"name": "ANALOG", "endpoints": [
+            {"sheet": "INPUT", "direction": "output"},
+            {"sheet": "MCU", "direction": "input"},
+        ]}],
+        requirements=[
+            CircuitRequirement(id="term", sheet="INPUT", role="connector",
+                               family="screw-terminal",
+                               ports={"positive": "ANALOG", "negative": "GND"}),
+            CircuitRequirement(id="mcu", sheet="MCU", role="mcu_core", family="stm32g0",
+                               exact_part="STM32G030K6T6", interfaces=["adc"],
+                               ports={"vdd": "+3V3", "gnd": "GND", "adc_0": "ANALOG"}),
+        ],
+    )
+    resolved = apply_architecture_recipe_resolution(architecture, {"goal": "5 V host supply"})
+    contract, = resolved.external_adc_contracts
+    assert contract.net == "ANALOG"
+    assert contract.mcu_pin == next(
+        pin.pin for selection in resolved.recipe_selections for pin in selection.pin_allocations
+        if pin.net == "ANALOG" and pin.capability == "adc"
+    )
+    assert Architecture.model_validate(resolved.model_dump()).external_adc_contracts == [contract]
+    from kicraft.design.recipes import RecipeResolutionError
+
+    stated = architecture.model_dump()
+    source = {"kind": "external_analog_source", "original_obligation_id": "sensor",
+              "maximum_v": 5.0, "may_drive_unpowered": True}
+    stated["requirements"][0]["obligations"] = [source]
+    stated["obligations"] = [source]
+    with pytest.raises(RecipeResolutionError) as exc:
+        apply_architecture_recipe_resolution(stated, {"goal": "5 V host supply"})
+    assert any(row.code == "external_adc_requirement_unverified" for row in exc.value.diagnostics)
+
+
+def test_external_analog_source_is_restored_verbatim_across_stages():
+    from kicraft.design.models import IntentSlot
+    from kicraft.server.stage_contracts import restore_source_obligations
+
+    source = {
+        "kind": "external_analog_source", "original_obligation_id": "sensor-input",
+        "minimum_v": 0.0, "maximum_v": 5.0, "may_drive_unpowered": True,
+        "source_impedance_ohm": 12000.0, "minimum_sample_rate_hz": 500.0,
+    }
+    intent = IntentSlot(goal="sensor interface", obligations=[source]).model_dump(exclude_none=True)
+    spec = restore_source_obligations({"blocks": []}, {"intent": intent}, stage="functional_spec")
+    arch = restore_source_obligations({}, {"intent": intent, "functional_spec": spec})
+    assert spec["obligations"] == [source]
+    assert arch["obligations"] == [source]
+
+
+def test_external_analog_source_requires_connector_owner():
+    source = {"kind": "external_analog_source", "original_obligation_id": "sensor",
+              "maximum_v": 5.0}
+    payload = _one_part_intent({
+        "id": "core", "role": "mcu_core", "family": "stm32g0",
+        "obligation_ids": ["sensor"],
+    })
+    payload["obligations"] = [source]
+    with pytest.raises(ValueError, match="physical signal connector"):
+        ArchitectureIntent.model_validate(payload)

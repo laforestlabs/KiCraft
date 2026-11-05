@@ -676,7 +676,7 @@ def test_a_recipe_regulator_transfer_requires_the_real_owned_graph():
     from kicraft.design.synthesis.validation import _recipe_transfer_pairs
 
     expansion = expand_recipe(RecipeSelection(
-        recipe="ams1117-3v3@1", instance="reg",
+        recipe="ams1117-3v3@2", instance="reg",
         sheets={"power": "POWER"},
         port_bindings={"input": "VIN_PROTECTED", "output": "+3V3", "gnd": "GND"},
         requirement_ids=["reg"],

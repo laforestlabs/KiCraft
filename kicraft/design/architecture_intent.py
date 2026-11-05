@@ -455,6 +455,16 @@ class ArchitectureIntent(BaseModel):
                 "owner-requiring obligation in the implementing requirement's `obligation_ids`. "
                 f"listed_at_top_level_only={unowned}"
             )
+        for row in self.obligations:
+            if row.kind == "external_analog_source" and not any(
+                requirement.role == "connector"
+                and row.original_obligation_id in requirement.obligation_ids
+                for requirement in self.requirements
+            ):
+                raise ValueError(
+                    "External analog source obligations must be owned by the physical signal "
+                    f"connector: {row.original_obligation_id}"
+                )
         # Distinct physical requirements demand distinct instances, even on one
         # sheet. If that lower bound proves a board-wide count, do not charge
         # the count again in every local BOM unit.

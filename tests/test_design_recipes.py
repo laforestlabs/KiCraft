@@ -870,6 +870,33 @@ def test_tlv62569_old_derived_graph_requires_upstream_regeneration(obsolete):
     }) == "architecture"
 
 
+@pytest.mark.parametrize(("old", "new"), [
+    ("me6211-3v3@1", "me6211-3v3@2"),
+    ("mcp1700-3v3@1", "mcp1700-3v3@2"),
+    ("ams1117-3v3@1", "ams1117-3v3@2"),
+])
+def test_old_ldo_graph_requires_architecture_regeneration(old, new):
+    from kicraft.design.recipe_versions import legacy_recipe_replacement
+    from kicraft.design.stage_state import legacy_recipe_resume_stage
+
+    saved = RecipeSelection(
+        recipe=old, instance="ldo", sheets={"power": "POWER"},
+        port_bindings={"input": "VIN", "gnd": "GND", "output": "VOUT"},
+    )
+    assert legacy_recipe_replacement(old) == new
+    with pytest.raises(ValueError, match="architecture regeneration"):
+        migrate_recipe_selection(saved)
+    with pytest.raises(ValueError, match="architecture regeneration"):
+        expand_recipe(saved)
+    assert saved.recipe == old
+    assert legacy_recipe_resume_stage({
+        "architecture": {"recipe_selections": [saved.model_dump()]}, "bom": {"parts": []},
+    }) == "architecture"
+    assert legacy_recipe_resume_stage({
+        "bom": {"recipe_ownership": [{"recipe": old}]},
+    }) == "bom"
+
+
 def test_raw_legacy_recipe_ids_identify_artifacts_needing_regeneration():
     from kicraft.design.recipe_versions import is_legacy_recipe_id, legacy_recipe_replacement
 
@@ -1044,7 +1071,7 @@ def test_me6211_enable_binding_or_default_tracks_pin_three(binding, expected):
     if binding is not None:
         ports["enable"] = binding
     expansion = expand_recipe(RecipeSelection(
-        recipe="me6211-3v3@1", instance="ldo",
+        recipe="me6211-3v3@2", instance="ldo",
         sheets={"power": "POWER"}, port_bindings=ports,
     ))
     regulator = next(part.ref for part in expansion.parts if part.recipe_role == "regulator")

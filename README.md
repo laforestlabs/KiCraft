@@ -719,6 +719,22 @@ symbol's no-connect contacts 19/21 remain unused. Exact or saved
 silently migrated. This is manufacturer/nominal library qualification, not an
 independent acceptance of a newly generated board.
 
+Direct external ADC inputs on the reviewed STM32G030 F6/K6 constructions carry
+source-owned connector/net/pin and supply/reference bindings into architecture
+assumptions and the native root schematic. Signals must remain between VSSA and
+the actual VREF+/VDD rail; they are not 5 V tolerant and must not be driven while
+the MCU rail is unpowered or invalid. The conservative operating setup is total
+Thevenin source impedance ≤1 kΩ, 12-bit conversion, actual ADC clock 0.14–16 MHz,
+160.5 sampling cycles, and BOOSTEN selected at the 2.4 V VDDA threshold, with
+DS12991 startup and calibration conditions. ADC-configuration firmware is not
+provided; no sampling rate or accuracy is promised. Typed original signal-range,
+power-off, impedance and performance obligations survive stage normalization;
+incompatible obligations are refused, not replaced by the default. Absolute
+source limits above 2 V are conservatively refused against the MCU operating
+minimum, not because the regulated rail normally falls to 2 V. Original-prose
+extraction is not guaranteed; independent original-requirements audit remains
+necessary.
+
 An exact reviewed ordering code in a requirement's family field selects its
 existing native construction and canonical family, rather than a model-owned
 approximation of the internals. This does not recognize unreviewed prefixes,
@@ -820,6 +836,12 @@ constructions enforce the 100 nF local and 4.7 µF bulk capacitors against
 their MCU's actual supply/ground pad centers, each within 3 mm. A local
 100 nF capacitor does not discharge the bulk capacitor's separate obligation.
 
+The `me6211-3v3@2`, `mcp1700-3v3@2` and `ams1117-3v3@2` constructions
+compile both input and output capacitors into exact-pin owned-bypass constraints
+within 3 mm. Locality does not establish capacitor ratings, effective biased
+capacitance, ESR or regulator stability. Those remain selected-part obligations;
+in particular, AMS1117's generic nominal capacitors are not blanket qualified.
+
 An explicit all-connectors-on-one-edge requirement includes access-only
 connectors such as SWD. Generated constraints preserve those owners and
 the final native-board gate rejects missing, demoted or unmeasured owners;
@@ -834,6 +856,12 @@ sourced rail voltage, an external bias and a qualified header/shunt pair.
 Owned bypass groups reserve constrained geometry first and search compact
 allowed owner orientations before locking soft poses. Pad locality,
 courtyard clearance, keepouts and final-board margins remain hard constraints.
+An owned-group capacity failure is recorded as a rejected, unrouted placement
+round and reaches the existing bounded larger-canvas ladder. Placement-only
+mode cannot accept it; malformed ownership, missing pads and mismatched nets
+remain hard errors. No canvas-fill, round-count, time, clearance or final-board
+requirement is relaxed.
+
 A lone edge header keeps its long axis parallel to the edge instead of
 unnecessarily bisecting the leaf. Perpendicular bank packing applies when
 at least two eligible single-row headers share that edge; explicit rotations
@@ -863,11 +891,17 @@ DRV8833's fault pull-up uses an explicit MCU logic supply, never the motor rail.
 Ambiguous legacy parameters are refused rather than guessed.
 Derived BOMs carrying obsolete ownership must be regenerated upstream.
 Changing their recipe labels is not a migration of the electrical graph.
+Saved ME6211, MCP1700 and AMS1117 `@1` graphs likewise require architecture
+regeneration against their `@2` input/output support contracts, not BOM relabeling.
 
 Provider admission reserves conservative full-request exposure before dispatch.
 Verified receipt cost is billed spend; failed, cancelled or missing-cost responses
 retain uncertain exposure rather than being reported as free. Existing project,
 daily and lifetime limits include outstanding reservations and uncertainty.
+Project finalization reads the inclusive project-attributed priced ledger total
+after post-design electrical-review and silkscreen calls. A failed ledger read
+retains the known estimate without leaving the project permanently running;
+uncertain provider exposure is still separate from priced spend.
 Stage progress, successful synthesis and green checks do not establish a complete
 fabrication-ready product.
 

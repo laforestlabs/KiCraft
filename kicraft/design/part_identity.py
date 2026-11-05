@@ -7174,7 +7174,7 @@ _DEVICE_MEMBERS: dict[str, frozenset[str]] = {
     "temt6000": frozenset({"temt6000x01"}),
     "drv5055": frozenset({"drv5055a3qdbzr"}),
     # ME6211C33M5G-N and TLV62569DBVR are the exact order codes the reviewed
-    # me6211-3v3@1 and tlv62569-3v3@1 recipes already emit for their published
+    # me6211-3v3@2 and tlv62569-3v3@3 recipes emit for their published
     # families; AP2112K-3.3TRG1 is the 3.3 V order code of the AP2112K device.
     "me6211-3v3": frozenset({"me6211c33m5g-n"}),
     "tlv62569": frozenset({"tlv62569dbvr"}),

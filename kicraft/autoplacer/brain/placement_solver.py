@@ -184,6 +184,10 @@ def _set_block_rotation(comp: Component, rotation: float) -> None:
     comp.height_mm = geom.height_mm
 
 
+class LocalBypassPlacementError(ValueError):
+    """The current geometry cannot reserve the required owned capacitor group."""
+
+
 class PlacementSolver:
     """Force-directed placement with edge-first constraints and scoring feedback.
 
@@ -1130,7 +1134,7 @@ class PlacementSolver:
                         "legality_gap_mm": gap, "blockers": blockers,
                         "keepout_blockers": keepout_blockers, "keepin_blockers": keepin_blockers,
                     }
-                    raise ValueError(
+                    raise LocalBypassPlacementError(
                         f"local bypass {owner_ref}/{cap_ref}: no legal placement within "
                         f"{limit:g} mm of both owned pads; evidence="
                         + json.dumps(evidence, sort_keys=True, separators=(",", ":"))
@@ -1173,7 +1177,7 @@ class PlacementSolver:
                             (c.width_mm, c.height_mm) for c in components
                         }),
                     })
-                raise ValueError(
+                raise LocalBypassPlacementError(
                     f"local bypasses for {owner_ref}: no joint legal placement; "
                     "joint_evidence=" + json.dumps(
                         {"owner_ref": owner_ref, "gap_mm": gap, "specs": specs,
@@ -1335,9 +1339,7 @@ class PlacementSolver:
                         continue
                     try:
                         self._place_local_bypasses(comps, reserve=True)
-                    except ValueError as exc:
-                        if "no legal placement" not in str(exc) and "no joint legal placement" not in str(exc):
-                            raise
+                    except LocalBypassPlacementError as exc:
                         failure = exc
                         continue
                     for ref in (owner_ref, *(spec["bypass_ref"] for spec in specs)):
@@ -1401,7 +1403,7 @@ class PlacementSolver:
                     old = Point(owner.pos.x, owner.pos.y)
                     owner.pos = original_pos
                     _update_pad_positions(owner, old, owner.rotation)
-                    raise ValueError(
+                    raise LocalBypassPlacementError(
                         f"local bypasses for {owner_ref}: no legal group reservation "
                         f"on the board; {failure or 'owner blocked'}; owner_evidence="
                         + json.dumps(owner_evidence, sort_keys=True, separators=(",", ":"))

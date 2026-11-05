@@ -12,6 +12,9 @@ _LEGACY_RECIPE_REPLACEMENTS = {
     "stm32g030k6t6-minimal@1": "stm32g030k6t6-minimal@2",
     "tlv62569-3v3@1": "tlv62569-3v3@3",
     "tlv62569-3v3@2": "tlv62569-3v3@3",
+    "me6211-3v3@1": "me6211-3v3@2",
+    "mcp1700-3v3@1": "mcp1700-3v3@2",
+    "ams1117-3v3@1": "ams1117-3v3@2",
     "tps54331-adjustable@1": "tps54331-adjustable@2",
     "tps54331-12v-1a@1": "tps54331-12v-1a@2",
 }

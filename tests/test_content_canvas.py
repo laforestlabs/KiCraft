@@ -419,7 +419,7 @@ class _FakeNode:
         self.id = definition.id
 
 
-def _run_ladder(monkeypatch, cfg, accept_plan, rounds=1):
+def _run_ladder(monkeypatch, cfg, accept_plan, rounds=1, route=True):
     """Drive _solve_leaf_subcircuit with a fake per-round solver.
 
     ``accept_plan(call_index, extraction)`` -> True for an accepted
@@ -486,7 +486,7 @@ def _run_ladder(monkeypatch, cfg, accept_plan, rounds=1):
         cfg=cfg,
         rounds=rounds,
         base_seed=7,
-        route=True,
+        route=route,
         experiment_round=1,
     )
     return solved, calls
@@ -502,6 +502,53 @@ class TestCanvasLadder:
         assert w < 60.0 and h < 60.0
         assert solved.scheduling_metadata["canvas_mode"] == "content"
         assert solved.scheduling_metadata["canvas_attempts"] == ["0.28"]
+
+    def test_local_bypass_capacity_uses_existing_larger_canvas_and_keeps_rejections(
+        self, monkeypatch,
+    ):
+        from kicraft.autoplacer.brain.placement_solver import LocalBypassPlacementError
+
+        def accept_roomy_canvas(_index, extraction):
+            if extraction.local_state.board_width < 100.0:
+                raise LocalBypassPlacementError("owned group blocked by locked edge header")
+            return True
+
+        solved, _ = _run_ladder(
+            monkeypatch,
+            {"leaf_canvas_mode": "content", "leaf_canvas_fill_ladder": [0.22]},
+            accept_roomy_canvas,
+        )
+
+        assert solved.extraction.local_state.board_width > 100.0
+        assert solved.best_round.routed
+        rejected = [row for row in solved.all_rounds if not row.routed]
+        assert len(rejected) == 2
+        assert all(row.routing["skipped"] and row.routing["failed"] for row in rejected)
+        assert all(not row.routing.get("round_board_routed") for row in rejected)
+        assert solved.failure_summary["failed_round_count"] == len(rejected)
+        assert all("locked edge header" in row["message"]
+                   for row in solved.failure_summary["failures"])
+        assert len({row.round_index for row in solved.all_rounds}) == len(solved.all_rounds)
+
+    @pytest.mark.parametrize("route", [False, True])
+    def test_terminal_capacity_failure_never_becomes_an_accepted_placement(
+        self, monkeypatch, route,
+    ):
+        from kicraft.autoplacer.brain.placement_solver import LocalBypassPlacementError
+
+        def no_room(_index, _extraction):
+            raise LocalBypassPlacementError("no legal group reservation")
+
+        with pytest.raises(RuntimeError, match="placement_locality"):
+            _run_ladder(monkeypatch, {"leaf_canvas_mode": "seed-bbox"}, no_room,
+                        route=route)
+
+    def test_invalid_owned_pad_data_is_not_treated_as_canvas_capacity(self, monkeypatch):
+        def missing_pad(_index, _extraction):
+            raise ValueError("local bypass U1/C1 missing pads")
+
+        with pytest.raises(ValueError, match="missing pads"):
+            _run_ladder(monkeypatch, {"leaf_canvas_mode": "content"}, missing_pad)
 
     def test_ladder_grows_to_seed_bbox_on_failure(self, monkeypatch):
         cfg = {

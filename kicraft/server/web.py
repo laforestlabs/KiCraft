@@ -1988,6 +1988,10 @@ def _persist_project_locked(state: dict) -> None:
     finally:
         _close_journal(state)
         try:
+            # Review and silkscreen calls finish after the main-stage estimate.
+            spend = _project_spend_usd(pid)
+            if spend is not None:
+                state["spend"] = spend
             landed = store.finish_project_if_running(
                 pid, status, stem=stem, cost_usd=state.get("spend"),
                 dir_path=dir_path, zip_path=zip_path,
