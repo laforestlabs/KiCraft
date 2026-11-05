@@ -1313,7 +1313,7 @@ _REVIEWED_ASSUMPTIONS: dict[str, tuple[str, ...]] = {
     "rounded-c3-devboard": (
             "Reference chooses 3mm corner radius, USB-C on bottom edge, actual 2x10 2.54mm header on opposite top edge.",
             "GPIO9 is the ESP32-C3 boot strap and is not exposed; BOOT/RESET controls are recipe-internal nets, not header pins. The 2x10 header repeats 3V3/GND/VBUS on five positions to fill all 20 positions.",
-            "The frozen reference used the earlier TLV62569DBVR tlv62569-3v3@1 construction; its 2 A IC rating did not qualify a 2 A assembled board. Current tlv62569-3v3@2 is a 0.5 A composition with an exact 2.2 uH inductor and qualified input/output capacitors for the 5 V to 3.3 V path. The older reference requires upstream regeneration rather than BOM relabeling before any fresh fabrication claim; no measured historical artifact is changed.",
+            "The frozen reference used the earlier TLV62569DBVR tlv62569-3v3@1 construction; its 2 A IC rating did not qualify a 2 A assembled board. Current tlv62569-3v3@3 is a 0.5 A composition with an exact 2.2 uH inductor, a compact pin-owned 10 uF input capacitor and qualified output capacitors for the 5 V to 3.3 V path. The older reference requires upstream regeneration rather than BOM relabeling before any fresh fabrication claim; no measured historical artifact is changed.",
     ),
     "rp2040-min": (
             "No engineering assumptions are recorded for this brief.",

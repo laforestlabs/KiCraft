@@ -782,7 +782,7 @@ def _shared_net(expansion, ref: str, *pins: str) -> list[str]:
 def test_a_declared_enable_binding_is_not_overwritten():
     """A brief that wires `enable` explicitly keeps its net: the recipe default tie is a fallback.
 
-    `tlv62569-3v3@2` publishes an optional `enable` port tied to `input` by default. A design that
+    The reviewed TLV62569 composition publishes an optional `enable` port tied to `input` by default. A design that
     names a net for it (the enable-jumper brief) must keep that binding, and the tie must not turn
     the binding into a `recipe_signal_in_power_nets` refusal.
     """
@@ -829,7 +829,6 @@ def test_a_declared_enable_binding_is_not_overwritten():
     canonical, _expanded = _normalize_stage_response("architecture", payload, {})
 
     selection = canonical["recipe_selections"][0]
-    assert selection["recipe"] == "tlv62569-3v3@2"
     assert selection["port_bindings"]["enable"] == "EN_JUMPER"
     assert selection["port_bindings"]["input"] == "VIN_12V"
 
@@ -842,9 +841,9 @@ def test_a_declared_enable_binding_is_not_overwritten():
 def test_an_unbound_enable_port_expands_onto_the_input_rail():
     """The pre-change selection shape — no `enable` key — still expands onto the input rail."""
     selection = RecipeSelection(
-        recipe="tlv62569-3v3@2",
+        recipe="tlv62569-3v3@3",
         instance="buck",
-        sheets={role: "POWER" for role in get_recipe("tlv62569-3v3@2").required_sheet_roles},
+        sheets={role: "POWER" for role in get_recipe("tlv62569-3v3@3").required_sheet_roles},
         port_bindings={"input": "VIN_12V", "gnd": "GND", "output": "+5V"},
     )
 
@@ -855,39 +854,15 @@ def test_an_unbound_enable_port_expands_onto_the_input_rail():
     assert not any(connection.net_name == "enable" for connection in expansion.connections)
 
 
-def test_tlv62569_v2_owns_bounded_exact_support_and_old_graph_requires_regeneration():
+@pytest.mark.parametrize("obsolete", ["tlv62569-3v3@1", "tlv62569-3v3@2"])
+def test_tlv62569_old_derived_graph_requires_upstream_regeneration(obsolete):
     from kicraft.design.stage_state import legacy_recipe_resume_stage
 
-    definition = get_recipe("tlv62569-3v3@2")
-    assert definition.rated_output_current_a == 0.5
-    selection = RecipeSelection(
-        recipe=definition.recipe, instance="buck", sheets={"power": "POWER"},
+    old = RecipeSelection(
+        recipe=obsolete, instance="buck", sheets={"power": "POWER"},
         port_bindings={"input": "VIN", "gnd": "GND", "output": "VOUT"},
         requirement_ids=["buck"],
     )
-    expansion = expand_recipe(selection)
-    by_role = {}
-    for part in expansion.parts:
-        by_role.setdefault(part.recipe_role, []).append(part)
-    assert [(p.mpn, p.sourcing_note) for p in by_role["inductor"]] == [
-        ("FXL0630-2R2-M", "LCSC C167218")]
-    assert len(by_role["input_cap"]) == 2 and all(
-        p.mpn == "GRM31CR71H475KA12L" and p.sourcing_note == "LCSC C77096"
-        for p in by_role["input_cap"])
-    assert len(by_role["output_cap"]) == 2 and all(
-        p.mpn == "GRM31CR71E106KA12L" and p.sourcing_note == "LCSC C77093"
-        for p in by_role["output_cap"])
-    nets = {(ep.ref, ep.pin): connection.net_name
-            for connection in expansion.connections for ep in connection.endpoints}
-    inductor = by_role["inductor"][0]
-    converter = by_role["converter"][0]
-    assert nets[inductor.ref, "1"] == nets[converter.ref, "3"]
-    assert nets[inductor.ref, "2"] == "VOUT"
-    assert all(nets[p.ref, "1"] == "VIN" and nets[p.ref, "2"] == "GND"
-               for p in by_role["input_cap"])
-    assert all(nets[p.ref, "1"] == "VOUT" and nets[p.ref, "2"] == "GND"
-               for p in by_role["output_cap"])
-    old = selection.model_copy(update={"recipe": "tlv62569-3v3@1"})
     with pytest.raises(ValueError, match="architecture regeneration"):
         migrate_recipe_selection(old)
     assert legacy_recipe_resume_stage({

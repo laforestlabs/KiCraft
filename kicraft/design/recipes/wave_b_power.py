@@ -121,6 +121,11 @@ _CATALOG_CAPACITORS = {
         "Capacitor_SMD:C_1206_3216Metric",
         "https://jlcpcb.com/api/file/downloadByFileSystemAccessId/8588932779736240128",
     ),
+    "10uF 25V X5R": (
+        "CL21A106KAYNNNE",
+        "Capacitor_SMD:C_0805_2012Metric",
+        "https://jlcpcb.com/api/file/downloadByFileSystemAccessId/8579706853615591424",
+    ),
     "22uF 16V X7R": (
         "EMK316BB7226ML-T",
         "Capacitor_SMD:C_1206_3216Metric",
@@ -160,7 +165,7 @@ def _catalog_cap(role: str, value: str, quantity: int = 1) -> Group:
 # AP6320x EN is specifically documented as a high-voltage input and may be tied to its
 # 3.8--32 V VIN rail (DS41326 Rev. 3-2, pp. 4 and 10).
 _ENABLE_CONTROL_MAX_V: dict[str, float] = {
-    "tlv62569-3v3@2": 5.5,
+    "tlv62569-3v3@3": 5.5,
     "ap63203-3v3@1": 32.0,
     "ap63205-5v@1": 32.0,
     "tps54331-adjustable@2": 6.0,
@@ -949,7 +954,7 @@ def _buck(
 
 
 TLV62569_3V3 = _buck(
-    recipe="tlv62569-3v3@2",
+    recipe="tlv62569-3v3@3",
     family="tlv62569-3v3",
     part="TLV62569DBVR",
     symbol="tlv62569:TLV62569DBVR",
@@ -968,8 +973,8 @@ TLV62569_3V3 = TLV62569_3V3.model_copy(update={
               datasheet="https://datasheet.lcsc.com/datasheet/pdf/40dfb6cb4606b2ccaa4e89438a42f563.pdf?productCode=C167218").model_copy(
                   update={"sourcing_note": "LCSC C167218"})
         if part.role == "inductor" else
-        _catalog_cap("input_cap", "4.7uF 50V X7R", quantity=2).model_copy(
-            update={"sourcing_note": "LCSC C77096"})
+        _catalog_cap("input_cap", "10uF 25V X5R").model_copy(
+            update={"sourcing_note": "LCSC C15850"})
         if part.role == "input_cap" else
         _catalog_cap("output_cap", "10uF 25V X7R", quantity=2).model_copy(
             update={"sourcing_note": "LCSC C77093"})
@@ -978,17 +983,28 @@ TLV62569_3V3 = TLV62569_3V3.model_copy(update={
         if part.role == "converter" else part
         for part in TLV62569_3V3.parts
     ),
+    "pins": tuple(pin for pin in TLV62569_3V3.pins
+                  if pin.role != "input_cap" or pin.index == 0),
+    "placement_constraints": TLV62569_3V3.placement_constraints + (
+        Placement(kind="owned_bypass", role="input_cap", parameters={
+            "anchor_role": "converter", "power_net": "input", "ground_net": "gnd",
+            "max_mm": 3.0,
+        }),
+    ),
     "source_documents": TLV62569_3V3.source_documents + (
         *_source("https://datasheet.lcsc.com/datasheet/pdf/40dfb6cb4606b2ccaa4e89438a42f563.pdf?productCode=C167218",
                  "Cjiang FXL0630", "Electrical characteristics", "Recommended land pattern"),
         *_source("https://jlcpcb.com/api/file/downloadByFileSystemAccessId/8588932779736240128",
                  "Murata GRM31CR71E106KA12L", "Electrical characteristics"),
-        *_source("https://jlcpcb.com/api/file/downloadByFileSystemAccessId/8588893061610393600",
-                 "Murata GRM31CR71H475KA12L", "Electrical characteristics"),
+        *_source("https://jlcpcb.com/api/file/downloadByFileSystemAccessId/8579706853615591424",
+                 "Samsung CL21A106KAYNNNE", "Part numbering", "Structure and dimensions", "Surface mounting"),
     ),
     "electrical_assertions": TLV62569_3V3.electrical_assertions + (
         Assertion(code="tlv62569_support_envelope", message=(
             "This composition is limited to 0.5 A, not the IC's 2 A rating. "
+            "A single 10 uF/25 V X5R 0805 input ceramic is pin-owned within 3 mm "
+            "of VIN/GND; TI recommends 4.7 uF nominal for most applications. "
+            "Nominal input capacitance is not a guaranteed effective value. "
             "TI's table includes a 2.2 uH/22 uF nominal combination; these two "
             "10 uF capacitors total 20 uF nominal, and their effective capacitance "
             "under bias, temperature and tolerance and the actual loop stability "

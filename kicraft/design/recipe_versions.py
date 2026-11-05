@@ -10,7 +10,8 @@ _LEGACY_RECIPE_REPLACEMENTS = {
     "esp32-c3-mini-1-minimal@1": "esp32-c3-mini-1-minimal@2",
     "esp32-c3-mini-1-h4x-minimal@1": "esp32-c3-mini-1-h4x-minimal@2",
     "stm32g030k6t6-minimal@1": "stm32g030k6t6-minimal@2",
-    "tlv62569-3v3@1": "tlv62569-3v3@2",
+    "tlv62569-3v3@1": "tlv62569-3v3@3",
+    "tlv62569-3v3@2": "tlv62569-3v3@3",
     "tps54331-adjustable@1": "tps54331-adjustable@2",
     "tps54331-12v-1a@1": "tps54331-12v-1a@2",
 }

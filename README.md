@@ -802,11 +802,14 @@ Board-wide counts already witnessed by distinct physical requirement owners
 remain at board scope even when those owners share a sheet; they are not
 multiplied into every local connector bank.
 
-`tlv62569-3v3@2` is a 0.5 A composition, not the IC's nominal 2 A rating.
-It uses the exact Cjiang FXL0630-2R2-M/C167218 2.2 µH land pattern and
-two 4.7 µF/50 V input plus two 10 µF/25 V output capacitors. Nominal
-capacitance and typical inductor current figures are not guaranteed
-effective capacitance or a board-level 2 A qualification.
+`tlv62569-3v3@3` is a 0.5 A composition, not the IC's nominal 2 A rating.
+It uses the exact Cjiang FXL0630-2R2-M/C167218 2.2 µH land pattern,
+one stocked Samsung CL21A106KAYNNNE/C15850 10 µF/25 V X5R 0805 input
+capacitor pin-owned within 3 mm of VIN/GND, and two 10 µF/25 V output
+capacitors. The smaller input package makes the declared native pin locality
+physically attainable without relaxing clearance. Nominal capacitance and
+typical inductor current figures are not guaranteed effective capacitance
+or a board-level 2 A qualification.
 `ah49entr-g1-analog-hall@1` owns the AH49ENTR-G1 VCC/OUT/GND pins
 1/2/3, its manufacturer land pattern and a local 100 nF bypass. STM32G030K6
 `@2` uses a qualified six-contact SWD header; the older pin declaration
@@ -850,7 +853,7 @@ than individual rendered pieces. None of these UI states certifies a product.
 Saved selections migrate explicitly to the current recipe contract:
 `rp2040-minimal@1/@2` → `@3`, TPS54331 `@1` → `@2`, and the changed C3
 native-USB minimal recipes `@1` → `@2`. The already-qualified H4X UART recipe
-remains `@1`. DRV8833 `@1/@2/@3/@4`, TLV62569 `@1` and STM32G031K6
+remains `@1`. DRV8833 `@1/@2/@3/@4`, TLV62569 `@1/@2` and STM32G031K6
 `@1` instead require architecture regeneration against their current
 electrical and physical contracts. BOM-only relabeling cannot preserve a
 previously unsafe GPIO allocation, supply envelope or connector identity.

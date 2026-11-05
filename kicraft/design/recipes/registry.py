@@ -168,7 +168,9 @@ def migrate_recipe_selection(value: object) -> RecipeSelection:
     replacement = legacy_recipe_replacement(selection.recipe)
     if replacement is not None and (
         selection.recipe.startswith("drv8833-dual-motor@")
-        or selection.recipe in {"tlv62569-3v3@1", "stm32g030k6t6-minimal@1"}
+        or selection.recipe in {
+            "tlv62569-3v3@1", "tlv62569-3v3@2", "stm32g030k6t6-minimal@1",
+        }
     ):
         raise ValueError(
             f"saved {selection.recipe} requires architecture regeneration: changed control, "

@@ -181,6 +181,59 @@ def test_stm32g0_local_bypass_does_not_excuse_distant_bulk_capacitor(recipe):
         assert owner_pads["5"].pos.dist(pads["2"].pos) <= 3
 
 
+def test_buck_input_capacitor_cannot_remain_far_from_its_actual_supply_pins():
+    from types import SimpleNamespace
+
+    from kicraft.autoplacer.brain.placement_solver import PlacementSolver
+    from kicraft.design.models import BOM, RecipeSelection
+    from kicraft.design.recipes.registry import expand_recipe
+    from kicraft.design.synthesis.autoplacer import _recipe_local_bypasses
+
+    selection = RecipeSelection(
+        recipe="tlv62569-3v3@3", instance="buck", sheets={"power": "POWER"},
+        port_bindings={"input": "VIN", "gnd": "GND", "output": "+3V3"},
+    )
+    expansion = expand_recipe(selection)
+    bom = BOM(parts=expansion.parts, connections=expansion.connections,
+              recipe_ownership=[expansion.ownership])
+    owner_ref = next(p.ref for p in expansion.parts if p.recipe_role == "converter")
+    owner = Component(
+        ref=owner_ref, value="buck", pos=Point(20, 20), rotation=0,
+        layer=Layer.FRONT, width_mm=3.2, height_mm=3.7,
+        kind="ic", body_center=Point(20, 20),
+        pads=[_pad(owner_ref, "4", 20.95, 18.7, "VIN"),
+              _pad(owner_ref, "2", 20, 21.3, "GND")],
+    )
+    caps = [
+        Component(
+            ref=part.ref, value=part.value, pos=Point(70, 20), rotation=0,
+            layer=Layer.FRONT, width_mm=3.4, height_mm=1.9,
+            kind="passive", body_center=Point(70, 20),
+            pads=[_pad(part.ref, "1", 69.05, 20, "VIN"),
+                  _pad(part.ref, "2", 70.95, 20, "GND")],
+        )
+        for part in expansion.parts if part.recipe_role == "input_cap"
+    ]
+    state = _state([owner, *caps])
+    cfg = {
+        "local_bypasses": _recipe_local_bypasses(
+            SimpleNamespace(recipe_selections=[selection]), bom),
+        "legality_clearance_mm": 0.2,
+    }
+    PlacementSolver(state, cfg)._place_local_bypasses(state.components)
+    owner_pads = {pad.pad_id: pad for pad in state.components[owner_ref].pads}
+    for cap in caps:
+        placed = state.components[cap.ref]
+        pads = {pad.pad_id: pad for pad in placed.pads}
+        assert owner_pads["4"].pos.dist(pads["1"].pos) <= 3
+        assert owner_pads["2"].pos.dist(pads["2"].pos) <= 3
+        assert owner.physical_bbox()[1].x + 0.2 <= placed.physical_bbox()[0].x or (
+            placed.physical_bbox()[1].x + 0.2 <= owner.physical_bbox()[0].x
+        ) or owner.physical_bbox()[1].y + 0.2 <= placed.physical_bbox()[0].y or (
+            placed.physical_bbox()[1].y + 0.2 <= owner.physical_bbox()[0].y
+        )
+
+
 def test_single_edge_header_does_not_strand_a_feasible_owned_mcu_group():
     from kicraft.autoplacer.brain.placement_solver import PlacementSolver
 

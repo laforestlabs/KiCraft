@@ -1206,7 +1206,7 @@ def test_architecture_rejects_false_pd_dac_provenance_and_missing_load_budget():
 
     # The bounded reviewed buck is enough for this producer check.
     complete_regulator = {
-        **_with_3v3_producer("tlv62569-3v3@2"),
+        **_with_3v3_producer("tlv62569-3v3@3"),
         "topologies": {"MCU": "ESP32-S3-WROOM-1 with native USB"},
     }
     complete_codes = _regulator_codes(complete_regulator)
@@ -1439,7 +1439,7 @@ def test_architecture_rejects_source_without_headroom_for_external_loads():
                 "ports": {"input": "VBUS", "output": "+3V3", "gnd": "GND"},
             }
         ],
-        "recipe_resolution": [{"requirement_id": "buck", "recipe": "tlv62569-3v3@2"}],
+        "recipe_resolution": [{"requirement_id": "buck", "recipe": "tlv62569-3v3@3"}],
         "inter_sheet_nets": [
             {
                 "name": "VBUS",
@@ -3139,7 +3139,7 @@ def test_the_rp2040_recipes_own_bootsel_button_realizes_a_pushbutton_demand():
                     "family": "tlv62569-3v3", "exact_part": "TLV62569DBVR",
                 }],
                 "recipe_selections": [
-                    {"recipe": "tlv62569-3v3@2", "instance": "rp2040",
+                    {"recipe": "tlv62569-3v3@3", "instance": "rp2040",
                      "requirement_ids": ["rp2040"]}
                 ],
             }
