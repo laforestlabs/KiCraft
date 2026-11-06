@@ -415,48 +415,49 @@ def reduce_activity(previous: dict | None, event: dict) -> dict:
         return act
 
     if kind == "stage_start":
+        stage = act.get("stage")
+        act["issues"] = [i for i in act["issues"] if i.get("stage") != stage]
+        if (act.get("failure") or {}).get("stage") == stage:
+            act["failure"] = None
         act["phase_status"] = "running"
-        act["last_activity"] = stage_activity(act.get("stage"))
+        act["last_activity"] = stage_activity(stage)
         return act
 
     if kind == "stage_done":
         ok = bool(event.get("ok"))
         stage = act.get("stage")
+        act["issues"] = [i for i in act["issues"] if i.get("stage") != stage]
+        if (act.get("failure") or {}).get("stage") == stage:
+            act["failure"] = None
+        diagnostic = event.get("diagnostic")
+        raw_severity = str(diagnostic.get("severity") or "").lower() if isinstance(diagnostic, dict) else ""
+        severity = ("error" if not ok or raw_severity in ("fab_gate", "error", "blocker")
+                    else "info" if raw_severity in ("info", "note") else "warning")
+        findings = diagnostic_issues(stage, diagnostic, severity=severity)
         if ok:
             act["last_activity"] = f"{stage_label(stage) or 'Stage'} finished"
-            if event.get("warning"):
-                _add_issue(
-                    act,
-                    {
-                        "severity": "warning",
-                        "stage": stage,
-                        "code": "committed_with_findings",
-                        "message": (
-                            f"{stage_label(stage) or 'Stage'} committed with findings"
-                        ),
-                        "evidence": [],
-                    },
-                )
+            if event.get("warning") and not findings:
+                findings = [{"severity": "warning", "stage": stage,
+                             "code": "committed_with_findings",
+                             "message": f"{stage_label(stage) or 'Stage'} committed with findings",
+                             "evidence": []}]
         else:
             act["phase_status"] = "failed"
             act["failure"] = _failure_fact(
-                kind=event.get("failure_kind") or "stage_failed",
-                stage=stage,
-                retryable=event.get("retryable"),
-                retry_action=event.get("retry_action"),
+                kind=event.get("failure_kind") or "stage_failed", stage=stage,
+                retryable=event.get("retryable"), retry_action=event.get("retry_action"),
                 message=f"{stage_label(stage) or 'Stage'} failed",
             )
             act["last_activity"] = act["failure"]["message"]
-            _add_issue(
-                act,
-                {
-                    "severity": "error",
-                    "stage": stage,
-                    "code": str(event.get("failure_kind") or "stage_failed"),
-                    "message": act["failure"]["message"],
-                    "evidence": _evidence_list(event.get("errors")),
-                },
-            )
+            if not findings:
+                detail = (human_failure_text(event.get("schema_error"))
+                          or human_failure_text(event.get("errors"))
+                          or act["failure"]["message"])
+                findings = [{"severity": "error", "stage": stage,
+                             "code": str(event.get("failure_kind") or "stage_failed"),
+                             "message": detail, "evidence": []}]
+        for finding in findings:
+            _add_issue(act, finding)
         return act
 
     if kind == "question":
@@ -465,38 +466,17 @@ def reduce_activity(previous: dict | None, event: dict) -> dict:
         return act
 
     if kind == "retry":
-        errors = _evidence_list(event.get("errors"))
-        failure_kind = str(event.get("failure_kind") or "retry")
-        act["last_activity"] = (
-            f"Retrying {stage_label(act.get('stage')) or 'the stage'}"
-            + (f" after {_humanize_kind(failure_kind)}" if failure_kind else "")
-        )
+        act["last_activity"] = retry_summary(event)
         if act["phase_status"] not in ("awaiting_input", "queued"):
             act["phase_status"] = "running"
-        _add_issue(
-            act,
-            {
-                "severity": "warning",
-                "stage": act.get("stage"),
-                "code": failure_kind,
-                "message": act["last_activity"],
-                "evidence": errors,
-            },
-        )
         return act
 
     if kind == "stage_diagnostic":
         code = str(event.get("code") or "semantic_finding")
-        _add_issue(
-            act,
-            {
-                "severity": str(event.get("severity") or "warning"),
-                "stage": act.get("stage"),
-                "code": code,
-                "message": str(event.get("message") or code),
-                "evidence": _evidence_list(event.get("evidence")),
-            },
-        )
+        for finding in diagnostic_issues(
+            act.get("stage"), event, severity=str(event.get("severity") or "warning")
+        ):
+            _add_issue(act, finding)
         act["last_activity"] = f"{stage_label(act.get('stage')) or 'Stage'}: {code}"
         return act
 
@@ -753,7 +733,7 @@ def _failure_fact(*, kind, stage, retryable=None, retry_action=None, message=Non
 
 
 def _add_issue(act: dict, issue: dict) -> None:
-    """Append an issue, deduplicated by stage+code+evidence (newest wins)."""
+    """Append an issue, deduplicated by its visible identity (newest wins)."""
     issue = {
         "severity": issue.get("severity") if issue.get("severity") in _ISSUE_SEVERITIES
         else "warning",
@@ -762,10 +742,10 @@ def _add_issue(act: dict, issue: dict) -> None:
         "message": str(issue.get("message") or ""),
         "evidence": [str(item) for item in (issue.get("evidence") or [])],
     }
-    key = (issue["stage"], issue["code"], tuple(issue["evidence"]))
+    key = (issue["stage"], issue["code"], issue["message"], tuple(issue["evidence"]))
     issues = act["issues"]
     for i, existing in enumerate(issues):
-        if (existing.get("stage"), existing.get("code"),
+        if (existing.get("stage"), existing.get("code"), existing.get("message"),
                 tuple(existing.get("evidence") or [])) == key:
             issues[i] = issue
             return
@@ -788,6 +768,48 @@ def _evidence_list(value) -> list[str]:
             out.append(str(text))
         return out
     return [str(value)]
+
+
+def diagnostic_issues(stage: str | None, diagnostic: dict | None, *, severity: str) -> list[dict]:
+    """Project nested diagnostic leaves without inventing structure from prose."""
+    if not isinstance(diagnostic, dict):
+        return []
+    children = diagnostic.get("findings")
+    if isinstance(children, list):
+        leaves = [issue for child in children
+                  for issue in diagnostic_issues(stage, child, severity=severity)]
+        if leaves:
+            return leaves
+    message = diagnostic.get("message") or diagnostic.get("code")
+    if not message:
+        return []
+    evidence = _evidence_list(diagnostic.get("evidence"))
+    for key in ("requirement_id", "sheet"):
+        if diagnostic.get(key):
+            evidence.append(f"{key}={diagnostic[key]}")
+    return [{"severity": severity, "stage": stage,
+             "code": str(diagnostic.get("code") or "semantic_finding"),
+             "message": str(message), "evidence": evidence}]
+
+
+def retry_summary(event: dict) -> str:
+    stage = stage_label(event.get("stage")) or "the stage"
+    kind = event.get("failure_kind")
+    if kind == "invalid_json":
+        return f"Retrying {stage} because the generated response was not valid JSON."
+    if kind == "invalid_schema":
+        return f"Retrying {stage} because the generated response did not match the required format."
+    if kind == "contract_rejected":
+        causes = diagnostic_issues(event.get("stage"), event.get("diagnostic"), severity="error")
+        suffix = " ".join(i["message"] for i in causes)
+        return f"Correcting {stage} after a design check failed." + (f" {suffix}" if suffix else "")
+    if kind == "collection_limit":
+        limit = event.get("collection_limit") or {}
+        if all(limit.get(k) is not None for k in ("field", "observed_count", "configured_total")):
+            return (f"Retrying {stage} because the generated response exceeded the {limit['field']} limit "
+                    f"({limit['observed_count']} items; maximum {limit['configured_total']}).")
+        return f"Retrying {stage} after an invalid generated response; the original reason was not recorded."
+    return f"Retrying {stage}."
 
 
 def _queue_sentence(position, eta_s) -> str:

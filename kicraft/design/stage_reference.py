@@ -281,17 +281,16 @@ def _principal_part_assembly_snapshot(definition) -> dict | None:
 
 
 def architecture_recipe_summaries(intent: dict) -> list[dict]:
-    """Do not offer unrelated MCU alternatives to an explicitly named design.
+    """Prefer exact reviewed MCU identities per named part, then family matches.
 
-    Identity comes from the reviewed ``part_identity`` relations as well as the
-    name shape: a brief naming an order code of a registered family (the
-    ESP32-S3-WROOM-1 ``-N16R8`` against the registered ``-N8R8``) must be offered
-    that family's recipe, or the stage is asked to bind a circuit it was never
-    shown and blocks on a variant it cannot discover. When the named parts
-    identify no MCU recipe, every MCU recipe stays on offer rather than starving
-    the stage.
+    Unknown names do not starve the stage of MCU recipes. Multiple named MCUs
+    contribute independently, while non-MCU recipes always remain available.
     """
-    from kicraft.design.part_identity import matches_part_identity
+    from kicraft.design.part_identity import (
+        matches_part_identity,
+        reviewed_identity_for_order_code,
+        reviewed_part,
+    )
     from kicraft.design.recipes import get_recipe, recipe_summaries
 
     summaries = recipe_summaries()
@@ -299,35 +298,39 @@ def architecture_recipe_summaries(intent: dict) -> list[dict]:
         snapshot = _principal_part_assembly_snapshot(get_recipe(summary["recipe"]))
         if snapshot is not None:
             summary["principal_part_assembly_snapshot"] = snapshot
-    raw_named = [str(value) for value in intent.get("named_parts") or []]
-    named = {
-        re.sub(r"[^a-z0-9]", "", str(value).lower()) for value in intent.get("named_parts") or []
-    }
-    named = {value for value in named if len(value) >= 5}
-    if not named:
-        return summaries
+    named = [str(value) for value in intent.get("named_parts") or []]
+    mcu_definitions = [
+        (summary["recipe"], get_recipe(summary["recipe"]))
+        for summary in summaries if "mcu" in summary["required_sheet_roles"]
+    ]
     selected = set()
-    for summary in summaries:
-        if "mcu" not in summary["required_sheet_roles"]:
+    for part in named:
+        token = re.sub(r"[^a-z0-9]", "", part.lower())
+        if len(token) < 5:
             continue
-        definition = get_recipe(summary["recipe"])
-        selectors = {
-            re.sub(r"[^a-z0-9]", "", str(value).lower())
-            for value in (definition.exact_part, definition.family, *definition.identity_aliases)
-            if value
+        identity = reviewed_identity_for_order_code(part)
+        exact = {
+            recipe for recipe, definition in mcu_definitions
+            if definition.exact_part
+            and reviewed_part(identity)
+            and reviewed_identity_for_order_code(definition.exact_part) == identity
         }
-        if any(
-            selector.startswith(part) or part.startswith(selector)
-            for selector in selectors
-            if len(selector) >= 5
-            for part in named
-        ) or any(
-            # Reviewed order-code membership preserves punctuation, so it gets
-            # the raw name, not the separator-stripped token above.
-            definition.exact_part and matches_part_identity(part, definition.exact_part)
-            for part in raw_named
-        ):
-            selected.add(summary["recipe"])
+        if exact:
+            selected.update(exact)
+            continue
+        for recipe, definition in mcu_definitions:
+            selectors = {
+                re.sub(r"[^a-z0-9]", "", str(value).lower())
+                for value in (definition.exact_part, definition.family, *definition.identity_aliases)
+                if value
+            }
+            if any(
+                selector.startswith(token) or token.startswith(selector)
+                for selector in selectors if len(selector) >= 5
+            ) or (
+                definition.exact_part and matches_part_identity(part, definition.exact_part)
+            ):
+                selected.add(recipe)
     if not selected:
         return summaries
     return [

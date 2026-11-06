@@ -1896,8 +1896,119 @@ def test_syntax_stopped_stream_uses_truthful_feedback_and_existing_retry_ceiling
     assert result["status"] == ("ok" if recovers else "failed")
     assert len(client.calls) == (2 if recovers else 3)
     if not recovers:
-        assert result["results"][-1]["failure_kind"] == "collection_limit"
+        assert result["results"][-1]["failure_kind"] == "invalid_json"
+        assert result["results"][-1]["collection_limit"] == stopped["collection_limit"]
+        assert syntax_error in result["results"][-1]["schema_error"]
         assert result["results"][-1]["attempts"] == 3
+
+
+
+@pytest.mark.parametrize(
+    ("limit", "expected"),
+    [
+        ({"limit_scope": "syntax", "syntax_error": "trailing content", "character_offset": 10}, "invalid_json"),
+        ({"limit_scope": "property", "field": "$", "property": "bad"}, "invalid_schema"),
+        ({"limit_scope": "duplicate", "field": "connections", "duplicate_values": ["A"]}, "invalid_schema"),
+        ({"limit_scope": "group", "field": "parts", "observed_count": 65, "configured_total": 64}, "collection_limit"),
+        (None, "collection_limit"),
+    ],
+)
+def test_guard_abort_preserves_diagnostic_and_never_commits_prefix(tmp_path, limit, expected):
+    stopped = {
+        "text": _OK_INTENT,
+        "finish_reason": "collection_limit",
+        "collection_limit": limit,
+        "cost_usd": 0.0,
+    }
+    client = _ScriptedClient([stopped] * 3)
+    recorded = []
+    client.guard.record_stage_attempt = lambda **row: recorded.append(row)
+    events = []
+    result = run_session(tmp_path, "a USB-powered LED", ["intent"], client=client, progress=events.append)
+    failure = result["results"][-1]
+    assert not failure["commit_ok"]
+    assert failure["failure_kind"] == expected
+    assert failure["schema_error"] == failure["diagnostic"]["message"]
+    assert failure["collection_limit"] == limit
+    assert len(client.calls) == 3
+    assert next(e for e in events if e["kind"] == "retry").get("collection_limit") == limit
+    done = next(e for e in events if e["kind"] == "stage_done")
+    assert done["diagnostic"]["code"] == expected
+    assert done.get("collection_limit") == limit
+    if limit:
+        assert json.loads(recorded[0]["failure_detail"]) == limit
+
+
+def test_captured_intent_guard_accepts_chunks_and_rejects_trailing_content():
+    from kicraft.server.client import _StreamingCollectionGuard
+    from kicraft.server.config import STAGE_COLLECTION_BOUNDS
+    fixture = json.loads(
+        (Path(__file__).parent / "fixtures/stage_reliability/kc_mva3xh_failures.json").read_text()
+    )
+    for suffix in (" ", "{}", " trailing prose"):
+        guard = _StreamingCollectionGuard(
+            STAGE_COLLECTION_BOUNDS["intent"],
+            build_stage_response_contract("intent", {}).response_format,
+        )
+        for chunk in fixture["intent_answer_chunks"]:
+            assert guard.consume(chunk) == (chunk, None)
+        _, limit = guard.consume(suffix)
+        if suffix == " ":
+            assert limit is None
+        else:
+            assert limit["limit_scope"] == "syntax"
+            expected_offset = len("".join(fixture["intent_answer_chunks"])) + int(suffix.startswith(" "))
+            assert limit["character_offset"] == expected_offset
+            assert stage_driver_mod._guard_failure_kind(limit) == "invalid_json"
+
+
+def test_intent_constraint_overflow_classifies_as_collection_limit():
+    from kicraft.server.client import _StreamingCollectionGuard
+    from kicraft.server.config import STAGE_COLLECTION_BOUNDS
+    guard = _StreamingCollectionGuard(STAGE_COLLECTION_BOUNDS["intent"])
+    _, limit = guard.consume(json.dumps({"constraints": [f"constraint {i}" for i in range(65)]}))
+    assert limit["observed_count"] == 65
+    assert limit["configured_total"] == 64
+    assert stage_driver_mod._guard_failure_kind(limit) == "collection_limit"
+
+
+@pytest.mark.parametrize("scope", ["property", "duplicate"])
+def test_stream_guard_schema_violations_classify_at_decode_boundary(scope):
+    from types import SimpleNamespace
+    from kicraft.server.client import _StreamingCollectionGuard
+    from kicraft.server.config import CollectionBound
+
+    if scope == "property":
+        schema = {"type": "json_schema", "json_schema": {"schema": {
+            "type": "object", "properties": {}, "additionalProperties": False,
+        }}}
+        guard = _StreamingCollectionGuard((), schema)
+        _, limit = guard.consume('{"unexpected":1}')
+    else:
+        guard = _StreamingCollectionGuard((CollectionBound(field="groups", total=5, unique_keys=("id",)),))
+        _, limit = guard.consume('{"groups":[{"id":"a"},{"id":"a"}]}')
+    assert limit["limit_scope"] == scope
+    facts = stage_driver_mod.ProviderFacts(
+        raw=_OK_INTENT, finish="collection_limit", rounds=None, tool_calls=None,
+        cost_usd=0.0, had_content=True, loop_detected=False, collection_limit=limit,
+        loop_abort_reason=None, collection_counts={},
+    )
+    outcome = stage_driver_mod.decode_stage_response(
+        SimpleNamespace(stage="intent", prompt_state={}), facts
+    )
+    assert outcome.kind == "recoverable_failure"
+    assert outcome.payload["failure_kind"] == "invalid_schema"
+    assert outcome.payload["diagnostic"]["code"] == "invalid_schema"
+    assert outcome.payload["collection_limit"] == limit
+
+def test_triage_groups_current_and_historical_contract_fallbacks():
+    from kicraft.cli.triage import _SIG_ALIAS
+    current = stage_driver_mod._FAILURE_KIND_ERROR["contract_rejected"]
+    historical = (
+        "the reply was schema-valid but a deterministic design contract refused it "
+        "(see the diagnostic)"
+    )
+    assert _SIG_ALIAS[current] == _SIG_ALIAS[historical]
 
 
 def test_commit_rejection_signature_normalizes_gate_ids_and_offenders():
@@ -2857,8 +2968,31 @@ def test_missing_requirement_defect_names_the_required_identity():
     assert _requirement_identity({"id": "x"}) == "x"
 
 
+def test_work_unit_capability_refusal_never_drops_schema(tmp_path, monkeypatch):
+    state = {"architecture": {"sheets": [{"name": "A"}], "recipe_selections": []}}
+    state_path = tmp_path / "state.json"
+    state_path.write_text(json.dumps(state))
+    monkeypatch.setattr(
+        stage_driver_mod, "prepare_stage",
+        lambda *args, **kwargs: type("Proc", (), {
+            "returncode": 0, "stdout": json.dumps({"state": state, "extras": {}}), "stderr": "",
+        })(),
+    )
+    client = _unit_client([requests.exceptions.HTTPError("400 response_format unsupported")])
+    result = stage_driver_mod.drive_stage(client, "bom", "passive board", state_path, tmp_path)
+    assert result["failure_kind"] == "provider_response_format_rejected"
+    assert len(client.calls) == 1
+    assert client.calls[0]["response_format"]["type"] == "json_schema"
+
+
 @pytest.mark.parametrize("recover", [True, False])
-def test_bom_unit_collection_overflow_gets_one_focused_recovery(tmp_path, monkeypatch, recover):
+@pytest.mark.parametrize(
+    ("scope", "expected"),
+    [(None, "collection_limit"), ("syntax", "invalid_json"), ("property", "invalid_schema")],
+)
+def test_bom_unit_collection_overflow_gets_one_focused_recovery(
+    tmp_path, monkeypatch, recover, scope, expected
+):
     state = {
         "architecture": {
             "sheets": [{"name": "A"}, {"name": "B"}, {"name": "C"}],
@@ -2895,6 +3029,12 @@ def test_bom_unit_collection_overflow_gets_one_focused_recovery(tmp_path, monkey
         },
         "cost_usd": 0.0,
     }
+    if scope:
+        overflow["collection_limit"]["limit_scope"] = scope
+        if scope == "syntax":
+            overflow["collection_limit"]["syntax_error"] = "trailing content"
+        else:
+            overflow["collection_limit"]["property"] = "unexpected"
     correction = (
         reply("B")
         if recover
@@ -2938,7 +3078,9 @@ def test_bom_unit_collection_overflow_gets_one_focused_recovery(tmp_path, monkey
         ]
         assert len(client.calls) == 4
     else:
-        assert result["failure_kind"] == "collection_limit"
+        assert result["failure_kind"] == expected
+        assert result["collection_limit"].get("limit_scope") == scope
+        assert result["diagnostic"]["code"] == expected
         assert len(client.calls) == 4
         saved = json.loads((tmp_path / "drafts" / "bom-units.json").read_text())
         # The normalized group carries the contract's explicit assembly default.

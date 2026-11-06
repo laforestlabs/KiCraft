@@ -426,6 +426,15 @@ ESP32_S3_MINI_1U_N4R2_MINIMAL = ESP32_S3_MINI_1U_N4R2_MINIMAL.model_copy(update=
 })
 
 
+_S3_WROOM_GPIO_TO_PIN = {
+    4: "4", 5: "5", 6: "6", 7: "7", 15: "8", 16: "9", 17: "10", 18: "11",
+    8: "12", 19: "13", 20: "14", 3: "15", 46: "16", 9: "17", 10: "18",
+    11: "19", 12: "20", 13: "21", 14: "22", 21: "23", 47: "24", 48: "25",
+    45: "26", 0: "27", 38: "31", 39: "32", 40: "33", 41: "34", 42: "35",
+    2: "38", 1: "39",
+}
+
+
 ESP32_S3_WROOM_1_MINIMAL = _module_recipe(
     recipe="esp32-s3-wroom-1-minimal@1",
     family="esp32-s3-wroom-1-module",
@@ -435,39 +444,7 @@ ESP32_S3_WROOM_1_MINIMAL = _module_recipe(
     footprint="esp32-s3-wroom-1:WIRELM-SMD_ESP32-S3-WROOM-1",
     datasheet="https://www.espressif.com/sites/default/files/documentation/esp32-s3-wroom-1_wroom-1u_datasheet_en.pdf",
     guideline="https://docs.espressif.com/projects/esp-hardware-design-guidelines/en/latest/esp32s3/schematic-checklist.html",
-    gpio_to_pin={
-        4: "4",
-        5: "5",
-        6: "6",
-        7: "7",
-        15: "8",
-        16: "9",
-        17: "10",
-        18: "11",
-        8: "12",
-        19: "13",
-        20: "14",
-        3: "15",
-        46: "16",
-        9: "17",
-        10: "18",
-        11: "19",
-        12: "20",
-        13: "21",
-        14: "22",
-        21: "23",
-        47: "24",
-        48: "25",
-        45: "26",
-        0: "27",
-        38: "31",
-        39: "32",
-        40: "33",
-        41: "34",
-        42: "35",
-        2: "38",
-        1: "39",
-    },
+    gpio_to_pin=_S3_WROOM_GPIO_TO_PIN,
     adc_gpios=frozenset(range(1, 21)),
     adc_input_max_v=2.9,
     adc_datasheet="https://documentation.espressif.com/esp32-s3_datasheet_en.pdf",
@@ -480,6 +457,31 @@ ESP32_S3_WROOM_1_MINIMAL = _module_recipe(
     usb_pins=("13", "14"),
     strapping=frozenset({0, 3, 45, 46}),
     # N8R8 uses these module pads for its internal Octal SPI PSRAM.
+    no_connect_pins=("28", "29", "30"),
+)
+
+ESP32_S3_WROOM_1_N16R8_MINIMAL = _module_recipe(
+    recipe="esp32-s3-wroom-1-n16r8-minimal@1",
+    family="esp32-s3-wroom-1-module",
+    exact_part="ESP32-S3-WROOM-1-N16R8",
+    aliases=("ESP32-S3-WROOM-1-N16R8", "esp32-s3-wroom-1-n16r8:ESP32-S3-WROOM-1"),
+    symbol="esp32-s3-wroom-1-n16r8:ESP32-S3-WROOM-1",
+    footprint="esp32-s3-wroom-1-n16r8:WIRELM-SMD_ESP32-S3-WROOM-1",
+    datasheet="https://www.espressif.com/sites/default/files/documentation/esp32-s3-wroom-1_wroom-1u_datasheet_en.pdf",
+    guideline="https://docs.espressif.com/projects/esp-hardware-design-guidelines/en/latest/esp32s3/schematic-checklist.html",
+    gpio_to_pin=_S3_WROOM_GPIO_TO_PIN,
+    adc_gpios=frozenset(range(1, 21)),
+    adc_input_max_v=2.9,
+    adc_datasheet="https://documentation.espressif.com/esp32-s3_datasheet_en.pdf",
+    ground_pins=("1", "40", "41"),
+    vdd_pin="2",
+    en_pin="3",
+    boot_gpio=0,
+    uart_tx_pin="37",
+    uart_rx_pin="36",
+    usb_pins=("13", "14"),
+    strapping=frozenset({0, 3, 45, 46}),
+    # R8 modules use these pads for internal Octal SPI PSRAM.
     no_connect_pins=("28", "29", "30"),
 )
 
@@ -1765,6 +1767,7 @@ CH32V003F4U6_MINIMAL = RecipeDefinition(
 WAVE_A_MCU_RECIPES = (
     ESP32_S3_MINI_1U_N4R2_MINIMAL,
     ESP32_S3_WROOM_1_MINIMAL,
+    ESP32_S3_WROOM_1_N16R8_MINIMAL,
     ESP32_WROOM_32E_MINIMAL,
     ESP32_C3_MINI_1_MINIMAL,
     ESP32_C3_MINI_1_H4X_MINIMAL,

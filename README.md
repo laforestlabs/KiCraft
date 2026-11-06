@@ -798,6 +798,10 @@ Earlier response history remains available in Technical details → Model transc
 not mislabeled as reasoning-only text. Retained failed-candidate log lines do not
 turn an active
 automatic recovery or a successfully exported board into a current failure.
+Current issue counts link to the affected stage, where concrete diagnostic leaves
+and their evidence appear under Needs attention. Recovered retries remain in the
+technical history rather than becoming outstanding warnings; historical guard
+aborts without recorded detail do not imply a particular exceeded collection.
 
 An `external_interface` obligation describes the board-side connection to a
 named external protocol/load, not an onboard copy of that load. It requires a

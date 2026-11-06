@@ -4610,3 +4610,191 @@ def test_external_analog_source_requires_connector_owner():
     payload["obligations"] = [source]
     with pytest.raises(ValueError, match="physical signal connector"):
         ArchitectureIntent.model_validate(payload)
+
+
+def _selectable_pd_intent() -> dict:
+    return {
+        "topologies": {"POWER": "Selectable USB PD input"}, "mcu_present": False,
+        "power": {"rails": {"PD9V": {"voltage": 9, "from": "pd.vbus"}}},
+        "sheets": [{"name": "POWER", "stem": "POWER", "role": "power_input",
+                    "function": "PD power input"}],
+        "requirements": [{"id": "pd", "sheet": "POWER", "role": "power_input",
+                          "family": "usb-pd-selectable-trigger",
+                          "functional_blocks": ["POWER_INPUT"]}],
+        "signals": [], "assumptions": [],
+    }
+
+
+def _pd_expanded_endpoints(architecture) -> dict:
+    from kicraft.design.recipes import expand_recipe
+    result = {}
+    for selection in architecture.recipe_selections:
+        expanded = expand_recipe(selection)
+        parts = {part.ref: part for part in expanded.parts}
+        for connection in expanded.connections:
+            result.setdefault(connection.net_name, set()).update(
+                (parts[ep.ref].mpn, parts[ep.ref].recipe_role, ep.pin)
+                for ep in connection.endpoints
+            )
+    return result
+
+
+def test_selectable_pd_completion_owns_real_cc_contacts_and_is_idempotent():
+    from kicraft.design.recipes import apply_architecture_recipe_resolution
+    from kicraft.design.architecture_intent import complete_architecture_payload
+    payload = _selectable_pd_intent()
+    once = complete_architecture_payload(payload)
+    twice = complete_architecture_payload(once)
+    architectures = [
+        apply_architecture_recipe_resolution(derive_architecture(value))
+        for value in (once, twice)
+    ]
+    endpoints = _pd_expanded_endpoints(architectures[0])
+    assert endpoints == _pd_expanded_endpoints(architectures[1])
+    assert endpoints["PD_CC1"] == {
+        ("CH224K", "controller", "7"), ("TYPE-C-31-M-12", "connector", "A5"),
+    }
+    assert endpoints["PD_CC2"] == {
+        ("CH224K", "controller", "6"), ("TYPE-C-31-M-12", "connector", "B5"),
+    }
+    assert {("TYPE-C-31-M-12", "connector", "A4B9"),
+            ("TYPE-C-31-M-12", "connector", "B4A9")} <= endpoints["PD9V"]
+    socket = _requirement(architectures[0], "pd_usb_c")
+    assert socket.sheet == "POWER" and socket.functional_blocks == ["POWER_INPUT"]
+    assert socket.ports["gnd"] == socket.ports["shield"] == "GND"
+
+
+@pytest.mark.parametrize("collision", ["requirement", "signal", "rail"])
+def test_selectable_pd_completion_refuses_authored_identity_collisions(collision):
+    payload = _selectable_pd_intent()
+    if collision == "requirement":
+        payload["requirements"].append({
+            "id": "pd_usb_c", "sheet": "POWER", "role": "connector", "family": "pin-header",
+        })
+    elif collision == "rail":
+        payload["power"]["rails"]["PD_CC1"] = {"voltage": 3.3}
+    else:
+        payload["signals"].append({"name": "PD_CC1", "from": "pd.gnd", "to": "edge:TEST"})
+    with pytest.raises(ArchitectureIntentError) as exc:
+        derive_architecture(payload)
+    assert any(row.code == "pd_receptacle_binding_conflict" and row.requirement_id == "pd"
+               for row in exc.value.diagnostics)
+
+
+@pytest.mark.parametrize("authored_cc", [False, True])
+def test_selectable_pd_does_not_override_existing_socket_or_partial_cc(authored_cc):
+    payload = _selectable_pd_intent()
+    payload["requirements"].append({
+        "id": "socket", "sheet": "POWER", "role": "connector",
+        "family": "usb-c-pd-receptacle", "supply": "PD9V",
+    })
+    if authored_cc:
+        payload["signals"].append(
+            {"name": "AUTHORED_CC1", "from": "pd.cc1", "to": "socket.cc1"}
+        )
+    with pytest.raises(ArchitectureIntentError) as exc:
+        derive_architecture(payload)
+    missing = [row for row in exc.value.diagnostics if row.code == "unbound_required_port"]
+    assert any(row.requirement_id == "pd" and "'cc2'" in row.message for row in missing)
+    assert not any(row.requirement_id == "pd_usb_c" for row in exc.value.diagnostics)
+    assert any("authored" in item or "ownership" in item for row in missing for item in row.evidence)
+
+
+def test_selectable_pd_missing_vbus_remains_unbound():
+    payload = _selectable_pd_intent()
+    payload["power"]["rails"] = {}
+    with pytest.raises(ArchitectureIntentError) as exc:
+        derive_architecture(payload)
+    assert any(row.code == "unbound_required_port" and "'cc1'" in row.message
+               and any("VBUS" in item for item in row.evidence) for row in exc.value.diagnostics)
+
+
+def test_multiple_independent_pd_inputs_receive_separate_receptacles():
+    payload = _selectable_pd_intent()
+    payload["requirements"].append({
+        **payload["requirements"][0], "id": "pd_aux",
+    })
+    payload["power"]["rails"]["PD_AUX"] = {"voltage": 9, "from": "pd_aux.vbus"}
+    architecture = derive_architecture(payload)
+    assert _requirement(architecture, "pd_usb_c").ports["vbus"] == "PD9V"
+    assert _requirement(architecture, "pd_aux_usb_c").ports["vbus"] == "PD_AUX"
+    assert _requirement(architecture, "pd").ports["cc1"] == "PD_CC1"
+    assert _requirement(architecture, "pd_aux").ports["cc1"] == "PD_AUX_CC1"
+
+
+def test_n16r8_pd_power_and_native_usb_keep_three_power_domains_separate():
+    from kicraft.design.recipes import apply_architecture_recipe_resolution
+    payload = _hub75_intent()
+    payload["requirements"][0].update(
+        id="pd", family="usb-pd-selectable-trigger",
+    )
+    payload["requirements"][1].update(family="ap63203-3v3", supply="PD9V")
+    payload["requirements"][2]["exact_part"] = "ESP32-S3-WROOM-1-N16R8"
+    payload["requirements"][3]["supply"] = "+5V"
+    payload["requirements"][4]["supply"] = "+5V"
+    payload["requirements"].append({
+        "id": "buck5", "sheet": "POWER", "role": "regulator",
+        "family": "ap63205-5v", "supply": "PD9V",
+    })
+    payload["power"]["rails"] = {
+        "PD9V": {"voltage": 9, "from": "pd.vbus"},
+        "VBUS": {"voltage": 5},
+        "+5V": {"voltage": 5, "from": "buck5.output"},
+        "+3V3": {"voltage": 3.3, "from": "buck.output"},
+    }
+    for signal in payload["signals"]:
+        if signal["from"].endswith((".usb_dp", ".usb_dm")):
+            signal["rails"] = ["VBUS"]
+        elif signal.get("rails"):
+            signal["rails"] = ["+5V"]
+    architecture = apply_architecture_recipe_resolution(derive_architecture(payload))
+    from kicraft.design.recipes import expand_recipe
+    domains = {name: set() for name in ("VBUS", "PD9V", "+5V")}
+    for selection in architecture.recipe_selections:
+        for connection in expand_recipe(selection).connections:
+            if connection.net_name in domains:
+                domains[connection.net_name].update(
+                    (selection.instance, ep.ref, ep.pin) for ep in connection.endpoints
+                )
+    assert all(domains.values())
+    assert all(domains[left].isdisjoint(domains[right])
+               for left, right in (("VBUS", "PD9V"), ("VBUS", "+5V"), ("PD9V", "+5V")))
+    assert _requirement(architecture, "pd_usb_c").ports["vbus"] == "PD9V"
+    programming = next(row for row in architecture.requirements
+                       if row.family == "usb-c-usb2-device")
+    assert programming.ports["vbus"] == "VBUS"
+    for signal in payload["signals"]:
+        if signal["from"].endswith((".usb_dp", ".usb_dm")):
+            signal["rails"] = []
+    with pytest.raises(ArchitectureIntentError) as exc:
+        derive_architecture(payload)
+    assert any(row.code == "usb_connector_supply_unknown" for row in exc.value.diagnostics)
+
+
+def test_historical_pd_witness_normalization_retains_one_socket_and_exact_mcu():
+    from kicraft.design.models import Architecture
+    from kicraft.design.recipes import expand_recipe
+    from kicraft.server.stage_contracts import StageSchemaError
+
+    fixture = json.loads(
+        (REPO / "tests/fixtures/stage_reliability/kc_mva3xh_failures.json").read_text()
+    )
+    prompt_state = {"intent": fixture["intent"], "functional_spec": fixture["functional_spec"]}
+    candidate = json.loads(fixture["architecture_answer"])
+    with pytest.raises(StageSchemaError) as exc:
+        _normalize_stage_response("architecture", candidate, prompt_state)
+    assert exc.value.diagnostic["code"] == "conflicting_exact_variant"
+    # Only this explicit test transformation is authorized; the archived answer
+    # and its other choices stay intact.
+    for row in candidate["requirements"]:
+        if row.get("exact_part") == "ESP32-S3-WROOM-1-N8R8":
+            row["exact_part"] = "ESP32-S3-WROOM-1-N16R8"
+    once, _ = _normalize_stage_response("architecture", candidate, prompt_state)
+    twice, _ = _normalize_stage_response("architecture", once, prompt_state)
+    a, b = (Architecture.model_validate(value) for value in (once, twice))
+    assert _pd_expanded_endpoints(a) == _pd_expanded_endpoints(b)
+    assert [row.id for row in a.requirements if row.family == "usb-c-pd-receptacle"] == ["pd_usb_c"]
+    assert [row.id for row in b.requirements if row.family == "usb-c-pd-receptacle"] == ["pd_usb_c"]
+    cores = [part.mpn for selection in b.recipe_selections
+             for part in expand_recipe(selection).parts if part.recipe_role == "mcu"]
+    assert cores == ["ESP32-S3-WROOM-1-N16R8"]

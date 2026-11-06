@@ -319,6 +319,51 @@ USB_C_5V_SINK = _power_recipe(
     ),
 )
 
+USB_C_PD_RECEPTACLE = _power_recipe(
+    recipe="usb-c-pd-receptacle@1",
+    family="usb-c-pd-receptacle",
+    exact_part="USB-C-PD-RECEPTACLE",
+    ports=(
+        Port(name="cc1", direction="bidirectional"),
+        Port(name="cc2", direction="bidirectional"),
+        Port(name="vbus", direction="power"),
+        Port(name="gnd", direction="power"),
+        Port(name="shield", direction="passive", required=False, allow_ground=True),
+    ),
+    internal_nets=(),
+    parts=(
+        _part(
+            "connector", "J", "TYPE-C-31-M-12",
+            "usb-c-16p:TYPE-C-31-M-12",
+            "usb-c-16p:USB-C_SMD-TYPE-C-31-M-12_1",
+            mpn="TYPE-C-31-M-12",
+        ),
+    ),
+    pins=(
+        Pin(role="connector", pin="A5", net="cc1"),
+        Pin(role="connector", pin="B5", net="cc2"),
+        Pin(role="connector", pin="A4B9", net="vbus"),
+        Pin(role="connector", pin="B4A9", net="vbus"),
+        Pin(role="connector", pin="A1B12", net="gnd"),
+        Pin(role="connector", pin="B1A12", net="gnd"),
+        *(Pin(role="connector", pin=str(pin), net="shield") for pin in range(1, 5)),
+    ),
+    no_connects=tuple(
+        NoConnect(role="connector", pin=pin) for pin in ("A6", "A7", "B6", "B7", "A8", "B8")
+    ),
+    source_url="https://www.usb.org/document-library/usb-type-cr-cable-and-connector-specification-release-24",
+    assertions=(
+        Assertion(
+            code="external_pd_controller_owns_cc",
+            message=(
+                "The selected external PD controller owns CC termination; this PD-only "
+                "receptacle adds no Rd, data path, regulator or VBUS-clamped USB ESD circuit."
+            ),
+        ),
+    ),
+)
+
+
 USB_C_USB2_DEVICE = _power_recipe(
     recipe="usb-c-usb2-device@1",
     family="usb-c-usb2-device",
@@ -2766,6 +2811,7 @@ TPS552892_5V_2A = _tps552892_autonomous(
 WAVE_B_POWER_RECIPES = (
     USB_C_5V_SINK,
     USB_C_USB2_DEVICE,
+    USB_C_PD_RECEPTACLE,
     CH224K_PD_TRIGGER,
     CH224K_PD_SELECTABLE,
     TP4056_1S_CHARGER,

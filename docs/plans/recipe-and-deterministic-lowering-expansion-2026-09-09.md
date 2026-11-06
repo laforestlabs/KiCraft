@@ -250,7 +250,8 @@ Implement and production-verify these before broadening lowerers:
 | Recipe | Exact scope | Required variants | Expected model work removed |
 |---|---|---|---|
 | `esp32-s3-mini-1-minimal@1` | ESP32-S3-MINI-1 module, 3V3 decoupling, EN/reset, BOOT, native USB, antenna placement contract | native USB; optional USB connector owned separately | Complete ESP32-S3 MCU BOM and wiring unit |
-| `esp32-s3-wroom-1-minimal@1` | ESP32-S3-WROOM-1 N8/N8R8-compatible reviewed module variant | exact flash/PSRAM identity; native USB | Complete ESP32-S3 MCU BOM and wiring unit |
+| `esp32-s3-wroom-1-minimal@1` | ESP32-S3-WROOM-1-N8R8 exact reviewed module | native USB; pads 28–30 reserved for Octal PSRAM | Complete ESP32-S3 MCU BOM and wiring unit |
+| `esp32-s3-wroom-1-n16r8-minimal@1` | ESP32-S3-WROOM-1-N16R8 exact reviewed module and assets | native USB; pads 28–30 reserved for Octal PSRAM; not interchangeable with N8R8 | Complete ESP32-S3 MCU BOM and wiring unit |
 | `esp32-wroom-32e-minimal@1` | ESP32-WROOM-32E module, EN/IO0 straps and decoupling | external UART programming port or paired USB-UART recipe | Complete classic ESP32 MCU core |
 | `esp32-c3-mini-1-minimal@1` | Exact ESP32-C3 module used by rounded dev-board corpus | native USB/JTAG and boot/reset | Complete C3 MCU core |
 | `stm32f103c8t6-minimal@1` | LQFP-48 MCU, supply/analog supply, reset, BOOT0/BOOT1 policy, SWD, 8 MHz crystal and load network | USB-device optional only when clock/pin requirements are satisfied | Complete `stm32-min` MCU sheet |

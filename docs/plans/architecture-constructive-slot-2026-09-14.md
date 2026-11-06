@@ -916,3 +916,40 @@ The real controller-ownership check changes from false to true for the reviewed
 part/footprint pair. Identity, work-unit, electrical-invariant and recipe suites
 pass (418 tests). Obsolete diagnostic-text assertions exposed by the USB feedback
 change were removed; the unsafe USB-voltage rejection test remains.
+
+## Selectable PD receptacle completion
+
+`ch224k-pd-selectable@1` owns the controller and voltage selector, not a socket.
+When both CC ports are unbound and VBUS names a declared rail with no existing
+reviewed receptacle owner, architecture derivation adds a same-sheet
+`usb-c-pd-receptacle@1`. It connects controller CC1/CC2 to socket A5/B5 and carries
+the same negotiated VBUS conductor; the controller owns termination. The socket
+adds no Rd, data interface, regulator, or VBUS-clamped USB data protection.
+
+Authored CC wiring or existing receptacle ownership prevents completion and
+retains concrete required-port refusals. Generated requirement/net collisions
+block as `pd_receptacle_binding_conflict`; names are never suffix-searched or
+arbitrarily reused. Independent PD inputs receive independent sockets. Separate
+native-USB programming signals must explicitly name their 5-V VBUS rail on both
+data signals when supply ownership is ambiguous; negotiated PD, programmer VBUS,
+and regulated board power must not be merged.
+
+The sanitized KC-MVA3XH architecture witness normalizes after replacing only its
+N8R8 selection with required N16R8. Expanded endpoint inspection verifies CH224K
+7→A5 and 6→B5, while the unchanged sibling substitution remains rejected. This
+is circuit-normalization evidence, not a fabricated-board result.
+
+Verification: the 12 focused suites pass 1,113 tests; an additional historical
+normalization-idempotence regression also passes. Actual isolated NiceGUI
+browser checks cover separate CC1/CC2 issues, count navigation, refresh,
+recovered Intent history, committed warnings, and metadata-free legacy failures.
+Production services were not restarted.
+
+Live verification remains blocked: all three Intent replays, all three
+Architecture replays, and the unchanged full-brief run received HTTP 404
+(`provider_request_rejected`) on their first call under the unchanged
+`openai/gpt-6-luna` / OpenAI profile. Each recorded zero new cost. No full-run
+stage committed and no build or ERC ran; the refusal's more specific provider
+reason was not retained. These results do not establish a stochastic pipeline
+fix or a fabrication-ready board. The original project's state remained
+byte-for-byte unchanged.

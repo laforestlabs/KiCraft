@@ -91,6 +91,13 @@ _FALLBACK_PRICES = {
     "sonnet": (3.0, 15.0),
     "opus": (15.0, 75.0),
 }
+
+# Reviewed OpenRouter endpoint capabilities, not a fallback after rejection.
+# Luna supports schemas/tools but does not advertise these optional controls;
+# require_parameters would otherwise make its healthy route ineligible.
+_OPENROUTER_UNSUPPORTED_PARAMETERS = {
+    "openai/gpt-6-luna": frozenset({"temperature", "parallel_tool_calls"}),
+}
 _FALLBACK_DEFAULT = (10.0, 30.0)  # unknown model: assume expensive
 
 # Tool-loop convergence caps. A weak model (e.g. deepseek-flash) fills the whole
@@ -928,9 +935,18 @@ class CappedOpenRouterClient:
         payload.update(stream_opts)
         payload.setdefault("model", self.s.model)
         payload.setdefault("max_tokens", self.s.max_tokens_per_call)
+        if getattr(self.s, "backend", "openrouter") == "openrouter":
+            for parameter in _OPENROUTER_UNSUPPORTED_PARAMETERS.get(payload["model"], ()):
+                payload.pop(parameter, None)
         prov = self._provider_block()
         if prov:
             payload["provider"] = prov
+        if (
+            getattr(self.s, "backend", "openrouter") == "openrouter"
+            and isinstance(payload.get("response_format"), dict)
+            and payload["response_format"].get("type") == "json_schema"
+        ):
+            payload.setdefault("provider", {})["require_parameters"] = True
         if (
             getattr(self.s, "backend", "openrouter") != "deepseek"
             and self.s.enable_prompt_cache

@@ -228,3 +228,53 @@ def test_failure_of_a_committed_design_still_offers_a_rebuild(store, user_id):
     web._DISK_SIGNALS.clear()
 
     assert web._project_presentation(store.get_project(pid))["action"] == "rebuild"
+
+
+def test_terminal_diagnostic_leaves_are_current_and_distinct():
+    from pathlib import Path
+    fixture = json.loads((Path(__file__).parent / "fixtures/stage_reliability/kc_mva3xh_failures.json").read_text())
+    diagnostic = fixture["terminal_diagnostic"]
+    act = None
+    for event in (
+        {"kind": "stage_start", "stage": "intent"},
+        {"kind": "retry", "stage": "intent", "failure_kind": "collection_limit"},
+        {"kind": "stage_done", "stage": "intent", "ok": True},
+        {"kind": "stage_start", "stage": "architecture"},
+        {"kind": "stage_done", "stage": "architecture", "ok": False,
+         "diagnostic": diagnostic},
+    ):
+        act = activity.reduce_activity(act, event)
+    durable = web._durable_issues(
+        {"stage_status": {"architecture": {"ok": False, "diagnostics": [diagnostic]}}},
+        {"architecture": "failed"})
+    issues = web._merge_issues(durable, act["issues"])
+    assert len(issues) == 2
+    assert all(i["severity"] == "error" and i["stage"] == "architecture" for i in issues)
+    assert {i["code"] for i in issues} == {"unbound_required_port"}
+    assert any("cc1" in i["message"] for i in issues)
+    assert any("cc2" in i["message"] for i in issues)
+    assert web._issue_summary(issues) == "2 errors"
+
+
+def test_terminal_fallback_and_committed_warning():
+    act = activity.reduce_activity(None, {"kind": "stage_done", "stage": "intent",
+                                          "ok": False, "schema_error": "Invalid property"})
+    assert act["issues"][0]["message"] == "Invalid property"
+    act = activity.reduce_activity(act, {"kind": "stage_start", "stage": "intent"})
+    assert not act["issues"] and act["failure"] is None
+    act = activity.reduce_activity(act, {"kind": "stage_done", "stage": "intent",
+                                          "ok": True, "warning": True})
+    assert act["issues"][0]["severity"] == "warning"
+
+
+def test_workspace_assurance_keeps_artifact_fact_without_repeating_stage_cause():
+    assurance = {"level": "partial", "summary": "Failed: CC1 missing",
+                 "limitations": ["Architecture stopped on: CC1 missing",
+                                 "No ERC result is recorded"],
+                 "capability": []}
+    issues = [{"stage": "architecture", "message": "CC1 missing"}]
+    compact = web._workspace_assurance(assurance, "architecture", issues)
+    assert "CC1" not in compact["summary"]
+    assert compact["limitations"] == ["No ERC result is recorded"]
+    assert assurance["limitations"][0].endswith("CC1 missing")
+    assert web._workspace_assurance(assurance, "intent", issues) is assurance

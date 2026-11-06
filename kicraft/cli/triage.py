@@ -390,6 +390,8 @@ _SIG_ALIAS = {
     "the reply was schema-valid but a deterministic design contract refused it "
     "(see the diagnostic)":
         "(no gate id: a semantic contract refused a schema-clean candidate)",
+    "The generated circuit failed a design check.":
+        "(no gate id: a semantic contract refused a schema-clean candidate)",
     "collection_limit": "(no gate id: provider collection limit hit before a commit)",
     "truncated JSON at the output token limit": "(no gate id: truncated answer, no gate ran)",
     "reasoning loop detected — retrying with reasoning disabled":

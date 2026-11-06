@@ -299,3 +299,27 @@ def test_work_unit_progress_belongs_to_current_stage_and_attempt():
     activity.reduce_activity(act, {"kind": "work_unit_plan", "stage": "bom", "unit_id": "a"})
     activity.reduce_activity(act, {"kind": "run_started", "run_id": "second"})
     assert act["planned_units"] == act["completed_units"] == set()
+
+
+def test_reopened_history_matches_current_live_findings(tmp_path):
+    events = [
+        {"kind": "stage_start", "stage": "intent"},
+        {"kind": "retry", "stage": "intent", "failure_kind": "collection_limit"},
+        {"kind": "stage_done", "stage": "intent", "ok": True},
+        {"kind": "stage_start", "stage": "architecture"},
+        {"kind": "stage_done", "stage": "architecture", "ok": False,
+         "diagnostic": {"findings": [
+             {"code": "port", "message": "CC1 missing", "evidence": ["ports=cc1,cc2"]},
+             {"code": "port", "message": "CC2 missing", "evidence": ["ports=cc1,cc2"]},
+         ]}},
+    ]
+    (tmp_path / "events.jsonl").write_text("".join(json.dumps(e) + "\n" for e in events))
+    live = reopened = None
+    for event in events:
+        live = activity.reduce_activity(live, event)
+    for event in web._load_events(tmp_path):
+        reopened = activity.reduce_activity(reopened, event)
+    assert reopened["issues"] == live["issues"]
+    assert len(reopened["issues"]) == 2
+    assert all(i["stage"] == "architecture" for i in reopened["issues"])
+    assert any(e["kind"] == "retry" for e in web._load_events(tmp_path))

@@ -160,6 +160,10 @@ def _stage_extra(stage: str) -> str:
             "programming was requested; UART carries application data, not RP2040 ROM "
             "programming. Keep any explicit native_usb/programming parameters consistent "
             "with that choice."
+            " When PD power input and native-USB programming use separate receptacles, "
+            "declare the programming socket's 5-V VBUS rail in `rails` on both USB data "
+            "signals. Never join programming VBUS to negotiated PD VBUS or regulated board "
+            "power. Preserve an explicitly requested single-connector design."
         )
     if stage == "bom":
         return (

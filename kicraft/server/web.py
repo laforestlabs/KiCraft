@@ -3307,14 +3307,14 @@ def _issue(*, severity, stage, code, message, evidence=()) -> dict:
 
 
 def _merge_issues(*groups) -> list[dict]:
-    """Deduplicate issues by stage+code+evidence, newest group last."""
+    """Deduplicate issues by stage, code, message and evidence."""
     out: list[dict] = []
     index: dict[tuple, int] = {}
     for group in groups:
         for issue in group or []:
             if not isinstance(issue, dict):
                 continue
-            key = (issue.get("stage"), issue.get("code"),
+            key = (issue.get("stage"), issue.get("code"), issue.get("message"),
                    tuple(issue.get("evidence") or []))
             if key in index:
                 out[index[key]] = issue
@@ -3338,22 +3338,30 @@ def _durable_issues(signals: dict, derived: dict) -> list[dict]:
     for stage, entry in (signals.get("stage_status") or {}).items():
         if not isinstance(entry, dict):
             continue
-        for diagnostic in entry.get("diagnostics") or []:
+        diagnostics = list(entry.get("diagnostics") or [])
+        if isinstance(entry.get("diagnostic"), dict):
+            diagnostics.append(entry["diagnostic"])
+        for diagnostic in diagnostics:
             if not isinstance(diagnostic, dict):
                 continue
             raw_sev = str(diagnostic.get("severity") or "").lower()
-            severity = "error" if raw_sev in ("fab_gate", "error", "blocker") else "warning"
-            if severity == "error":
+            severity = ("error" if entry.get("ok") is False or
+                        raw_sev in ("fab_gate", "error", "blocker") else
+                        "info" if raw_sev in ("info", "note") else "warning")
+            findings = _activity.diagnostic_issues(stage, diagnostic, severity=severity)
+            if findings and severity == "error":
                 stages_with_concrete_error.add(str(stage))
-            concrete.append(_issue(
-                severity=severity,
-                stage=stage,
-                code=diagnostic.get("code") or raw_sev or "semantic_finding",
-                message=diagnostic.get("message") or diagnostic.get("code")
-                or "diagnostic finding",
-                evidence=diagnostic.get("evidence") or [],
-            ))
-        if entry.get("repair_required") or entry.get("semantic_clean") is False:
+            concrete.extend(findings)
+        if entry.get("ok") is False and str(stage) not in stages_with_concrete_error:
+            detail = (_activity.human_failure_text(entry.get("schema_error"))
+                      or _activity.human_failure_text(entry.get("errors"))
+                      or _activity.human_failure_text(entry.get("error")))
+            if detail:
+                stages_with_concrete_error.add(str(stage))
+                concrete.append(_issue(severity="error", stage=stage,
+                                       code=entry.get("failure_kind") or "stage_failed",
+                                       message=detail))
+        if entry.get("ok") is not False and (entry.get("repair_required") or entry.get("semantic_clean") is False):
             concrete.append(_issue(
                 severity="warning", stage=stage, code="committed_with_findings",
                 message=f"{_activity.stage_label(stage) or stage} committed with findings",
@@ -3596,6 +3604,11 @@ def _project_presentation(p, *, live=None, job=None, activity=None,
     if detail in _GENERIC_TERMINAL_LINES:
         detail = ""  # a terminal marker is not a cause: fall through to the finding
     issues = _merge_issues(_durable_issues(sig, derived), act.get("issues") or [])
+    concrete_error_stages = {i.get("stage") for i in issues
+                             if i.get("severity") == "error"
+                             and i.get("code") != "stage_failed"}
+    issues = [i for i in issues if not (i.get("code") == "stage_failed"
+              and i.get("stage") in concrete_error_stages)]
     last_event_at = act.get("last_event_at")
     stage = act.get("stage")
     download_ready = False
@@ -3814,6 +3827,22 @@ def _relative_age(iso: str | None) -> str:
     if seconds < 86400:
         return f"{int(seconds // 3600)}h ago"
     return f"{int(seconds // 86400)}d ago"
+
+
+def _workspace_assurance(assurance: dict, stage: str | None,
+                         issues: list[dict]) -> dict:
+    """Avoid repeating the failed stage's diagnostic outside its issue panel."""
+    if not stage or not any(i.get("stage") == stage for i in issues):
+        return assurance
+    label = _activity.stage_label(stage) or stage
+    result = dict(assurance)
+    result["limitations"] = [line for line in assurance.get("limitations") or []
+                             if not str(line).startswith(f"{label} stopped on: ")]
+    result["capability"] = [line for line in assurance.get("capability") or []
+                            if not str(line).startswith(f"{label}: ")]
+    if assurance.get("level") in ("partial", "limited") and not assurance.get("stale_preview"):
+        result["summary"] = "The build did not produce a current, fabrication-ready package."
+    return result
 
 
 def _issue_summary(issues: list[dict]) -> str:
@@ -8220,6 +8249,8 @@ def index(prompt: str = "", project: str = ""):
                      f"{len(planned)} units") if planned else ""
             detail = view.get("place_route_detail") or {}
             assurance = pres.get("assurance") or {}
+            if pres["status"] == "failed":
+                assurance = _workspace_assurance(assurance, pres["stage"], pres["issues"])
             sig = (pres["title"], pres["status"], pres["stage"], pres["headline"],
                    pres["detail"], pres["last_event_at"], pres["action"],
                    pres["download_ready"], pres.get("zip_path"), state.get("brief"),
@@ -8240,15 +8271,18 @@ def index(prompt: str = "", project: str = ""):
             code = state.get("board_code")
             summary_code.text = code or ""
             summary_code.set_visibility(bool(code))
-            summary_headline.text = pres["headline"]
-            # The detail earns its line only when it adds something: repeating the
-            # headline (a failure's own cause often IS both) prints noise.
-            repeats = not pres["detail"] or pres["detail"] == pres["headline"]
+            has_stage_issues = any(i.get("stage") == pres["stage"] for i in pres["issues"]) if pres["stage"] else False
+            compact = (f"Design stopped at {_activity.stage_label(pres['stage'])}"
+                       if pres["status"] == "failed" and pres["stage"] else
+                       "Design stopped" if pres["status"] == "failed" else pres["headline"])
+            summary_headline.text = compact
+            repeats = (pres["status"] == "failed" or has_stage_issues
+                       or not pres["detail"] or pres["detail"] == pres["headline"])
             summary_detail.text = "" if repeats else pres["detail"]
             summary_detail.set_visibility(not repeats)
             # The page's status line is the same shared headline, so no surface
             # can claim something the artifacts do not support.
-            status.text = pres["headline"]
+            status.text = compact
             stage = _activity.stage_label(pres["stage"])
             summary_stage.text = f"Stage: {stage}" if stage else ""
             summary_stage.set_visibility(bool(stage))
@@ -8310,24 +8344,28 @@ def index(prompt: str = "", project: str = ""):
                         _render_presentation_actions(pres)
 
             issues = pres["issues"]
-            issues_sig = tuple((i.get("stage"), i.get("code"), i.get("message"))
-                               for i in issues)
+            issues_sig = tuple((i.get("stage"), i.get("severity")) for i in issues)
             if issues_sig != issues_box_sig[0]:
                 issues_box_sig[0] = issues_sig
                 issues_box.clear()
                 issues_box.set_visibility(bool(issues))
                 if issues:
                     with issues_box:
-                        _render_section(issues_section(issues, on_view=_view_stage),
-                                        "#94a3b8")
-            summary_live.text = f"{pres['title']}: {pres['headline']}"
+                        ui.label(_issue_summary(issues)).classes("text-xs font-bold")
+                        for stage_key in _activity.stage_order():
+                            stage_issues = [i for i in issues if i.get("stage") == stage_key]
+                            if stage_issues:
+                                ui.button(f"{_activity.stage_label(stage_key)} · {_issue_summary(stage_issues)}",
+                                          on_click=lambda s=stage_key: _view_stage(s)) \
+                                    .props("flat dense no-caps")
+            summary_live.text = f"{pres['title']}: {compact}"
             # Announce a terminal failure or an outstanding question ONCE, in the
             # same words the visible card uses -- never a raw internal dump, and
             # never a stale sentence from the previous attempt (a cleared alert
             # lets the next failure announce itself).
             alert = ""
             if pres["status"] == "failed":
-                alert = f"Design stopped: {pres['headline']}"
+                alert = compact
             elif pres["status"] == "awaiting_input":
                 alert = "The design needs your answer to continue."
             if not alert:
@@ -8340,15 +8378,14 @@ def index(prompt: str = "", project: str = ""):
             summary_brief.text = state.get("brief") or ""
 
         def _paint_stage_issues(pres: dict) -> None:
-            """Each stage inspector also carries ITS OWN outstanding issues, so a
-            warning is visible where the work happened as well as in the summary."""
+            """Keep each explanation in its own stage inspector."""
             by_stage: dict[str, list[dict]] = {}
             for issue in pres["issues"]:
                 stage = issue.get("stage")
                 if stage:
                     by_stage.setdefault(stage, []).append(issue)
             for stage in _activity.stage_order():
-                tabs.set_issues(stage, by_stage.get(stage, []), on_view=_view_stage)
+                tabs.set_issues(stage, by_stage.get(stage, []))
 
         def _paint_failure_card(pres: dict) -> None:
             """The inline failure/interruption card: cause, what survived, and the
@@ -8360,9 +8397,11 @@ def index(prompt: str = "", project: str = ""):
                     failure_box.clear()
                     failure_card.set_visibility(False)
                 return
+            stage_issues = [i for i in pres["issues"] if pres["stage"] and i.get("stage") == pres["stage"]]
+            unassigned = [i for i in pres["issues"] if not i.get("stage")]
             sig = (pres["headline"], pres["detail"], pres["stage"], pres["action"],
                    pres["title"], bool(state.get("support_report_id")),
-                   bool(view.get("pcb_ready_seen")))
+                   bool(view.get("pcb_ready_seen")), json.dumps(pres["issues"], sort_keys=True))
             if view.get("failure_sig") == sig:
                 return
             view["failure_sig"] = sig
@@ -8373,15 +8412,20 @@ def index(prompt: str = "", project: str = ""):
             with failure_box:
                 with ui.row().classes("w-full items-center gap-2"):
                     ui.icon("cancel").style("color:#fecaca;font-size:1.2rem")
-                    ui.label(pres["headline"]).classes("text-sm font-medium") \
-                        .style("color:#fecaca")
                     stage = _activity.stage_label(pres["stage"])
-                    if stage:
-                        ui.label(stage).classes("text-xs font-mono") \
-                            .style("color:#fca5a5")
-                if pres["detail"] and pres["detail"] != pres["headline"]:
+                    headline = (f"Design stopped at {stage}" if stage_issues and stage
+                                else pres["headline"])
+                    ui.label(headline).classes("text-sm font-medium") \
+                        .style("color:#fecaca")
+                if not stage_issues and pres["detail"] and pres["detail"] != pres["headline"]:
                     ui.label(pres["detail"]).classes("text-xs whitespace-pre-wrap") \
                         .style("color:#fca5a5")
+                for issue in unassigned:
+                    if issue.get("message") not in (pres["headline"], pres["detail"]):
+                        ui.label(str(issue["message"])).classes("text-xs whitespace-pre-wrap")
+                if stage_issues:
+                    ui.button(f"View {stage} issues", on_click=lambda: _view_stage(pres["stage"])) \
+                        .props("flat dense no-caps")
                 # What actually survived on disk -- never a claimed artifact that
                 # is not there.
                 kept = []

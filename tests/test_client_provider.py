@@ -336,6 +336,7 @@ def test_stream_sends_provider_block_and_records_structured_meta(monkeypatch):
     assert p["provider"]["order"] == ["test-provider"]
     assert p["provider"]["allow_fallbacks"] is False
     assert p["provider"]["max_price"] == {"prompt": 0.17, "completion": 0.41}
+    assert p["provider"]["require_parameters"] is True
     assert "_meta" not in p and "_meta_ctx" not in p  # control keys stripped
     assert isinstance(p["messages"][0]["content"], list)  # cache breakpoint applied
     assert p["messages"][0]["content"][0]["cache_control"] == {"type": "ephemeral"}
@@ -2109,8 +2110,80 @@ def test_json_schema_is_translated_only_for_the_deepseek_backend(monkeypatch, ba
     )
     if backend == "deepseek":
         assert captured["payload"]["response_format"] == {"type": "json_object"}
+        assert "provider" not in captured["payload"]
     else:
         assert captured["payload"]["response_format"] == schema
+        assert captured["payload"]["provider"]["require_parameters"] is True
+        c._stream({"messages": [{"role": "user", "content": "plain chat"}]})
+        assert "require_parameters" not in captured["payload"].get("provider", {})
+
+
+@pytest.mark.parametrize("with_tools", [False, True])
+@pytest.mark.parametrize(
+    ("backend", "default_model", "requested_model", "omitted"),
+    [
+        ("openrouter", "openai/gpt-6-luna", None, True),
+        ("openrouter", "other/model", "openai/gpt-6-luna", True),
+        ("openrouter", "openai/gpt-6-luna", "other/model", False),
+        ("deepseek", "deepseek-flash", None, False),
+    ],
+)
+def test_schema_routes_respect_selected_model_optional_controls(
+    monkeypatch, with_tools, backend, default_model, requested_model, omitted
+):
+    calls = []
+
+    def endpoint(url, headers=None, json=None, **kwargs):
+        calls.append(json)
+        # Model the parameter filter that refused otherwise schema-capable Luna
+        # endpoints. Do not recover by dropping the schema or changing routes.
+        if backend == "openrouter":
+            assert json["provider"]["require_parameters"] is True
+            assert json["provider"]["order"] == ["openai"]
+            assert json["provider"]["allow_fallbacks"] is False
+            assert json["provider"]["max_price"] == {"prompt": 0.1, "completion": 0.5}
+            assert json["response_format"]["type"] == "json_schema"
+            if json["model"] == "openai/gpt-6-luna":
+                if {"temperature", "parallel_tool_calls"} & json.keys():
+                    return _FakeResp([], status_code=404, reason="Filter by Parameters")
+        return _FakeResp([
+            {"choices": [{"delta": {"content": '{"ok":true}'}, "finish_reason": "stop"}]},
+            _usage_chunk(cost=0.001),
+        ])
+
+    monkeypatch.setattr(client_mod.requests, "post", endpoint)
+    client = CappedOpenRouterClient(
+        Settings(api_key="k", backend=backend, model=default_model,
+                 provider_order=["openai"], provider_allow_fallbacks=False,
+                 max_price_prompt=0.1, max_price_completion=0.5),
+        guard=_RecordingGuard(),
+    )
+    kwargs = {
+        "model": requested_model, "temperature": 0.4,
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {"name": "optional_controls", "strict": True, "schema": {
+                "type": "object", "properties": {"ok": {"type": "boolean"}},
+                "required": ["ok"], "additionalProperties": False,
+            }},
+        },
+    }
+    messages = [{"role": "user", "content": 'Return {"ok":true}.'}]
+    if with_tools:
+        result = client.chat_with_tools(
+            messages, [], lambda *_: pytest.fail("Unexpected tool execution"),
+            max_rounds=1, **kwargs,
+        )
+    else:
+        result = client.chat(messages, **kwargs)
+    assert json.loads(result["text"]) == {"ok": True}
+    assert len(calls) == 1
+    if omitted:
+        assert not ({"temperature", "parallel_tool_calls"} & calls[0].keys())
+    else:
+        assert calls[0]["temperature"] == 0.4
+        if with_tools:
+            assert calls[0]["parallel_tool_calls"] is True
 
 
 class _EndpointResponse:

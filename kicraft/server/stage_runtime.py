@@ -192,7 +192,11 @@ def _record_attempt_facts(
         fallback_reason=fallback_reason,
         reasoning_failure_kind=_reasoning_failure_kind(facts),
         schema_error=schema_error,
-        failure_detail=_redacted_schema_error(errors.get("message")),
+        failure_detail=_redacted_schema_error(
+            json.dumps(facts.collection_limit, sort_keys=True, default=str)
+            if facts is not None and facts.finish == "collection_limit" and facts.collection_limit
+            else errors.get("message")
+        ),
         response_chars=len(facts.raw) if facts is not None else None,
         response_format_mode=(
             facts.response_format_mode if facts is not None else errors.get("response_format_mode")
@@ -259,6 +263,8 @@ def _work_unit_attempt_event(
         "aggregate_round": aggregate_round,
         "fallback_reason": fallback_reason,
         "schema_error": schema_error,
+        **({"collection_limit": facts.collection_limit}
+           if facts is not None and isinstance(facts.collection_limit, dict) else {}),
         "response_chars": len(facts.raw) if facts is not None else None,
         "response_format_mode": (
             facts.response_format_mode if facts is not None else errors.get("response_format_mode")
@@ -625,6 +631,8 @@ def _schema_rejection_signature(
     before.
     """
     row = diagnostic if isinstance(diagnostic, dict) else {}
+    if row.get("code") in {"invalid_json", "invalid_schema", "collection_limit"}:
+        return None
     if not row.get("code"):
         return None
     members = _diagnostic_member_rows(row)
@@ -1018,6 +1026,45 @@ def _classify_parse_failure(finish, had_content) -> str:
     return "invalid_json"
 
 
+def _guard_failure_kind(limit: dict | None) -> str:
+    scope = (limit or {}).get("limit_scope")
+    if scope == "syntax":
+        return "invalid_json"
+    if scope in {"property", "duplicate"}:
+        return "invalid_schema"
+    return "collection_limit"
+
+
+def _guard_diagnostic(limit: dict | None) -> dict:
+    limit = limit or {}
+    kind = _guard_failure_kind(limit)
+    scope = limit.get("limit_scope")
+    if scope == "syntax":
+        message = "The generated response was not valid JSON"
+        if limit.get("syntax_error"):
+            message += f": {limit['syntax_error']}"
+    elif scope == "property":
+        message = f"The generated response included a forbidden property: {limit.get('property', 'unknown')}"
+    elif scope == "duplicate":
+        message = f"The generated response repeated an identity in {limit.get('field', 'a collection')}"
+    elif limit.get("observed_count") is not None and limit.get("configured_total") is not None:
+        message = (f"The generated response exceeded the {limit.get('field', 'collection')} limit "
+                   f"({limit['observed_count']} items; maximum {limit['configured_total']})")
+    else:
+        message = "The generated response was stopped by the streaming guard; the original reason was not recorded"
+    evidence = [
+        f"{key}={json.dumps(value, ensure_ascii=True, default=str)}"
+        for key, value in limit.items()
+    ]
+    return {
+        "code": kind,
+        "message": _redacted_schema_error(message),
+        "evidence": [_redacted_schema_error(item) for item in evidence],
+    }
+
+
+
+
 # Human-readable error strings DERIVED from the durable failure_kind (UI
 # compatibility); the classification itself is never free-form. commit_rejected
 # carries no error string — the `commit` dict names the gate errors.
@@ -1027,10 +1074,7 @@ _FAILURE_KIND_ERROR = {
     "truncated_json": "truncated JSON at the output token limit",
     "invalid_json": "no JSON in reply",
     "invalid_schema": "provider response did not satisfy the required JSON schema",
-    "contract_rejected": (
-        "the reply was schema-valid but a deterministic design contract refused it "
-        "(see the diagnostic)"
-    ),
+    "contract_rejected": "The generated circuit failed a design check.",
     "provider_error": "provider error",
     "provider_rate_limited": "provider temporarily rate limited the request",
     "provider_upstream_5xx": "provider service was temporarily unavailable",
@@ -1144,15 +1188,14 @@ def _stage_recovery_message(
     audit_notes=None,
 ) -> str:
     limit = collection_limit or {}
-    if kind == "collection_limit":
-        if limit.get("limit_scope") == "syntax":
-            template = _SYNTAX_LIMIT_RETRY_MSG
-        elif limit.get("limit_scope") == "property":
-            template = _PROPERTY_LIMIT_RETRY_MSG
-        elif limit.get("limit_scope") == "duplicate":
-            template = _DUPLICATE_IDENTITY_RETRY_MSG
-        else:
-            template = _COLLECTION_LIMIT_RETRY_MSG
+    if limit.get("limit_scope") == "syntax":
+        template = _SYNTAX_LIMIT_RETRY_MSG
+    elif limit.get("limit_scope") == "property":
+        template = _PROPERTY_LIMIT_RETRY_MSG
+    elif limit.get("limit_scope") == "duplicate":
+        template = _DUPLICATE_IDENTITY_RETRY_MSG
+    elif kind == "collection_limit":
+        template = _COLLECTION_LIMIT_RETRY_MSG
     elif kind in _SCHEMA_REJECTION_KINDS:
         template = _SCHEMA_RETRY_MSG
     else:
@@ -1737,7 +1780,7 @@ def decode_stage_response(
         )
     except (json.JSONDecodeError, ValueError):
         kind = (
-            "collection_limit"
+            _guard_failure_kind(facts.collection_limit)
             if facts.finish == "collection_limit"
             else (
                 "reasoning_loop"
@@ -1745,9 +1788,15 @@ def decode_stage_response(
                 else _classify_parse_failure(facts.finish, facts.had_content)
             )
         )
+        diagnostic = _guard_diagnostic(facts.collection_limit) if facts.finish == "collection_limit" else None
         return AttemptOutcome(
             "recoverable_failure",
-            {"failure_kind": kind, "schema_error": None},
+            {
+                "failure_kind": kind,
+                "schema_error": diagnostic["message"] if diagnostic else None,
+                "diagnostic": diagnostic,
+                "collection_limit": facts.collection_limit if diagnostic else None,
+            },
         )
 
 
@@ -1865,6 +1914,8 @@ def finalize_stage(
                 "failure_kind": outcome.get("failure_kind"),
                 "schema_error": outcome.get("schema_error"),
                 "diagnostic": outcome.get("diagnostic"),
+                **({"collection_limit": outcome["collection_limit"]}
+                   if isinstance(outcome.get("collection_limit"), dict) else {}),
                 "work_units": outcome.get("work_units"),
                 "reused_work_units": outcome.get("reused_work_units"),
                 "aggregate_repair_rounds": outcome.get("aggregate_repair_rounds"),
@@ -2697,7 +2748,6 @@ def _drive_work_unit_stage(
         )
         response_format: dict | None = contract.response_format
         fallback_spent = False
-        schema_less_spent = False
         call_mode = "serialization" if serialization else "clean_slate" if pristine else "normal"
         cache_payload = {
             "stage": stage,
@@ -2807,19 +2857,6 @@ def _drive_work_unit_stage(
                     aggregate_round=aggregate_round,
                     aggregate_signature=aggregate_signature,
                 )
-                if (
-                    kind
-                    in {
-                        "provider_response_format_rejected",
-                        "provider_capability_rejected",
-                        "provider_request_rejected",
-                    }
-                    and response_format is not None
-                    and not schema_less_spent
-                ):
-                    response_format = None
-                    schema_less_spent = True
-                    continue
                 transient = kind == "provider_rate_limited"
                 fallback_profile = getattr(
                     getattr(active_client, "s", None),
@@ -2846,12 +2883,14 @@ def _drive_work_unit_stage(
                 rounds_total += int(facts.rounds or 0)
                 tool_calls_total += int(facts.tool_calls or 0)
             if facts.finish == "collection_limit":
+                guard_kind = _guard_failure_kind(facts.collection_limit)
                 record(
                     active_client,
                     unit=unit,
                     unit_attempt=unit_attempt,
                     call_mode=call_mode,
-                    outcome="collection_limit",
+                    outcome=guard_kind,
+                    schema_error=_guard_diagnostic(facts.collection_limit)["message"],
                     facts=facts,
                     aggregate_round=aggregate_round,
                     aggregate_signature=aggregate_signature,
@@ -2863,7 +2902,7 @@ def _drive_work_unit_stage(
                     candidate_retained=False,
                     fallback_reason=("provider_rate_limited" if fallback_spent else None),
                 )
-                return "recoverable", None, facts, "collection_limit"
+                return "recoverable", None, facts, guard_kind
             try:
                 parsed = _extract_json(facts.raw)
             except (json.JSONDecodeError, ValueError):
@@ -2982,7 +3021,7 @@ def _drive_work_unit_stage(
                 if identities:
                     defects[name] = sorted(set(identities))
             return json.dumps(defects, sort_keys=True)
-        if error == "collection_limit" and facts is not None:
+        if facts is not None and facts.finish == "collection_limit":
             limit = facts.collection_limit or {}
             return json.dumps(
                 [
@@ -3085,24 +3124,31 @@ def _drive_work_unit_stage(
                 "error": error_text,
                 "unit_id": unit.unit_id,
                 "schema_error": (
-                    _redacted_schema_error(error) if isinstance(error, Exception) else None
+                    _guard_diagnostic(facts.collection_limit)["message"]
+                    if facts is not None and facts.finish == "collection_limit"
+                    else _redacted_schema_error(error) if isinstance(error, Exception) else None
                 ),
                 "diagnostic": (
-                    unit_defect_diagnostic(error, error_text)
+                    _guard_diagnostic(facts.collection_limit)
+                    if facts is not None and facts.finish == "collection_limit"
+                    else unit_defect_diagnostic(error, error_text)
                     if isinstance(error, WorkUnitValidationError)
                     else getattr(error, "diagnostic", None)
                 ),
+                "collection_limit": facts.collection_limit if facts is not None else None,
             }
             serialization_errors = {
                 "collection_limit",
                 "truncated_json",
                 "invalid_json",
+                "invalid_schema",
                 "reasoning_loop",
             }
             if used_pristine and error in serialization_errors:
                 return "terminal", {
                     "failure_kind": error,
                     "error": "clean-slate serialization retry failed",
+                    **failure_detail,
                 }
             # One identical defect may repeat: the model often fixes it on the
             # next nudge, and the loop is already bounded by the unit attempt stop
@@ -4474,14 +4520,12 @@ def drive_stage(
                 "error": _FAILURE_KIND_ERROR.get(kind, kind),
                 "schema_error": schema_error_detail,
                 "diagnostic": outcome.payload.get("diagnostic"),
+                "collection_limit": collection_limit,
                 "audit_findings": outcome.payload.get("audit_findings") or [],
             }
             rejection_codes = _diagnostic_codes(last.get("diagnostic"))
             defect_codes.extend(rejection_codes)
-            if rejection_codes:
-                # A `retry` carrying a diagnostic is the reader refusing the
-                # draft; a parse failure carries none and is not a contract
-                # rejection.
+            if rejection_codes and kind == "contract_rejected":
                 contract_rejections += 1
             _record_attempt_facts(
                 active_client,
@@ -4507,6 +4551,8 @@ def drive_stage(
                         "call_mode": current_call_mode,
                         "schema_error": _redacted_schema_error(schema_error_detail),
                         "diagnostic": outcome.payload.get("diagnostic"),
+                        **({"collection_limit": collection_limit}
+                           if isinstance(collection_limit, dict) else {}),
                         "declared_identities": ladder_identities(raw),
                         "model": _client_model(active_client),
                     }
@@ -4624,6 +4670,8 @@ def drive_stage(
                         "kind": "serialization_recovery",
                         "stage": stage,
                         "failure_kind": kind,
+                        **({"collection_limit": collection_limit}
+                           if isinstance(collection_limit, dict) else {}),
                         "resolution_ledger_entries": int(len(resolution_ledger)),
                     }
                 )

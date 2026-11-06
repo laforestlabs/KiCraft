@@ -184,6 +184,7 @@ _NATIVE_USB_MCU_RECIPES = frozenset(
         "esp32-s3-mini-1-minimal@1",
         "esp32-s3-mini-1u-n4r2-minimal@1",
         "esp32-s3-wroom-1-minimal@1",
+        "esp32-s3-wroom-1-n16r8-minimal@1",
         "esp32-c3-mini-1-minimal@2",
         "esp32-c3-mini-1-h4x-minimal@2",
         "rp2040-minimal@3",
@@ -196,6 +197,7 @@ _MCU_OWNED_USB_SERIES_RECIPES = frozenset(
         "esp32-s3-mini-1-minimal@1",
         "esp32-s3-mini-1u-n4r2-minimal@1",
         "esp32-s3-wroom-1-minimal@1",
+        "esp32-s3-wroom-1-n16r8-minimal@1",
         "esp32-c3-mini-1-minimal@2",
         "esp32-c3-mini-1-h4x-minimal@2",
         "rp2040-minimal@3",
@@ -3829,6 +3831,99 @@ def derive_architecture(
                 ],
             )
 
+    # A selectable PD controller owns CC termination, not a physical receptacle.
+    # Complete only an otherwise unowned, declared VBUS input; authored CC wiring
+    # and existing sockets must remain the author's circuit, even when incomplete.
+    from kicraft.design.part_identity import physical_inventory_record, reviewed_part
+
+    pd_binding_notes: dict[str, list[str]] = {}
+    authored_nets = {
+        _net_identity(net)
+        for net in (
+            *endpoints,
+            *intent.power.rails,
+            *(signal.name for signal in signals),
+            *(net for row in intent.requirements for net in row.ties.values()),
+        )
+    }
+    for pd_id, catalog in sorted(tuple(catalogs.items())):
+        if catalog.recipe is None or catalog.recipe.definition.recipe != "ch224k-pd-selectable@1":
+            continue
+        bound = bindings.get(pd_id, {})
+        if any(bound.get(port) for port in ("cc1", "cc2")):
+            pd_binding_notes[pd_id] = ["CC wiring is partially or fully authored; no socket was inferred"]
+            continue
+        vbus = bound.get("vbus")
+        if vbus not in intent.power.rails:
+            pd_binding_notes[pd_id] = ["VBUS must be bound to a rail declared under power.rails"]
+            continue
+        owners = []
+        for owner_id, owner_catalog in catalogs.items():
+            if bindings.get(owner_id, {}).get("vbus") != vbus:
+                continue
+            parts = owner_catalog.recipe.definition.parts if owner_catalog.recipe else ()
+            direct = reviewed_part(requirements[owner_id].exact_part or "")
+            if (
+                direct is not None and "usb-c-receptacle" in direct.physical_features
+            ) or any(
+                (record := physical_inventory_record(
+                    mpn=part.mpn, symbol=part.symbol, footprint=part.footprint
+                )) is not None and "usb-c-receptacle" in record.physical_features
+                for part in parts
+            ):
+                owners.append(owner_id)
+        if owners:
+            pd_binding_notes[pd_id] = [
+                f"VBUS {vbus!r} already has receptacle ownership: {', '.join(sorted(owners))}; "
+                "wire its CC ports explicitly"
+            ]
+            continue
+        connector_id = f"{pd_id}_usb_c"
+        cc_nets = (f"{pd_id}_CC1".upper(), f"{pd_id}_CC2".upper())
+        conflicts = [
+            name for name in (connector_id, *cc_nets)
+            if name in models_by_id or name in requirements or _net_identity(name) in authored_nets
+        ]
+        if len(connector_id) > 64:
+            conflicts.append(connector_id)
+        if conflicts:
+            _fail(
+                "pd_receptacle_binding_conflict",
+                f"requirement {pd_id!r} cannot add its PD receptacle: derived identity "
+                f"{', '.join(repr(name) for name in conflicts)} conflicts with the design",
+                requirement_id=pd_id,
+                sheet=requirements[pd_id].sheet,
+                evidence=[f"conflicting_identity={name}" for name in conflicts],
+            )
+            continue
+        owner = requirements[pd_id]
+        connector = IntentRequirement(
+            id=connector_id, sheet=owner.sheet, role="connector",
+            family="usb-c-pd-receptacle", exact_part="USB-C-PD-RECEPTACLE",
+            functional_blocks=list(owner.functional_blocks),
+        )
+        connector_catalog = _catalog(connector, recipes, lowerers)
+        assert connector_catalog is not None  # The reviewed construction is registered above.
+        models_by_id[connector_id] = connector
+        catalogs[connector_id] = connector_catalog
+        requirements[connector_id] = CircuitRequirement(
+            id=connector_id, sheet=owner.sheet, role="connector",
+            family=connector.family, exact_part=connector.exact_part,
+            functional_blocks=list(owner.functional_blocks),
+        )
+        for port, net in zip(("cc1", "cc2"), cc_nets):
+            _bind(pd_id, port, net, "bidirectional", context="derived PD receptacle")
+            _bind(connector_id, port, net, "bidirectional", context="derived PD receptacle")
+        for port, net in (("vbus", vbus), ("gnd", GND_NET), ("shield", GND_NET)):
+            _bind(connector_id, port, net, connector_catalog.directions[port],
+                  context="derived PD receptacle")
+        authored_nets.update(_net_identity(net) for net in cc_nets)
+        derived_notes.append(
+            f"{pd_id}: added same-sheet PD-only receptacle {connector_id}; its CC1/CC2 "
+            f"connect to the controller, which owns CC termination, and VBUS carries {vbus} "
+            "before and after negotiation (derived)"
+        )
+
     for requirement_id, catalog in sorted(catalogs.items()):
         if catalog.source != "recipe":
             continue
@@ -3846,7 +3941,7 @@ def derive_architecture(
                 ),
                 requirement_id=requirement_id,
                 sheet=requirements[requirement_id].sheet,
-                evidence=[f"ports={catalog.choices}"],
+                evidence=[f"ports={catalog.choices}", *pd_binding_notes.get(requirement_id, [])],
             )
 
     if diagnostics:

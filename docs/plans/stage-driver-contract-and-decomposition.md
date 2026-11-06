@@ -280,6 +280,16 @@ Inside `drive_stage()`:
 
 `build_system()` must accept a completed contract and must not call `_response_schema()`. The response-format path must not regenerate the schema.
 
+OpenRouter JSON-schema requests require provider parameter support, while retaining
+the configured provider order, fallback policy, and price ceilings. Direct DeepSeek
+still receives `json_object`; local validation remains mandatory for both routes.
+The streaming guard rejects an entire aborted answer, including a complete JSON
+prefix. Its syntax failures are reported as `invalid_json`, forbidden properties
+and duplicate identities as `invalid_schema`, and actual or historically
+unclassified collection aborts as `collection_limit`. Guard details accompany
+retries and terminal diagnostics; an old abort with no detail does not establish
+which limit or syntax rule was violated.
+
 For wiring patch mode, the explicitly different wiring-patch contract remains local to that mode.
 
 ### 3. Add the behavioral prompt rule
@@ -518,3 +528,22 @@ No live LLM call is required for decomposition verification. For the boundary re
 ## Completion standard
 
 The work is complete only when the precise BOM contract repair is independently verified, the monolith has been decomposed along the stated boundaries, all production/test imports are migrated, the mock pipeline exercises the real stage runtime end to end, and no obsolete implementation remains in `stage_driver.py`.
+
+## Luna optional controls with strict parameter routing
+
+OpenRouter's `provider.require_parameters=true` filters every supplied parameter,
+not only `response_format`. The reviewed `openai/gpt-6-luna` endpoint supports
+schemas and tools but does not advertise `temperature` or `parallel_tool_calls`.
+Sending those optional controls made the route fail with HTTP 404 at
+`Filter by Parameters`, even though the schema-capable endpoint was healthy.
+
+The client's existing request boundary omits those two controls for that exact
+OpenRouter model, including per-call model overrides and all tool/final rounds.
+Other models and the direct DeepSeek backend retain their controls. Schema
+enforcement, provider order, disabled fallbacks, and price/spend ceilings remain
+unchanged; no rejection-triggered schema downgrade or route broadening is used.
+
+Verification: 365 provider/stage regression tests pass. Plain and tool-bearing
+live schema requests both returned `{"ok":true}` from OpenAI. A capped isolated
+Intent replay committed on its first call at $0.001354. Production services were
+not restarted; this is request/stage verification, not full-board verification.

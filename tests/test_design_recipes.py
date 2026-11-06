@@ -1416,14 +1416,13 @@ def test_architecture_discards_unknown_provider_unresolved_ids_before_resolution
 
 
 
-def test_architecture_unsupported_protected_esp32_variant_blocks():
-    with pytest.raises(
-        StageSchemaError,
-        match="unsupported_protected_variant",
-    ):
+def test_architecture_rejects_n8r8_when_n16r8_was_requested():
+    with pytest.raises(StageSchemaError, match="conflicting_exact_variant"):
         _normalize_stage_response(
             "architecture",
-            _add_native_usb(_esp32_architecture_payload()),
+            _typed_esp32_architecture(
+                family="esp32-s3-wroom-1-module", exact_part="ESP32-S3-WROOM-1-N8R8"
+            ),
             {"intent": {"named_parts": ["ESP32-S3-WROOM-1-N16R8"]}},
         )
 
@@ -3088,6 +3087,7 @@ def test_explicit_gpio_and_adc_on_same_net_cannot_move_to_a_capable_neighbor():
     "recipe",
     [
         "esp32-s3-wroom-1-minimal@1",
+        "esp32-s3-wroom-1-n16r8-minimal@1",
         "esp32-wroom-32e-minimal@1",
         "esp32-c3-mini-1-minimal@2",
         "stm32f103c8t6-minimal@1",
@@ -3100,7 +3100,10 @@ def test_explicit_gpio_and_adc_on_same_net_cannot_move_to_a_capable_neighbor():
     ],
 )
 def test_wave_a_mcu_recipes_expand_with_complete_ownership(recipe):
-    native_usb_recipes = {"esp32-s3-wroom-1-minimal@1", "esp32-c3-mini-1-minimal@2"}
+    native_usb_recipes = {
+        "esp32-s3-wroom-1-minimal@1", "esp32-s3-wroom-1-n16r8-minimal@1",
+        "esp32-c3-mini-1-minimal@2",
+    }
     definition = get_recipe(recipe)
     bindings = {"vdd": "+3V3", "gnd": "GND"}
     if recipe in native_usb_recipes:
@@ -3148,6 +3151,27 @@ def test_wave_a_mcu_recipes_expand_with_complete_ownership(recipe):
             sorted(expected - actual),
             sorted(actual - expected),
         )
+
+
+def test_n16r8_expansion_preserves_exact_assets_and_psram_reservations():
+    definition = get_recipe("esp32-s3-wroom-1-n16r8-minimal@1")
+    expansion = expand_recipe(RecipeSelection(
+        recipe=definition.recipe, instance="main", sheets={"mcu": "MCU"},
+        port_bindings={"vdd": "+3V3", "gnd": "GND", "usb_dm": "DM", "usb_dp": "DP"},
+    ))
+    module = next(part for part in expansion.parts if part.mpn == definition.exact_part)
+    assert module.value == module.mpn == "ESP32-S3-WROOM-1-N16R8"
+    assert module.symbol == "esp32-s3-wroom-1-n16r8:ESP32-S3-WROOM-1"
+    assert module.footprint == "esp32-s3-wroom-1-n16r8:WIRELM-SMD_ESP32-S3-WROOM-1"
+    assert not {35, 36, 37} & {pin.gpio for pin in definition.allocatable_pins}
+    ownership = {pin.pin: pin.net for pin in expansion.ownership.pins if pin.ref == module.ref}
+    assert all(ownership[pin] is None for pin in ("28", "29", "30"))
+    for pin, role, external in (("13", "usb_dm_series", "DM"), ("14", "usb_dp_series", "DP")):
+        resistor = next(part for part in expansion.parts if part.recipe_role == role)
+        nets = {p.net for p in expansion.ownership.pins if p.ref == resistor.ref}
+        assert nets == {ownership[pin], external}
+    assert any(rule.kind == "antenna_keepout" for rule in definition.placement_constraints)
+
 
 def test_ch32_wch_link_recipe_requires_complete_physical_wiring():
     expansion = expand_recipe(
@@ -4897,22 +4921,24 @@ def test_real_pin_header_is_not_consumed_by_matching_recipe_edges():
 # ---------------------------------------------------------------------------
 
 
-def test_registered_family_rejects_an_unregistered_protected_identity():
-    """A reviewed family cannot silently replace a named ordering code with a sibling."""
+def test_n16r8_exact_recipe_selection_and_conflicting_sibling_rejection():
     from kicraft.design.recipes.resolver import resolve_architecture_recipes
 
+    intent = {"named_parts": ["ESP32-S3-WROOM-1-N16R8"]}
     payload = _typed_esp32_architecture(
         family="esp32-s3-wroom-1-module", exact_part="ESP32-S3-WROOM-1-N16R8"
     )
-    result = resolve_architecture_recipes(payload, {"named_parts": ["ESP32-S3-WROOM-1-N16R8"]})
+    result = resolve_architecture_recipes(payload, intent)
+    assert not result.blocking
+    assert result.exact_parts["mcu_core"] == "ESP32-S3-WROOM-1-N16R8"
+    assert any(row.recipe == "esp32-s3-wroom-1-n16r8-minimal@1" for row in result.selections)
 
-    diagnostic = next(
-        row
-        for row in result.blocking
-        if row.code == "unsupported_protected_variant" and row.requirement_id == "mcu_core"
+    sibling = _typed_esp32_architecture(
+        family="esp32-s3-wroom-1-module", exact_part="ESP32-S3-WROOM-1-N8R8"
     )
-    assert "ESP32-S3-WROOM-1-N16R8" in diagnostic.evidence
-    assert not any(row.requirement_ids == ["mcu_core"] for row in result.selections)
+    rejected = resolve_architecture_recipes(sibling, intent)
+    assert any(row.code == "conflicting_exact_variant" for row in rejected.blocking)
+    assert not any(row.requirement_ids == ["mcu_core"] for row in rejected.selections)
 
 
 
@@ -4948,20 +4974,24 @@ def test_unreviewed_protected_variant_still_blocks_and_names_the_choice():
     assert not any(row.requirement_ids == ["mcu_core"] for row in result.selections)
 
 
-def test_named_order_code_offers_its_registered_family_to_the_stage():
-    """The architecture stage offers only the MCU recipes that can serve a named
-    design. A variant order code must offer its own family, or the stage is asked
-    to bind a circuit it was never shown."""
+def test_named_order_code_prefers_exact_recipe_per_named_mcu():
+    """Exact identities take precedence without dropping other named MCUs."""
     from kicraft.server.stage_runtime import _architecture_recipe_summaries
 
     def mcus(named):
         rows = _architecture_recipe_summaries({"named_parts": [named]})
         return {row["recipe"] for row in rows if "mcu" in row["required_sheet_roles"]}
 
-    assert mcus("ESP32-S3-WROOM-1-N16R8") == {"esp32-s3-wroom-1-minimal@1"}
+    assert mcus("ESP32-S3-WROOM-1-N16R8") == {"esp32-s3-wroom-1-n16r8-minimal@1"}
     assert mcus("ESP32-S3-MINI-1-N8") == {"esp32-s3-mini-1-minimal@1"}
     # An unrecognised MCU name must not starve the stage of every alternative.
     assert len(mcus("ACME-WIDGET-9000")) > 1
+    rows = _architecture_recipe_summaries({
+        "named_parts": ["ESP32-S3-WROOM-1-N16R8", "CH32V003J4M6"],
+    })
+    assert {row["recipe"] for row in rows if "mcu" in row["required_sheet_roles"]} == {
+        "esp32-s3-wroom-1-n16r8-minimal@1", "ch32v003j4m6-minimal@1",
+    }
 
 
 def test_ads1115_address_strap_is_selectable_per_instance():

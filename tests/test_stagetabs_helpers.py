@@ -757,3 +757,46 @@ def test_build_lines_for_splits_a_real_stream():
     assert _build_lines_for("synthesize", lines) == lines[:2]
     assert _build_lines_for("place_route", lines) == lines[2:6]
     assert _build_lines_for("fab", lines) == lines[6:]
+
+
+def test_retry_detail_prefers_structured_causes_and_honest_legacy_summary():
+    from kicraft.server import activity
+    from kicraft.server.stagetabs import _error_items
+
+    event = {"stage": "architecture", "failure_kind": "contract_rejected",
+             "diagnostic": {"findings": [
+                 {"code": "port", "message": "CC1 missing"},
+                 {"code": "port", "message": "CC2 missing"}]},
+             "errors": ["schema-valid wrapper"], "commit_gate_codes": ["9.1"]}
+    assert _error_items(event) == ["CC1 missing", "CC2 missing", "commit gate codes: 9.1"]
+    assert "CC1 missing" in activity.retry_summary(event)
+    legacy = activity.retry_summary({"stage": "intent", "failure_kind": "collection_limit"})
+    assert "original reason was not recorded" in legacy
+    overflow = activity.retry_summary({"stage": "intent", "failure_kind": "collection_limit",
+                                       "collection_limit": {"field": "constraints",
+                                                            "observed_count": 65,
+                                                            "configured_total": 64}})
+    assert "constraints" in overflow and "65" in overflow and "64" in overflow
+
+
+@pytest.mark.anyio
+async def test_stage_owned_issue_details_and_navigation():
+    holder = {}
+    def root():
+        holder["tabs"] = StageTabs()
+    async with user_simulation(root=root) as u:
+        await u.open("/")
+        tabs = holder["tabs"]
+        with u:
+            tabs.set_issues("architecture", [
+                {"severity": "error", "stage": "architecture", "code": "port",
+                 "message": "CC1 <missing>", "evidence": ["controller contact 7"]},
+                {"severity": "error", "stage": "architecture", "code": "port",
+                 "message": "CC2 missing", "evidence": ["controller contact 6"]},
+            ])
+            tabs.select("architecture")
+        assert tabs.active() == "architecture"
+        await u.should_see("Needs attention")
+        await u.should_see("CC1 <missing>")
+        await u.should_see("CC2 missing")
+        await u.should_see("controller contact 7")

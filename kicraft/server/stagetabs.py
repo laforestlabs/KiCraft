@@ -127,13 +127,18 @@ def _error_text(entry) -> str:
 
 def _error_items(event: dict) -> list[str]:
     """Every readable error item on a retry event, in a stable order."""
-    items: list[str] = []
-    for key in ("errors", "offenders"):
-        value = event.get(key)
-        if isinstance(value, (list, tuple)):
-            items.extend(_error_text(entry) for entry in value if entry is not None)
-        elif value:
-            items.append(_error_text(value))
+    findings = _activity.diagnostic_issues(event.get("stage"), event.get("diagnostic"),
+                                          severity="error")
+    items = [_error_text(item["message"]) for item in findings]
+    if not items and event.get("schema_error"):
+        items.append(_error_text(event["schema_error"]))
+    if not items:
+        for key in ("errors", "offenders"):
+            value = event.get(key)
+            if isinstance(value, (list, tuple)):
+                items.extend(_error_text(entry) for entry in value if entry is not None)
+            elif value:
+                items.append(_error_text(value))
     for key in ("commit_gate_codes", "work_unit_ids", "declared_identities"):
         value = event.get(key)
         if isinstance(value, (list, tuple)) and value:
@@ -785,10 +790,8 @@ class StagePanel:
         error items -- never a clipped JSON blob."""
         self._active_run = None
         self._act_ready()
-        stage = _activity.stage_label(event.get("stage")) or self.label
-        kind = str(event.get("failure_kind") or "")
-        summary = f"Retrying {stage}" + (f" after {kind.replace('_', ' ')}" if kind else "")
-        items = _error_items(event)
+        summary = _activity.retry_summary({**event, "stage": event.get("stage") or self.key})
+        items = [item for item in _error_items(event) if item not in summary]
         with self._act:
             with (
                 ui.column()
@@ -1026,8 +1029,8 @@ class StagePanel:
         self.issues_slot.set_visibility(bool(items))
         if items:
             with self.issues_slot:
-                _render_issues(issues_section(items, title="Needs attention",
-                                              on_view=on_view))
+                ui.label("Needs attention").classes("text-xs font-bold")
+                _render_issues(issues_section(items))
 
     # ---- inspector (structured project-state) -------------------------------
     def set_inspector(self, sections: list[dict]) -> None:
