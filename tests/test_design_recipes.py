@@ -1380,6 +1380,209 @@ def test_an_authored_orphan_signal_is_still_refused():
     assert not {"usb_dm", "usb_dp"} & {c.net_name for c in bom.connections}
 
 
+@pytest.mark.parametrize("bounds", [
+    (5.25, 4.75), (float("nan"), 5.0), (0.0, float("nan")),
+    (float("-inf"), 5.0), (0.0, float("inf")), (5.0,), (1.0, 2.0, 3.0),
+])
+def test_supply_voltage_range_rejects_invalid_bounds(bounds):
+    from kicraft.design.recipes.models import RecipePort
+
+    with pytest.raises(ValueError):
+        RecipePort(name="input", direction="power", supply_voltage_range_v=bounds)
+
+
+
+
+@pytest.mark.parametrize("direction", ["input", "output", "bidirectional", "passive"])
+def test_supply_voltage_range_requires_power_port(direction):
+    from kicraft.design.recipes.models import RecipePort
+
+    with pytest.raises(ValueError, match="only valid on power ports"):
+        RecipePort(name="input", direction=direction, supply_voltage_range_v=(4.75, 5.25))
+
+
+
+
+def test_equal_input_tps_envelope_is_inclusive_and_not_silicon_vin_rating():
+    definition = get_recipe("tps552892-5v-2a@1")
+    assert definition.exact_part is None
+    low, high = next(p for p in definition.ports if p.name == "input").supply_voltage_range_v
+    assert all(low <= voltage <= high for voltage in (4.75, 5.0, 5.25))
+    assert all(not low <= voltage <= high for voltage in (4.74, 5.26, 9.0))
+    assert any(p.role == "converter" and p.pin == "18" and p.net == "input"
+               for p in definition.pins)
+    other = get_recipe("tps552892-12v-2a@1")
+    assert any(p.role == "converter" and p.pin == "18" and p.net == "vcc"
+               for p in other.pins)
+    assert any(p.role == "converter" and p.pin == "21" for p in other.no_connects)
+
+
+def test_ap63205_reviewed_input_bank_and_legacy_selection():
+    from kicraft.design.recipe_versions import legacy_recipe_replacement
+
+    definition = get_recipe("ap63205-5v@2")
+    parts = {part.role: part for part in definition.parts}
+    assert definition.exact_part == "AP63205WU-7"
+    assert (parts["input_cap"].mpn, parts["input_cap"].quantity) == ("GRM31CR71H475KA12L", 8)
+    assert (parts["output_cap"].mpn, parts["output_cap"].quantity) == ("GRM31CR71E106KA12L", 7)
+    assert parts["inductor"].mpn == "FXL0630-4R7-M"
+    assert {(p.pin, p.net) for p in definition.pins if p.role == "converter"} >= {
+        ("1", "output"), ("2", "enable"), ("3", "input"), ("4", "gnd"),
+        ("5", "switch"), ("6", "bootstrap"),
+    }
+    assert {(p.pin, p.net) for p in definition.pins if p.role == "bootstrap_cap"} == {
+        ("1", "bootstrap"), ("2", "switch"),
+    }
+    assert legacy_recipe_replacement("ap63205-5v@1") == "ap63205-5v@2"
+    selection = RecipeSelection(
+        recipe="ap63205-5v@1", instance="reg", sheets={"power": "POWER"},
+        port_bindings={"input": "VIN", "output": "V5", "gnd": "GND"},
+        parameters={"output_voltage": 5.0},
+    )
+    assert migrate_recipe_selection(selection).recipe == "ap63205-5v@2"
+
+
+@pytest.mark.parametrize(("recipe", "voltage", "count"), [
+    ("ap63203-3v3@1", 3.3, 4),
+    ("ap63205-5v@2", 5.0, 7),
+])
+def test_ap_output_bank_uses_inductor_and_proven_converter_ground(recipe, voltage, count, monkeypatch):
+    from kicraft.design.recipes import registry
+    from kicraft.design.synthesis.autoplacer import _recipe_local_bypasses
+
+    selection = RecipeSelection(
+        recipe=recipe, instance="buck", sheets={"power": "POWER"},
+        port_bindings={"input": "VIN", "output": "VOUT", "gnd": "GND"},
+        parameters={"output_voltage": voltage},
+    )
+    expansion = expand_recipe(selection)
+    bom = BOM(parts=expansion.parts, connections=expansion.connections,
+              recipe_ownership=[expansion.ownership])
+    arch = SimpleNamespace(recipe_selections=[selection])
+    converter = next(p for p in expansion.parts if p.recipe_role == "converter")
+    inductor = next(p for p in expansion.parts if p.recipe_role == "inductor")
+    caps = sorted((p for p in expansion.parts if p.recipe_role == "output_cap"),
+                  key=lambda p: int(p.ref[1:]))
+    assert len(caps) == count
+    rules = _recipe_local_bypasses(arch, bom)
+    by_ref = {rule["bypass_ref"]: rule for rule in rules}
+    for index, cap in enumerate(caps):
+        spec = by_ref[cap.ref]
+        assert spec["owner_ref"] == inductor.ref
+        assert spec["pin_pairs"] == [["2", "1"]]
+        assert spec["ground_return"] == {
+            "owner_ref": converter.ref, "owner_pin": "4", "member_pin": "2",
+            "net": "GND", "max_via_distance_mm": 3.0,
+        }
+        assert (spec["max_distance_mm"], spec["max_route_length_mm"],
+                spec["min_route_width_mm"]) == (
+                    5.0 if index == 0 else 10.0, 15.0 if index == 0 else 25.0, 0.5)
+
+    # A saved claim cannot substitute for either the actual owner wiring or
+    # the canonical manifest's converter ground pin.
+    definition = get_recipe(recipe)
+    output_only = definition.model_copy(update={
+        "placement_constraints": tuple(rule for rule in definition.placement_constraints
+                                       if rule.role == "output_cap"),
+    })
+    original_get_recipe = registry.get_recipe
+    monkeypatch.setattr(registry, "get_recipe",
+                        lambda name: output_only if name == recipe else original_get_recipe(name))
+    bad_connections = [
+        connection.model_copy(update={"endpoints": [
+            endpoint for endpoint in connection.endpoints
+            if (endpoint.ref, endpoint.pin) != (converter.ref, "4")
+        ]}) for connection in bom.connections
+    ]
+    with pytest.raises(ValueError, match="unproven local pin"):
+        _recipe_local_bypasses(arch, bom.model_copy(update={"connections": bad_connections}))
+    pins = [pin.model_copy(update={"net": "OTHER"})
+            if (pin.ref, pin.pin) == (converter.ref, "4") else pin
+            for pin in expansion.ownership.pins]
+    bad_manifest = expansion.ownership.model_copy(update={"pins": pins})
+    with pytest.raises(ValueError, match="unproven local pin"):
+        _recipe_local_bypasses(arch, bom.model_copy(update={"recipe_ownership": [bad_manifest]}))
+
+
+def test_canonical_ground_owner_index_is_resolved_and_proven(monkeypatch):
+    from kicraft.design.recipes import registry
+    from kicraft.design.synthesis.autoplacer import _recipe_local_bypasses
+
+    recipe = "hub75-sn74hct245-interface@2"
+    definition = get_recipe(recipe)
+    selection = RecipeSelection(
+        recipe=recipe, instance="interface", sheets={"interface": "INTERFACE"},
+        port_bindings={port.name: ("GND" if port.name == "gnd" else port.name.upper())
+                       for port in definition.ports},
+    )
+    expansion = expand_recipe(selection)
+    bom = BOM(parts=expansion.parts, connections=expansion.connections,
+              recipe_ownership=[expansion.ownership])
+    original_rule = definition.placement_constraints[0]
+    rule = original_rule.model_copy(update={"parameters": {
+        **original_rule.parameters, "plane_owner_role": "level_shifter", "plane_owner_index": 1,
+    }})
+    modified = definition.model_copy(update={"placement_constraints": (rule,)})
+    original_get_recipe = registry.get_recipe
+    monkeypatch.setattr(registry, "get_recipe",
+                        lambda name: modified if name == recipe else original_get_recipe(name))
+    arch = SimpleNamespace(recipe_selections=[selection])
+    owners = sorted((p.ref for p in expansion.parts if p.recipe_role == "level_shifter"),
+                    key=lambda ref: int(ref[1:]))
+    spec, = _recipe_local_bypasses(arch, bom)
+    assert spec["owner_ref"] == owners[0]
+    assert spec["ground_return"]["owner_ref"] == owners[1]
+    assert spec["ground_return"]["owner_pin"] == "10"
+    pins = [pin.model_copy(update={"net": "OTHER"})
+            if (pin.ref, pin.pin) == (owners[1], "10") else pin
+            for pin in expansion.ownership.pins]
+    bad = bom.model_copy(update={"recipe_ownership": [
+        expansion.ownership.model_copy(update={"pins": pins})]})
+    with pytest.raises(ValueError, match="unproven local pin"):
+        _recipe_local_bypasses(arch, bad)
+
+
+def test_pd_receptacle_qualified_physical_expansion_and_legacy_regeneration():
+    from kicraft.design.part_identity import reviewed_part
+    from kicraft.design.recipe_versions import legacy_recipe_replacement
+    from kicraft.design.recipes.registry import registered_recipes
+    from kicraft.design.stage_state import legacy_recipe_resume_stage
+
+    definition = get_recipe("usb-c-pd-receptacle@2")
+    family = [r.definition for r in registered_recipes()
+              if r.definition.family == "usb-c-pd-receptacle"]
+    assert [r.recipe for r in family] == [definition.recipe]
+    assert next(p for p in definition.ports if p.name == "vbus").supply_voltage_range_v == (0.0, 48.0)
+    part = reviewed_part("USB4085-GF-A")
+    assert part.operating_limits["voltage_v"] == 48
+    assert part.operating_limits["current_a"] == 5
+    selection = RecipeSelection(
+        recipe="usb-c-pd-receptacle@1", instance="socket", sheets={"power": "POWER"},
+        port_bindings={"cc1": "CC1", "cc2": "CC2", "vbus": "VBUS",
+                       "gnd": "GND", "shield": "GND"},
+    )
+    assert legacy_recipe_replacement(selection.recipe) == definition.recipe
+    migrated = migrate_recipe_selection(selection)
+    assert migrated.recipe == definition.recipe
+    assert legacy_recipe_resume_stage({
+        "architecture": {"recipe_selections": [selection.model_dump()]},
+        "bom": {"parts": []},
+    }) == "bom"
+    expansion = expand_recipe(migrated)
+    connector = next(p for p in expansion.parts if p.recipe_role == "connector")
+    assert connector.mpn == "USB4085-GF-A"
+    assert connector.symbol == part.symbol and connector.footprint == part.footprint
+    assert _shared_net(expansion, connector.ref, "A4", "A9", "B4", "B9") == ["VBUS"]
+    assert _shared_net(expansion, connector.ref, "A1", "A12", "B1", "B12", "S1") == ["GND"]
+    assert _shared_net(expansion, connector.ref, "A5") == ["CC1"]
+    assert _shared_net(expansion, connector.ref, "B5") == ["CC2"]
+    assert {p.pin for p in expansion.no_connect_pins if p.ref == connector.ref} == {
+        "A6", "A7", "A8", "B6", "B7", "B8",
+    }
+
+
+
+
 def test_a_default_tie_must_name_another_port_of_its_recipe():
     """A typo'd or self-referential tie is refused at definition time, never a dangling net."""
     from kicraft.design.recipes.models import RecipeDefinition, RecipePort
@@ -5056,11 +5259,13 @@ def test_hub75_recipe_exposes_named_channels_including_oe_and_d():
     Opaque `input0..input11` ports made the interface unbindable by name, and pin
     12 (the D address line) was grounded while OE had no port of its own.
     """
-    definition = get_recipe("hub75-sn74hct245-interface@1")
+    definition = get_recipe("hub75-sn74hct245-interface@2")
     names = [port.name for port in definition.ports]
 
+    assert next(port for port in definition.ports if port.name == "enable").reset_control == "external_low"
     assert names[:2] == ["vdd_5v", "gnd"]
     assert names[2:] == [
+        "enable",
         "r0",
         "g0",
         "b0",
@@ -5099,7 +5304,7 @@ def test_hub75_recipe_exposes_named_channels_including_oe_and_d():
         ("ws2812-external-strip-interface@1", 0, ("3", "4", "5", "6", "7", "8", "9"), ("11", "12", "13", "14", "15", "16", "17")),
         ("max7219-four-digit-seven-segment@1", 0, ("5", "6", "7", "8", "9"), ("11", "12", "13", "14", "15")),
         ("led-matrix-hub75-interface@1", 1, ("7", "8", "9"), ("11", "12", "13")),
-        ("hub75-sn74hct245-interface@1", 1, ("7", "8", "9"), ("11", "12", "13")),
+        ("hub75-sn74hct245-interface@2", 1, ("7", "8", "9"), ("11", "12", "13")),
     ),
 )
 def test_hct245_recipes_ground_unused_a_inputs_and_no_connect_b_outputs(
@@ -5155,11 +5360,19 @@ def test_hub75_channels_bind_by_signal_name():
                 "role": "connector",
                 "family": "hub75-level-shift-interface",
                 "exact_part": "HUB75-SN74HCT245",
-                "ports": {"gnd": "GND", "vdd_5v": "+5V"},
+                "ports": {"gnd": "GND", "vdd_5v": "+5V", "enable": "HUB75_ENABLE"},
             },
         ],
         "power_nets": ["GND", "+5V"],
         "inter_sheet_nets": [
+            {
+                "name": "HUB75_ENABLE",
+                "endpoints": [
+                    {"sheet": "HUB75", "direction": "input"},
+                    {"sheet": "MCU", "direction": "output"},
+                ],
+            },
+        ] + [
             {
                 "name": f"HUB75_{signal}",
                 "endpoints": [
@@ -5176,7 +5389,7 @@ def test_hub75_channels_bind_by_signal_name():
 
     assert not any(row.code == "unsupported_recipe_endpoint" for row in result.blocking)
     display = next(row for row in result.selections if row.requirement_ids == ["display"])
-    assert display.recipe == "hub75-sn74hct245-interface@1"
+    assert display.recipe == "hub75-sn74hct245-interface@2"
     assert {port: display.port_bindings[port] for port in signals.values()} == {
         port: f"HUB75_{signal}" for signal, port in signals.items()
     }
@@ -5223,8 +5436,8 @@ def test_unused_groundable_hub75_addr_d_is_tied_low_not_demanded():
                     "id": "mcu_core",
                     "sheet": "MCU",
                     "role": "mcu_core",
-                    "family": "stm32f103c8",
-                    "exact_part": "STM32F103C8T6",
+                    "family": "esp32-s3-wroom-1-module",
+                    "exact_part": "ESP32-S3-WROOM-1-N16R8",
                     "supply": "+3V3",
                 },
                 {
@@ -5417,13 +5630,15 @@ def test_native_usb_mcu_gains_exactly_one_derived_data_connector():
     assert len(connectors) == 1
     assert connectors[0].ports["usb_dm"] == "USB_DM"
     assert connectors[0].ports["usb_dp"] == "USB_DP"
-    assert connectors[0].ports["vbus"] == "VBUS"
+    host_rail = connectors[0].ports["vbus"]
+    assert host_rail != "VBUS"
+    assert architecture.rail_voltages[host_rail] == 5.0
+    assert next(row for row in architecture.requirements if row.id == "buck").ports["input"] == "VBUS"
+    assert all(host_rail not in row.ports.values()
+               for row in architecture.requirements if row.id != connectors[0].id)
     assert connectors[0].exact_part == "USB-C-USB2-DEVICE"
     mcu = next(row for row in architecture.requirements if row.id == "rp2040")
     assert (mcu.ports["usb_dm"], mcu.ports["usb_dp"]) == ("USB_DM", "USB_DP")
-    assert any(
-        "native-USB MCU needs a data connector" in note for note in architecture.assumptions
-    )
 
 
 def test_native_usb_mcu_that_wires_its_own_connector_is_left_alone():
@@ -5435,25 +5650,21 @@ def test_native_usb_mcu_that_wires_its_own_connector_is_left_alone():
     connectors = [row for row in architecture.requirements if row.family == "usb-c-usb2-device"]
     assert [row.id for row in connectors] == ["usb_dev"]
     assert connectors[0].ports["usb_dm"] == "USB_DM"
-    assert not any(
-        "native-USB MCU needs a data connector" in note for note in architecture.assumptions
+
+
+def test_native_usb_completion_keeps_non_usb_input_off_socket_vbus():
+    """A separately powered board gains host-only VBUS, never a jack-to-host tie."""
+    from kicraft.design.architecture_intent import derive_architecture
+
+    architecture = derive_architecture(
+        _native_usb_board(usb_connector=False, bind_usb=False, five_volt_rail=False)
     )
-
-
-def test_native_usb_completion_refuses_a_rail_that_is_not_a_usb_supply():
-    """The completion never puts a barrel jack's rail on a USB socket's VBUS.
-
-    A 12 V-powered RP2040 board (run 904's brief) must state the rail the socket exposes;
-    silently binding VBUS to `+12V` would ship a socket that cannot be plugged into. The
-    refusal names the rails the design did declare, so the next draft can add the 5 V rail.
-    """
-    from kicraft.design.architecture_intent import ArchitectureIntentError, derive_architecture
-
-    with pytest.raises(ArchitectureIntentError) as rejected:
-        derive_architecture(_native_usb_board(usb_connector=False, bind_usb=False, five_volt_rail=False))
-
-    codes = {row.code for row in rejected.value.diagnostics}
-    assert "usb_connector_supply_unknown" in codes
+    socket = next(row for row in architecture.requirements
+                  if row.family == "usb-c-usb2-device")
+    host_rail = socket.ports["vbus"]
+    assert architecture.rail_voltages[host_rail] == 5.0
+    assert all(host_rail not in row.ports.values()
+               for row in architecture.requirements if row.id != socket.id)
 
 
 @pytest.mark.parametrize("quantity", [1, 3])
@@ -6629,3 +6840,126 @@ def test_declared_buffer_input_does_not_drive_its_external_source_net():
     _external_adc_contracts(conflict, definitions)
     assert any(row.code == "external_adc_driver_ownership_conflict"
                and "requirement buffer.output" in row.evidence for row in conflict.blocking)
+
+
+def test_pwm_speaker_expansion_contains_btl_amplifier_and_filtered_input():
+    expanded = expand_recipe(RecipeSelection(
+        recipe="pam8302a-pwm-speaker@1", instance="audio",
+        sheets={"interface": "AUDIO"},
+        port_bindings={"vdd": "+5V", "gnd": "GND", "pwm": "SPEAKER_PWM"},
+    ))
+    refs = {p.recipe_role: p.ref for p in expanded.parts}
+    assert next(p.mpn for p in expanded.parts if p.recipe_role == "amplifier") == "PAM8302AADCR"
+    nets = {(ep.ref, ep.pin): c.net_name for c in expanded.connections for ep in c.endpoints}
+    def net(role, pin):
+        return nets[refs[role], pin]
+    assert net("amplifier", "6") == "+5V"
+    assert net("amplifier", "7") == "GND"
+    assert net("pwm_series", "1") == "SPEAKER_PWM"
+    assert net("pwm_series", "2") == net("pwm_filter", "1") == net("input_coupling", "1")
+    assert net("input_coupling", "2") == net("amplifier", "3")
+    assert net("reference_coupling", "1") == net("amplifier", "4")
+    assert net("reference_coupling", "2") == "GND"
+    assert net("amplifier", "5") == net("bead_positive", "1")
+    assert net("amplifier", "8") == net("bead_negative", "1")
+    assert net("bead_positive", "2") == net("speaker_header", "1")
+    assert net("bead_negative", "2") == net("speaker_header", "2")
+    assert len({net("speaker_header", "1"), net("speaker_header", "2"), "GND"}) == 3
+    assert net("shutdown_pullup", "1") == "+5V"
+    assert net("shutdown_pullup", "2") == net("shutdown_delay", "1") == net("amplifier", "1")
+    assert net("shutdown_delay", "2") == "GND"
+    assert (refs["amplifier"], "2") in {(p.ref, p.pin) for p in expanded.no_connect_pins}
+
+
+def test_hub75_physical_obligation_requires_the_real_sixteen_contact_carrier():
+    from types import SimpleNamespace
+    from kicraft.design.models import CircuitRequirement
+    from kicraft.design.synthesis.validation import check_requirement_physical_realization
+
+    definition = get_recipe("hub75-sn74hct245-interface@2")
+    bindings = {port.name: port.name.upper() for port in definition.ports}
+    expanded = expand_recipe(RecipeSelection(
+        recipe=definition.recipe, instance="hub75",
+        sheets={"interface": "DISPLAY"}, port_bindings=bindings,
+        requirement_ids=["hub75"],
+    ))
+    requirement = CircuitRequirement(
+        id="hub75", sheet="DISPLAY", role="bus_interface",
+        family=definition.family, exact_part=definition.exact_part,
+        ports=bindings, obligations=[{
+            "kind": "physical", "original_obligation_id": "display_header",
+            "component_class": "hub75-connector",
+        }],
+    )
+    architecture = SimpleNamespace(requirements=[requirement])
+    bom = SimpleNamespace(
+        parts=expanded.parts, connections=expanded.connections,
+        no_connect_pins=expanded.no_connect_pins,
+        recipe_ownership=[expanded.ownership],
+    )
+    assert check_requirement_physical_realization(architecture, bom).ok
+    connector = next(part for part in bom.parts if part.recipe_role == "connector")
+    bom.parts = [part for part in bom.parts if part.ref != connector.ref]
+    rejected = check_requirement_physical_realization(architecture, bom)
+    assert not rejected.ok
+    assert any("hub75-connector" in offender for offender in rejected.offenders)
+
+
+def test_hub75_reset_safe_circuit_expands_to_real_connected_parts():
+    definition = get_recipe("hub75-sn74hct245-interface@2")
+    bindings = {p.name: p.name.upper() for p in definition.ports}
+    bindings.update(vdd_5v="+5V", gnd="GND")
+    expanded = expand_recipe(RecipeSelection(
+        recipe=definition.recipe, instance="hub", sheets={"interface": "HUB75"},
+        port_bindings=bindings,
+    ))
+    by_role = {}
+    for part in expanded.parts:
+        by_role.setdefault(part.recipe_role, []).append(part)
+    nets = {(ep.ref, ep.pin): row.net_name
+            for row in expanded.connections for ep in row.endpoints}
+    def net(part, pin):
+        return nets[part.ref, pin]
+    q = by_role["enable_transistor"][0]
+    assert (q.mpn, q.symbol, q.footprint) == (
+        "MMBT3904LT1G", "Transistor_BJT:MMBT3904", "Package_TO_SOT_SMD:SOT-23")
+    base_resistor = by_role["enable_base_resistor"][0]
+    base_pulldown = by_role["enable_base_pulldown"][0]
+    pullup = by_role["buffer_oe_pullup"][0]
+    panel_pullup = by_role["panel_oe_pullup"][0]
+    assert (base_resistor.value, base_pulldown.value, pullup.value, panel_pullup.value) == (
+        "4.7k", "100k", "10k", "10k")
+    assert net(base_resistor, "1") == "ENABLE"
+    assert net(base_resistor, "2") == net(q, "1") == net(base_pulldown, "1")
+    assert net(base_pulldown, "2") == net(q, "2") == "GND"
+    assert net(pullup, "1") == net(panel_pullup, "1") == "+5V"
+    assert all(net(part, "19") == net(q, "3") == net(pullup, "2")
+               and net(part, "1") == "+5V" for part in by_role["level_shifter"])
+    connector = by_role["connector"][0]
+    assert net(panel_pullup, "2") == net(connector, "15")
+    assert {pin for (ref, pin) in nets if ref == connector.ref} == {
+        str(i) for i in range(1, 17)}
+    resistors = by_role["input_pulldown"]
+    assert len(resistors) == 13 and all(part.value == "100k" for part in resistors)
+    assert {net(part, "1") for part in resistors} == {
+        bindings[p.name] for p in definition.ports if p.name not in {"vdd_5v", "gnd", "enable"}}
+    assert all(net(part, "2") == "GND" for part in resistors)
+
+
+def test_hub75_legacy_ownership_requires_upstream_regeneration():
+    from kicraft.design.recipe_versions import legacy_recipe_replacement
+    from kicraft.design.stage_state import legacy_recipe_resume_stage
+
+    old = RecipeSelection(recipe="hub75-sn74hct245-interface@1", instance="hub",
+                          sheets={"interface": "HUB75"}, port_bindings={})
+    assert legacy_recipe_replacement(old.recipe) == "hub75-sn74hct245-interface@2"
+    with pytest.raises(ValueError, match="architecture regeneration"):
+        migrate_recipe_selection(old)
+    with pytest.raises(ValueError, match="architecture regeneration"):
+        expand_recipe(old)
+    assert legacy_recipe_resume_stage({
+        "architecture": {"recipe_selections": [old.model_dump()]}, "bom": {"parts": []},
+    }) == "architecture"
+    assert legacy_recipe_resume_stage({
+        "bom": {"recipe_ownership": [{"recipe": old.recipe}]},
+    }) == "architecture"

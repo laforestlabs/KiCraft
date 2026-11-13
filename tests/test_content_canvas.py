@@ -310,8 +310,10 @@ def _reduce_edge_fixture(monkeypatch, extraction, interfaces):
 
     def reroute(candidate, components, cfg, **kwargs):
         reroutes.append(candidate.local_state.board_outline)
-        return ({"failed": False, "validation": {"accepted": True},
-                 "_trace_segments": [], "_via_objects": []}, {})
+        return ({"failed": False, "validation": {
+            "accepted": True, "board_exists": True,
+            "drc": {"ran": True, "unconnected": 0},
+        }, "_trace_segments": [], "_via_objects": []}, {})
 
     monkeypatch.setattr(reduction, "route_local_subcircuit", reroute)
     best = SolveRoundResult(
@@ -451,7 +453,10 @@ def _run_ladder(monkeypatch, cfg, accept_plan, rounds=1, route=True):
                 "skipped": True,
                 "reason": "no_internal_nets",
                 "failed": False,
-                "validation": {"accepted": True},
+                "validation": {
+                    "accepted": True, "board_exists": True,
+                    "drc": {"ran": True, "unconnected": 0},
+                },
                 "_trace_segments": [],
                 "_via_objects": [],
             }
@@ -762,18 +767,28 @@ class TestLeafSolveDeadline:
             _run_ladder(monkeypatch, cfg, plan, rounds=5)
 
 
-def test_small_size_reduction_routes_and_validates_candidate(tmp_path, monkeypatch):
+def test_size_reduction_rejects_internal_opens_and_restores_winner(tmp_path, monkeypatch):
     from kicraft.autoplacer.brain import leaf_size_reduction as reduction
 
     leaf, state = _leaf_and_state()
     extraction = extract_leaf_board_state(leaf, state, margin_mm=10.0)
     width, height = extraction.local_state.board_width, extraction.local_state.board_height
-    board = tmp_path / "winner.kicad_pcb"
-    board.write_text(str(width))
+    board = tmp_path / "leaf_routed.kicad_pcb"
+    snapshot = tmp_path / "round_0001_leaf_routed.kicad_pcb"
+    board.write_bytes(b"validated winner")
+    snapshot.write_bytes(b"validated winner snapshot")
     best = SolveRoundResult(
         round_index=1, seed=0, score=1.0, placement=PlacementScore(),
         components=dict(extraction.local_state.components),
-        routing={"failed": False, "validation": {"accepted": True}, "routed_board_path": str(board)},
+        routing={
+            "failed": False,
+            "validation": {
+                "accepted": True, "board_exists": True,
+                "drc": {"ran": True, "unconnected": 0},
+            },
+            "routed_board_path": str(board),
+            "round_board_routed": str(snapshot),
+        },
         routed=True,
     )
     monkeypatch.setattr(reduction, "tight_leaf_geometry_bounds", lambda *a, **k: {
@@ -791,18 +806,104 @@ def test_small_size_reduction_routes_and_validates_candidate(tmp_path, monkeypat
             return {"pad_outside_count": 0, "overlap_count": 0}
 
     monkeypatch.setattr(reduction, "PlacementSolver", LegalSolver)
-    calls = []
 
     def route(candidate, components, cfg, **kwargs):
-        calls.append(candidate.local_state.board_width)
-        board.write_text(str(candidate.local_state.board_width))
-        return {"failed": False, "validation": {"accepted": True}, "routed_board_path": str(board)}, {}
+        board.write_bytes(b"reduced board with internal opens")
+        snapshot.write_bytes(b"reduced snapshot with internal opens")
+        return {
+            "failed": False,
+            "routed_board_path": str(board),
+            "round_board_routed": str(snapshot),
+            "validation": {
+                # Lightweight routing validation defers opens. The strict
+                # leaf gate must still reject internal CFG/VDD disconnections.
+                "accepted": True, "board_exists": True,
+                "interface_port_names": ["USB_CC1"],
+                "drc": {
+                    "ran": True, "unconnected": 2,
+                    "unconnected_nets": ["cfg1", "vdd"],
+                },
+            },
+        }, {}
 
     monkeypatch.setattr(reduction, "route_local_subcircuit", route)
     reduced, winning_round, summary = reduction.attempt_leaf_size_reduction(
-        extraction, best, {"leaf_size_reduction_max_attempts": 1},
+        extraction, best, {
+            "leaf_size_reduction_max_attempts": 1,
+            "leaf_acceptance_max_unconnected": 0,
+        },
     )
-    assert summary["accepted"]
-    assert calls == [width - 0.5]
-    assert float(board.read_text()) == reduced.local_state.board_width
-    assert winning_round.routing["routed_board_path"] == str(board)
+    assert not summary["accepted"]
+    assert "no_unconnected" in summary["attempts"][0]["leaf_acceptance"]["rejection_reasons"]
+    assert winning_round.routing["validation"]["drc"]["unconnected"] == 0
+    assert reduced.local_state.board_width == width
+    assert board.read_bytes() == b"validated winner"
+    assert snapshot.read_bytes() == b"validated winner snapshot"
+
+
+def test_selected_leaf_keeps_native_current_path_after_later_open_round(tmp_path, monkeypatch):
+    import pcbnew
+    from kicraft.cli import solve_subcircuits as ss
+    from kicraft.autoplacer.hardware.local_contract import audit_local_copper
+
+    leaf, state = _leaf_and_state(n_parts=6)
+    canonical = tmp_path / "leaf_routed.kicad_pcb"
+
+    def solve_round(extraction, cfg, seed, round_index, route, **kwargs):
+        board = pcbnew.NewBoard(str(canonical))
+        net = pcbnew.NETINFO_ITEM(board, "selected_signal")
+        board.Add(net)
+        for ref, x in (("U1", 10), ("C1", 12)):
+            fp = pcbnew.FOOTPRINT(board)
+            fp.SetReference(ref)
+            board.Add(fp)
+            pad = pcbnew.PAD(fp)
+            pad.SetNumber("1")
+            pad.SetAttribute(pcbnew.PAD_ATTRIB_SMD)
+            pad.SetLayerSet(pcbnew.PAD.SMDMask())
+            pad.SetShape(pcbnew.PAD_SHAPE_CIRCLE)
+            pad.SetSize(pcbnew.VECTOR2I(pcbnew.FromMM(1), pcbnew.FromMM(1)))
+            pad.SetPosition(pcbnew.VECTOR2I(pcbnew.FromMM(x), pcbnew.FromMM(10)))
+            fp.Add(pad)
+            pad.SetNet(net)
+        if round_index == 0:
+            track = pcbnew.PCB_TRACK(board)
+            track.SetStart(pcbnew.VECTOR2I(pcbnew.FromMM(10), pcbnew.FromMM(10)))
+            track.SetEnd(pcbnew.VECTOR2I(pcbnew.FromMM(12), pcbnew.FromMM(10)))
+            track.SetWidth(pcbnew.FromMM(0.5))
+            track.SetLayer(pcbnew.F_Cu)
+            track.SetNet(net)
+            board.Add(track)
+        snapshot = tmp_path / f"round_{round_index:04d}_leaf_routed.kicad_pcb"
+        pcbnew.SaveBoard(str(canonical), board)
+        pcbnew.SaveBoard(str(snapshot), board)
+        return SolveRoundResult(
+            round_index=round_index, seed=seed, score=100 - round_index,
+            placement=PlacementScore(), components=dict(extraction.local_state.components),
+            routed=True, routing={
+                "enabled": True, "failed": False,
+                "routed_board_path": str(canonical), "round_board_routed": str(snapshot),
+                "validation": {
+                    "accepted": True, "board_exists": True, "board_path": str(canonical),
+                    "track_summary": {"footprints": 2, "traces": int(round_index == 0), "vias": 0},
+                    "drc": {"ran": True, "unconnected": int(round_index != 0),
+                            "unconnected_nets": [] if round_index == 0 else ["selected_signal"]},
+                },
+            },
+        )
+
+    monkeypatch.setattr(ss, "_solve_one_round", solve_round)
+    monkeypatch.setattr(ss, "_attempt_leaf_size_reduction", lambda e, r, c: (e, r, {}))
+    solved = ss._solve_leaf_subcircuit(
+        node=_FakeNode(leaf), full_state=state,
+        cfg={"leaf_acceptance_max_unconnected": 0}, rounds=2,
+        base_seed=7, route=True, experiment_round=1,
+    )
+    assert solved.best_round.round_index == 0
+    assert solved.failure_summary["failed_round_count"] == 1
+    assert solved.failure_summary["accepted_round_count"] == 1
+    assert not audit_local_copper(
+        pcbnew.LoadBoard(solved.best_round.routing["routed_board_path"]),
+        [{"owner_ref": "U1", "bypass_ref": "C1", "power_pins": ["1", "1"],
+          "max_route_length_mm": 6, "min_route_width_mm": 0.5}],
+    )

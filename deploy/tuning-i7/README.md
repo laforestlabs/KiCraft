@@ -8,7 +8,9 @@ after reviewing the result).
 
 The container mirrors production: Ubuntu 24.04, KiCad 9, and KiCad Routing
 Tools source `0.20.2` at commit
-`3ceb773722bea67aa3685e7ee430c0c0d17ef38d` with native router `0.20.1`.
+`8eeee55fd4ba4ed600b11bd8214de9994e8f5396` with native router `0.20.1`.
+The included Git bundle carries KiCraft's multipoint connectivity repair atop
+upstream `3ceb773722bea67aa3685e7ee430c0c0d17ef38d`; the Dockerfile imports it.
 It clones the KiCraft repo and runs `kicraft.tuning.cli run`.
 
 ## Prerequisites (unraid 6.12.6)
@@ -21,7 +23,7 @@ It clones the KiCraft repo and runs `kicraft.tuning.cli run`.
 ## Get the files onto unraid
 Copy this `deploy/tuning-i7/` folder to the box, e.g. to a share or appdata:
 ```sh
-# from a machine that has the repo, or just scp the 4 files:
+# from a machine that has the repo, copy the complete folder (including the Git bundle):
 scp -r deploy/tuning-i7 root@TOWER:/mnt/user/appdata/kicraft-tune-build
 ```
 (or clone the repo on the box and use `KiCraft/deploy/tuning-i7`).
@@ -121,6 +123,6 @@ docker run --rm -v /mnt/user/appdata/kicraft-tune:/data kicraft-tune \
 
 ## Troubleshooting
 - **KRT preflight fails** — rebuild the image; the checkout must remain at
-  `3ceb773722bea67aa3685e7ee430c0c0d17ef38d`, source `0.20.2`, native `0.20.1`.
+  `8eeee55fd4ba4ed600b11bd8214de9994e8f5396`, source `0.20.2`, native `0.20.1`.
 - **`pcbnew` import fails** — verify the KiCad 9 PPA installation in the build log.
 - **Slow / timeouts** — raise `TIMEOUT` or use a smaller corpus.

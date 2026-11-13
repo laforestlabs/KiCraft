@@ -465,6 +465,30 @@ def test_verify_duplicate_geometry_consumed_once_per_child():
     assert result["per_child"]["/b"]["matched_traces"] == 1
 
 
+def test_verify_translation_tie_preserves_rounded_geometry_not_raw_votes():
+    """A less-voted complete copy still wins the coordinate tie-break."""
+    traces = [_trace(10 * i, i, 11 * i + 1, i) for i in range(4)]
+    manifest = build_copper_manifest([
+        MockComposedChild("/c", "CHILD", traces=traces, vias=[])
+    ])
+    post_traces = []
+    for i, trace in enumerate(traces):
+        for dx in (-100 + (i + 1) * 0.000001, 100):
+            post_traces.append(_trace(
+                trace.start.x + dx, trace.start.y + 50,
+                trace.end.x + dx, trace.end.y + 50,
+            ))
+
+    result = verify_copper_preservation(manifest, post_traces, [])
+
+    assert result["status"] == "PASS"
+    assert result["matched_child_traces"] == 4
+    assert result["new_route_traces"] == 4
+    assert result["chosen_translation_mm"] == pytest.approx({
+        "x": -99.999999, "y": 50,
+    })
+
+
 # ---------------------------------------------------------------------------
 # CopperManifest.to_dict() serialization
 # ---------------------------------------------------------------------------

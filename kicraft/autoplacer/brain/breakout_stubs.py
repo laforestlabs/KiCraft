@@ -17,10 +17,11 @@ This is not an escape-planning engine.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Any
 
-from kicraft.autoplacer.fab_profile import fab_floors
+from kicraft.autoplacer.fab_profile import fab_floors, requires_two_ounce
 from kicraft.autoplacer.hardware.keepout_extract import (
     collect_track_via_rule_areas,
     track_intersects_rule_area,
@@ -81,6 +82,8 @@ class BreakoutSpec:
     via_outside_smd_pads:
         Keep the entire tip via clear of all SMD solder lands, including
         same-net lands. Used for ordinary ground-return dogbones.
+    short_fanout_fallback:
+        Search a shorter outward dense-pad dogbone if the planned one is blocked.
     start_xy / net:
         Free-coordinate anchor (C1 v2 track-endpoint anchors): start the tie
         at this board point (mm) on ``net`` instead of at a pad -- the mode
@@ -105,6 +108,7 @@ class BreakoutSpec:
     via_drill_mm: float | None = None
     strict_same_footprint: bool = False
     via_outside_smd_pads: bool = False
+    short_fanout_fallback: bool = False
 
 
 def _find_pad(
@@ -291,7 +295,11 @@ def _foreign_pad_margins(
             if (same_fp and not strict_same_fp)
             else required + half_width_mm
         )
-        path.append((pad, int(pcbnew.FromMM(path_mm))))
+        # A trace cannot touch solder copper on the opposite face. Drilled
+        # pads still obstruct both faces, and a through via must clear every
+        # pad regardless of which face carries its solder land.
+        if pad.IsOnLayer(layer_id) or overhang is not None:
+            path.append((pad, int(pcbnew.FromMM(path_mm))))
         tip.append((pad, int(pcbnew.FromMM(required + half_width_mm))))
     return path, tip
 
@@ -803,9 +811,10 @@ def add_breakout_stubs(
             b_mm = (pcbnew.ToMM(t.GetEnd().x), pcbnew.ToMM(t.GetEnd().y))
             t_layer = t.GetLayer()
         try:
-            t_half_w = pcbnew.ToMM(t.GetWidth()) / 2.0
+            t_width = t.GetWidth(pcbnew.F_Cu) if is_via else t.GetWidth()
         except TypeError:
-            t_half_w = 0.3
+            t_width = t.GetWidth()
+        t_half_w = pcbnew.ToMM(t_width) / 2.0
         stamped.append((t.GetNetCode(), a_mm, b_mm, t_half_w, floor_mm, t_layer))
 
     # Existing drilled holes (vias + PTH pads): a tip via's hole wall must
@@ -864,7 +873,9 @@ def add_breakout_stubs(
         if layer is None:
             summary["skipped"].append(f"{spec.ref}.{spec.pad}:bad_layer:{spec.layer}")
             continue
-        width = pcbnew.FromMM(spec.width_mm if spec.width_mm else default_w)
+        requested_width = spec.width_mm if spec.width_mm else default_w
+        width = pcbnew.FromMM(max(requested_width, default_w)
+                              if requires_two_ounce(cfg) else requested_width)
         half_width_mm = pcbnew.ToMM(width) / 2.0
         src_cl_mm = _own_clearance_mm(pad, layer, floor_mm)
         # A free-coordinate anchor does not start inside the stand-in pad's
@@ -886,6 +897,7 @@ def add_breakout_stubs(
                 track_intersects_rule_area(a, b, half_width_mm, area)
                 for a, b in zip(points, points[1:])
                 for area in rule_areas
+                if area.zone.IsOnLayer(layer)
             )
 
         def _via_hits_keepout(xy: tuple[float, float]) -> bool:
@@ -969,22 +981,45 @@ def add_breakout_stubs(
             # clear of the source footprint's own pads, but a curated path or a
             # neighbour the geometry could not see may still intrude. A partial
             # tie is useless, so drop the whole spec rather than clip it.
+            reason = None
             if not all(
                 _segment_clears_obstacles(path_obs, a, b) for a, b in zip(points, points[1:])
             ):
-                summary["skipped"].append(f"{spec.ref}.{spec.pad}:waypoint_crosses_pad")
-                continue
-            if _track_hits_keepout(points):
-                summary["skipped"].append(f"{spec.ref}.{spec.pad}:track_keepout")
-                continue
-            if _conflicts_with_copper(points):
-                summary["skipped"].append(f"{spec.ref}.{spec.pad}:conflicts_with_stamped_stub")
-                continue
-            if spec.via_at_end and not _via_redundant(points[-1]) and _via_hits_keepout(points[-1]):
-                summary["skipped"].append(f"{spec.ref}.{spec.pad}:via_keepout")
-                continue
-            if spec.via_at_end and (spec.via_outside_smd_pads or not _via_redundant(points[-1])) and not _via_fits(points[-1]):
-                summary["skipped"].append(f"{spec.ref}.{spec.pad}:via_blocked")
+                reason = "waypoint_crosses_pad"
+            elif _track_hits_keepout(points):
+                reason = "track_keepout"
+            elif not _points_within_box_mm(points[1:], inner_box):
+                reason = "off_board"
+            elif _conflicts_with_copper(points):
+                reason = "conflicts_with_stamped_stub"
+            elif spec.via_at_end and not _via_redundant(points[-1]) and _via_hits_keepout(points[-1]):
+                reason = "via_keepout"
+            elif spec.via_at_end and (spec.via_outside_smd_pads or not _via_redundant(points[-1])) and not _via_fits(points[-1]):
+                reason = "via_blocked"
+            if reason and spec.short_fanout_fallback and spec.via_at_end:
+                # Search the original outward lead without weakening any
+                # pad, mask, copper, hole, edge, or keepout guard.
+                dx = spec.waypoints[0][0] - start_mm[0]
+                dy = spec.waypoints[0][1] - start_mm[1]
+                length = math.hypot(dx, dy)
+                if length > 1e-9:
+                    steps = int((length + via_size_mm) / 0.01)
+                    for step in range(1, steps + 1):
+                        distance = step * 0.01
+                        end = (start_mm[0] + dx / length * distance,
+                               start_mm[1] + dy / length * distance)
+                        candidate = [start_mm, end]
+                        if (not _points_within_box_mm([end], inner_box)
+                            or not _segment_clears_obstacles(path_obs, start_mm, end)
+                            or _track_hits_keepout(candidate)
+                            or _conflicts_with_copper(candidate)
+                            or _via_hits_keepout(end)
+                            or not _via_fits(end)):
+                            continue
+                        points, reason = candidate, None
+                        break
+            if reason:
+                summary["skipped"].append(f"{spec.ref}.{spec.pad}:{reason}")
                 continue
         else:
             fc = fp.GetPosition()

@@ -13,6 +13,17 @@ from pathlib import Path
 from typing import Any
 
 
+def jsonable_config_value(value: Any) -> Any:
+    """Preserve configuration values across JSON process boundaries."""
+    if isinstance(value, set):
+        return sorted(value)
+    if isinstance(value, dict):
+        return {key: jsonable_config_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [jsonable_config_value(item) for item in value]
+    return value
+
+
 def _optional_env_float(name: str, default: float | None = None) -> float | None:
     """Read an optional float from the environment, else *default*.
 
@@ -378,6 +389,9 @@ DEFAULT_CONFIG = {
     "kicad_routing_tools_max_iterations": 200000,
     "kicad_routing_tools_max_ripup": 3,
     "kicad_routing_tools_ordering": "mps",
+    # Parent interconnects must leave dense, immutable child copper. Keep
+    # geometry-derived inside-out routing independent of qualified leaf MPS.
+    "kicad_routing_tools_parent_ordering": "inside_out",
     # Routing grid. ``None`` keeps the router's own default (0.1 mm). A finer
     # grid is the escape fix our 0.1 mm default cannot make: measured on the
     # RP2040 CONTROL leaf of project 1125 (43 single-ended nets, board clearance
@@ -427,7 +441,9 @@ DEFAULT_CONFIG = {
     "gnd_zone_net": "GND",
     "gnd_zone_layer": "B.Cu",
     "gnd_zone_margin_mm": 0.5,
-    "zone_clearance_mm": 0.3,
+    # Unset preserves net-specific policy: GND uses the fab floor, power 0.30.
+    # A numeric project override remains authoritative for both.
+    "zone_clearance_mm": None,
     "zone_min_thickness_mm": 0.25,
     "zone_thermal_gap_mm": 0.5,
     "zone_thermal_spoke_mm": 0.5,

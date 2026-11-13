@@ -1,4 +1,4 @@
-"""Accept-or-revert wrapper around the C1 signal unconnected repair.
+"""Accept-or-revert wrapper around power and signal unconnected repair.
 
 :mod:`unconnected_repair` only stamps guarded copper and reports; the verdict
 -- full re-DRC, unconnected must strictly drop, shorts must not rise, no new
@@ -19,23 +19,12 @@ import sys
 from pathlib import Path
 from typing import Any, Sequence
 
-__all__ = ["attempt_signal_unconnected_repair"]
+from kicraft.autoplacer.config import jsonable_config_value
 
-# cfg keys the repair honors; forwarded into the subprocess verbatim.
-_REPAIR_CFG_KEYS = (
-    "gnd_zone_net",
-    "power_plane_nets",
-    "signal_repair_extra_nets",
-    "signal_repair_max_mm",
-    "signal_repair_max_targets",
-    "signal_repair_max_attempts",
-    "signal_repair_dogleg_offsets_mm",
-    "via_size_mm",
-    "via_drill_mm",
-)
+__all__ = ["attempt_unconnected_repair"]
 
 
-def attempt_signal_unconnected_repair(
+def attempt_unconnected_repair(
     routed_pcb,
     cfg: dict,
     validation: dict,
@@ -48,9 +37,9 @@ def attempt_signal_unconnected_repair(
         "illegal_geometry_repair",
         "interface_port_names",
     ),
-    label: str = "signal unconnected repair",
+    label: str = "unconnected repair",
 ) -> dict:
-    """Run the C1 repair on ``routed_pcb``; keep it only if re-DRC improves.
+    """Run enabled unconnected repairs; keep them only if re-DRC improves.
 
     Accept iff unconnected strictly decreased AND shorts did not increase AND no
     new illegal-geometry flag appeared; anything else (including a crashed
@@ -66,7 +55,7 @@ def attempt_signal_unconnected_repair(
     drc = validation.get("drc") or {}
     unconnected_before = int(drc.get("unconnected", 0) or 0)
     shorts_before = int(drc.get("shorts", 0) or 0)
-    backup = Path(str(routed_pcb) + ".pre_signal_repair")
+    backup = Path(str(routed_pcb) + ".pre_unconnected_repair")
     shutil.copy2(routed_pcb, backup)
     # Recorded on WHICHEVER validation dict is returned (kept, reverted, or
     # crashed): the pass ran invisibly on 1/655 -- its print went to a
@@ -74,30 +63,27 @@ def attempt_signal_unconnected_repair(
     # return path carried a trace (KC-ZRAUR7 workstream B).
     record: dict = {"ran": True, "kept": False}
     try:
-        _sig_cfg = json.dumps({k: cfg[k] for k in _REPAIR_CFG_KEYS if k in cfg})
+        repair_cfg = json.dumps(jsonable_config_value(cfg))
         run_pcbnew_script(
             "import json\n"
             "from kicraft.autoplacer.brain.unconnected_repair import "
-            "repair_unconnected_signals\n"
-            f"cfg = json.loads({_sig_cfg!r})\n"
-            f"s = repair_unconnected_signals({str(routed_pcb)!r}, cfg)\n"
-            # NB: keys must match repair_unconnected_signals' return contract
-            # {edges, tied, skipped, pruned} EXACTLY -- a KeyError here
-            # crashes the subprocess AFTER the repair mutated the board, so
-            # the except below silently byte-reverts it: the pass ran as a
-            # no-op on every rc7 board of the 20260710 batch (N5 sweep).
-            "print('signal unconnected repair:', s['edges'], 'edge(s) --',\n"
-            "      s['tied'], 'tied,', len(s['skipped']), 'skipped,',\n"
-            "      s['pruned'], 'pruned'\n"
-            "      + (': ' + '; '.join(s['skipped']) if s['skipped'] else ''))\n"
-            # The subprocess's stdout is not echoed into the caller's log, so
-            # persist the summary for the parent to surface -- the per-edge
-            # skip REASONS are what the next repair-geometry iteration needs
-            # (the 20260713 batch had to re-run repairs offline to get them).
-            f"open({str(routed_pcb) + '.signal_repair.json'!r}, 'w')"
+            "repair_unconnected_power, repair_unconnected_signals\n"
+            f"cfg = json.loads({repair_cfg!r})\n"
+            "parts = {}\n"
+            f"board = {str(routed_pcb)!r}\n"
+            "if cfg.get('power_strand_repair_enabled', True):\n"
+            "    parts['power'] = repair_unconnected_power(board, cfg)\n"
+            "if cfg.get('signal_unconnected_repair_enabled', True):\n"
+            "    parts['signal'] = repair_unconnected_signals(board, cfg)\n"
+            "s = {'edges': sum(p['edges'] for p in parts.values()),\n"
+            "     'tied': sum(p['tied'] for p in parts.values()),\n"
+            "     'skipped': [item for p in parts.values() for item in p['skipped']],\n"
+            "     'pruned': sum(p['pruned'] for p in parts.values()),\n"
+            "     'power': parts.get('power'), 'signal': parts.get('signal')}\n"
+            f"open({str(routed_pcb) + '.unconnected_repair.json'!r}, 'w')"
             ".write(json.dumps(s))\n"
         )
-        sidecar = Path(str(routed_pcb) + ".signal_repair.json")
+        sidecar = Path(str(routed_pcb) + ".unconnected_repair.json")
         try:
             s = json.loads(sidecar.read_text(encoding="utf-8"))
             record["summary"] = s
@@ -156,7 +142,7 @@ def attempt_signal_unconnected_repair(
             for key in carry_keys:
                 if key in validation:
                     revalidation[key] = validation[key]
-            revalidation["signal_unconnected_repair"] = record
+            revalidation["unconnected_repair"] = record
             return revalidation
         print(
             f"  {label} reverted (unconnected "
@@ -168,7 +154,7 @@ def attempt_signal_unconnected_repair(
         shutil.copy2(backup, routed_pcb)
         backup.unlink(missing_ok=True)
         record["reverted"] = True
-        validation["signal_unconnected_repair"] = record
+        validation["unconnected_repair"] = record
         return validation
     except Exception as exc:  # noqa: BLE001 -- a repair may never fail a board
         print(f"warning: {label} failed: {exc}", file=sys.stderr)
@@ -176,5 +162,5 @@ def attempt_signal_unconnected_repair(
             shutil.copy2(backup, routed_pcb)
             backup.unlink(missing_ok=True)
         record["failed"] = str(exc)
-        validation["signal_unconnected_repair"] = record
+        validation["unconnected_repair"] = record
         return validation

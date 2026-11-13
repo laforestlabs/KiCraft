@@ -1,0 +1,28 @@
+{
+  "content_hash": "sha256:61c142a4e6b4b711bd548709756271153e1a1c1d3f3221af656aeacb5bcc9731",
+  "datasheet_url": "https://media.onzuu.com/static/datasheets/gct/usb4085-gf-a.pdf",
+  "description": "GCT USB4085-GF-A right-angle USB-C receptacle, 48 V DC and 5 A collective VBUS rating. GCT USB4085 Rev B pages 1-2 document contacts and recommended PCB layout; the PD recipe uses CC and power only.",
+  "footprint_name": "USC-C-SMD_USB4085-GF-A",
+  "kicad_version_min": "9.0.0",
+  "maturity": "reviewed",
+  "mpn": "USB4085-GF-A",
+  "name": "gct-usb4085",
+  "provenance": {
+    "added_at": "2026-11-06T06:02:58Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C7095263"
+  },
+  "symbol_name": "USB4085-GF-A_C7095263",
+  "tags": [
+    "connector",
+    "usb-c"
+  ],
+  "three_d_model": null,
+  "version": "0.1.0",
+  "watch_out_for": "Manufacturer's collective 5 A connector rating is not a board-level current guarantee. The imported four shell slots share S1; all 16 signal-hole positions and drills match GCT Rev B page 2. Signal lands are enlarged from 0.650 to 0.661 mm to exceed the 0.13 mm fabrication annular-ring floor; the courtyard includes the body outline and shell lands with at least 0.2 mm clearance. USB data and SBU are unused by the PD receptacle recipe."
+}

@@ -276,11 +276,13 @@ def _module_recipe(
                 role="mcu",
                 parameters={"antenna_edge": "module_top", "copper_keepout": True},
             ),
-            PlacementConstraint(
-                kind="decoupling_proximity",
-                role="local_decoupling",
-                parameters={"anchor_role": "mcu", "max_mm": 3.0},
-            ),
+        ) + tuple(
+            PlacementConstraint(kind="owned_pin_local", role=role, parameters={
+                "anchor_role": "mcu", "owner_pin": vdd_pin, "member_pin": "1",
+                "plane_owner_pin": ground_pins[0], "plane_member_pin": "2",
+                "plane_net": "gnd", "max_plane_via_mm": 3.0, "max_mm": 3.0,
+            })
+            for role in ("local_decoupling", "bulk_decoupling")
         ),
         electrical_assertions=(
             Assertion(
@@ -322,7 +324,21 @@ def _module_recipe(
                         sections=("Table 2-1 and note 6", "Table 2-4"),
                     ),
                 )
-                if reset_no_pull_up_gpios or reset_pull_up_gpios else ()
+                if (reset_no_pull_up_gpios or reset_pull_up_gpios)
+                and exact_part.startswith("ESP32-C3") else ()
+            ),
+            *(
+                (
+                    SourceDocument(
+                        url="https://documentation.espressif.com/esp32-s3_datasheet_en.pdf",
+                        title="ESP32-S3 chip datasheet",
+                        revision="2.2",
+                        reviewed_date="2026-11-06",
+                        sections=("Table 2-1 and note 6: at-reset and after-reset pin settings",),
+                    ),
+                )
+                if (reset_no_pull_up_gpios or reset_pull_up_gpios)
+                and exact_part.startswith("ESP32-S3") else ()
             ),
             SourceDocument(
                 url=guideline,
@@ -417,11 +433,6 @@ ESP32_S3_MINI_1U_N4R2_MINIMAL = ESP32_S3_MINI_1U_N4R2_MINIMAL.model_copy(update=
     "placement_constraints": tuple(
         rule for rule in ESP32_S3_MINI_1U_N4R2_MINIMAL.placement_constraints
         if rule.kind != "antenna_keepout"
-    ) + tuple(
-        PlacementConstraint(kind="owned_bypass", role=role, parameters={
-            "anchor_role": "mcu", "power_net": "vdd", "ground_net": "gnd", "max_mm": 3.0,
-        })
-        for role in ("local_decoupling", "bulk_decoupling")
     ),
 })
 
@@ -433,6 +444,10 @@ _S3_WROOM_GPIO_TO_PIN = {
     45: "26", 0: "27", 38: "31", 39: "32", 40: "33", 41: "34", 42: "35",
     2: "38", 1: "39",
 }
+
+# ESP32-S3 datasheet v2.2 Table 2-1: no WPU at or after reset.
+# Exclude strapping, USB, JTAG and UART pins even where their reset state is known.
+_S3_WROOM_RESET_NO_PULL_UP = frozenset({1, 2, *range(4, 19), 21, 38})
 
 
 ESP32_S3_WROOM_1_MINIMAL = _module_recipe(
@@ -456,6 +471,7 @@ ESP32_S3_WROOM_1_MINIMAL = _module_recipe(
     uart_rx_pin="36",
     usb_pins=("13", "14"),
     strapping=frozenset({0, 3, 45, 46}),
+    reset_no_pull_up_gpios=_S3_WROOM_RESET_NO_PULL_UP,
     # N8R8 uses these module pads for its internal Octal SPI PSRAM.
     no_connect_pins=("28", "29", "30"),
 )
@@ -481,6 +497,7 @@ ESP32_S3_WROOM_1_N16R8_MINIMAL = _module_recipe(
     uart_rx_pin="36",
     usb_pins=("13", "14"),
     strapping=frozenset({0, 3, 45, 46}),
+    reset_no_pull_up_gpios=_S3_WROOM_RESET_NO_PULL_UP,
     # R8 modules use these pads for internal Octal SPI PSRAM.
     no_connect_pins=("28", "29", "30"),
 )
@@ -593,9 +610,8 @@ ESP32_C3_MINI_1_MINIMAL = _module_recipe(
         "35",
     ),
 )
-# Both same-value capacitors must fit together within the module's 3 mm
-# supply/return bounds. These reviewed 0402 parts are shared by the C3
-# variants, whose module land and bypass requirements are identical.
+# These reviewed 0402 parts are shared by the C3 variants, whose module
+# land and bypass requirements are identical.
 _C3_LOCAL_SUPPORT = {
     "bulk_decoupling": (
         "GRM155R61A106ME11D",
@@ -618,16 +634,6 @@ ESP32_C3_MINI_1_MINIMAL = ESP32_C3_MINI_1_MINIMAL.model_copy(update={
 })
 
 
-# The two supply capacitors belong to this module, not any other 3V3 load.
-# Espressif's schematic checklist calls for local supply decoupling.
-ESP32_C3_MINI_1_MINIMAL = ESP32_C3_MINI_1_MINIMAL.model_copy(update={
-    "placement_constraints": ESP32_C3_MINI_1_MINIMAL.placement_constraints + tuple(
-        PlacementConstraint(kind="owned_bypass", role=role, parameters={
-            "anchor_role": "mcu", "power_net": "vdd", "ground_net": "gnd", "max_mm": 3.0,
-        })
-        for role in ("local_decoupling", "bulk_decoupling")
-    ),
-})
 
 # The H4X is a separate orderable identity, not a replacement for an exact N4
 # request. Espressif v2.2 table 1-1 specifies the same 4 MB flash and PCB

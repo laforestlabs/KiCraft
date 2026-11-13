@@ -42,9 +42,14 @@ _CATALOG_CAPACITORS = {
         "https://jlcpcb.com/api/file/downloadByFileSystemAccessId/8588932819465228288",
     ),
     "100nF 50V X7R": (
-        "CC0603KRX7R9BB104",
+        "CL10B104KB8NNNC",
         "Capacitor_SMD:C_0603_1608Metric",
-        "https://jlcpcb.com/api/file/downloadByFileSystemAccessId/8667086713681608704",
+        "https://media.digikey.com/pdf/Data%20Sheets/Samsung%20PDFs/CL10B104KB8NNNC_Spec.pdf",
+    ),
+    "220nF 50V X7R": (
+        "CL10B224KB8NNNC",
+        "Capacitor_SMD:C_0603_1608Metric",
+        "https://pdf.digi-electronics.com/pdf/2211/CL10B224KB8NNNC-datasheet.pdf",
     ),
     "47nF 50V X7R": (
         "CL10B473KB8NNNC",
@@ -167,7 +172,7 @@ def _catalog_cap(role: str, value: str, quantity: int = 1) -> Group:
 _ENABLE_CONTROL_MAX_V: dict[str, float] = {
     "tlv62569-3v3@3": 5.5,
     "ap63203-3v3@1": 32.0,
-    "ap63205-5v@1": 32.0,
+    "ap63205-5v@2": 32.0,
     "tps54331-adjustable@2": 6.0,
     "tps54331-12v-1a@2": 6.0,
     "lm2577t-adj-12v-boost@1": 18.0,
@@ -320,38 +325,36 @@ USB_C_5V_SINK = _power_recipe(
 )
 
 USB_C_PD_RECEPTACLE = _power_recipe(
-    recipe="usb-c-pd-receptacle@1",
+    recipe="usb-c-pd-receptacle@2",
     family="usb-c-pd-receptacle",
     exact_part="USB-C-PD-RECEPTACLE",
     ports=(
         Port(name="cc1", direction="bidirectional"),
         Port(name="cc2", direction="bidirectional"),
-        Port(name="vbus", direction="power"),
+        Port(name="vbus", direction="power", supply_voltage_range_v=(0.0, 48.0)),
         Port(name="gnd", direction="power"),
         Port(name="shield", direction="passive", required=False, allow_ground=True),
     ),
     internal_nets=(),
     parts=(
         _part(
-            "connector", "J", "TYPE-C-31-M-12",
-            "usb-c-16p:TYPE-C-31-M-12",
-            "usb-c-16p:USB-C_SMD-TYPE-C-31-M-12_1",
-            mpn="TYPE-C-31-M-12",
+            "connector", "J", "USB4085-GF-A",
+            "gct-usb4085:USB4085-GF-A_C7095263",
+            "gct-usb4085:USC-C-SMD_USB4085-GF-A",
+            mpn="USB4085-GF-A",
         ),
     ),
     pins=(
         Pin(role="connector", pin="A5", net="cc1"),
         Pin(role="connector", pin="B5", net="cc2"),
-        Pin(role="connector", pin="A4B9", net="vbus"),
-        Pin(role="connector", pin="B4A9", net="vbus"),
-        Pin(role="connector", pin="A1B12", net="gnd"),
-        Pin(role="connector", pin="B1A12", net="gnd"),
-        *(Pin(role="connector", pin=str(pin), net="shield") for pin in range(1, 5)),
+        *(Pin(role="connector", pin=pin, net="vbus") for pin in ("A4", "A9", "B4", "B9")),
+        *(Pin(role="connector", pin=pin, net="gnd") for pin in ("A1", "A12", "B1", "B12")),
+        Pin(role="connector", pin="S1", net="shield"),
     ),
     no_connects=tuple(
         NoConnect(role="connector", pin=pin) for pin in ("A6", "A7", "B6", "B7", "A8", "B8")
     ),
-    source_url="https://www.usb.org/document-library/usb-type-cr-cable-and-connector-specification-release-24",
+    source_url="https://media.onzuu.com/static/datasheets/gct/usb4085-gf-a.pdf",
     assertions=(
         Assertion(
             code="external_pd_controller_owns_cc",
@@ -437,7 +440,7 @@ USB_C_USB2_DEVICE = _power_recipe(
 )
 
 CH224K_PD_TRIGGER = _power_recipe(
-    recipe="ch224k-pd-trigger@1",
+    recipe="ch224k-pd-trigger@2",
     family="usb-pd-fixed-trigger",
     exact_part="CH224K",
     protected=("TYPE-C-31-M-12",),
@@ -445,7 +448,7 @@ CH224K_PD_TRIGGER = _power_recipe(
         Port(name="vbus", direction="power"),
         Port(name="gnd", direction="power"),
     ),
-    internal_nets=("cc1", "cc2", "shield", "vdd", "vbus_sense", "cfg1", "cfg2", "cfg3", "pg"),
+    internal_nets=("cc1", "cc2", "vdd", "vbus_sense", "cfg1", "pd_only"),
     parameters={"output_voltage": 9},
     allowed={"output_voltage": (9,)},
     parts=(
@@ -465,10 +468,15 @@ CH224K_PD_TRIGGER = _power_recipe(
             "ch224k:ESSOP-10_L4.9-W3.9-P1.0-LS6.0-TL-EP",
             mpn="CH224K",
         ),
-        _passive("config", "R", "10k", 3),
-        _passive("vdd_feed", "R", "1k"),
+        _passive("config", "R", "6.8k 1%"),
+        _part(
+            "vdd_feed", "R", "1k 1% 0.5W", "Device:R",
+            "Resistor_SMD:R_1210_3225Metric",
+            mpn="1210W2F1001T5E",
+            datasheet="https://jlcpcb.com/api/file/downloadByFileSystemAccessId/8586191793700814848",
+        ),
         _passive("vbus_sense", "R", "10k"),
-        _passive("decoupling", "C", "1uF"),
+        _passive("decoupling", "C", "1uF 10V"),
     ),
     pins=(
         Pin(role="connector", pin="A4B9", net="vbus"),
@@ -477,20 +485,17 @@ CH224K_PD_TRIGGER = _power_recipe(
         Pin(role="connector", pin="B1A12", net="gnd"),
         Pin(role="connector", pin="A5", net="cc1"),
         Pin(role="connector", pin="B5", net="cc2"),
-        *(Pin(role="connector", pin=str(pin), net="shield") for pin in range(1, 5)),
+        *(Pin(role="connector", pin=str(pin), net="gnd") for pin in range(1, 5)),
         Pin(role="controller", pin="1", net="vdd"),
         Pin(role="controller", pin="8", net="vbus_sense"),
         Pin(role="controller", pin="11", net="gnd"),
         Pin(role="controller", pin="7", net="cc1"),
         Pin(role="controller", pin="6", net="cc2"),
+        Pin(role="controller", pin="4", net="pd_only"),
+        Pin(role="controller", pin="5", net="pd_only"),
         Pin(role="controller", pin="9", net="cfg1"),
-        Pin(role="controller", pin="2", net="cfg2"),
-        Pin(role="controller", pin="3", net="cfg3"),
-        *(
-            Pin(role="config", index=i, pin="1", net=net)
-            for i, net in enumerate(("cfg1", "cfg2", "cfg3"))
-        ),
-        *(Pin(role="config", index=i, pin="2", net="gnd") for i in range(3)),
+        Pin(role="config", pin="1", net="cfg1"),
+        Pin(role="config", pin="2", net="gnd"),
         Pin(role="vdd_feed", pin="1", net="vbus"),
         Pin(role="vdd_feed", pin="2", net="vdd"),
         Pin(role="vbus_sense", pin="1", net="vbus"),
@@ -500,18 +505,40 @@ CH224K_PD_TRIGGER = _power_recipe(
     ),
     no_connects=(
         *(NoConnect(role="connector", pin=pin) for pin in ("A6", "A7", "B6", "B7", "A8", "B8")),
-        NoConnect(role="controller", pin="4"),
-        NoConnect(role="controller", pin="5"),
+        NoConnect(role="controller", pin="2"),
+        NoConnect(role="controller", pin="3"),
         NoConnect(role="controller", pin="10"),
     ),
-    source_url="https://www.wch-ic.com/downloads/CH224DS1_PDF.html",
+    source_url="https://datasheet.lcsc.com/datasheet/pdf/4f12eebccb4eda2c0038806df0155265.pdf?productCode=C970725",
+    source_documents=(
+        Source(
+            url="https://components101.com/sites/default/files/component_datasheet/WCH_CH224K_ENG.pdf",
+            title="WCH CH224 manual (English translation)", revision="1F",
+            reviewed_date="2026-11-06",
+            sections=("4.3 pin functions", "5.2.1 resistor configuration",
+                      "5.5 PD only", "6.1 reference schematic", "7.5 VDD regulator"),
+        ),
+    ),
     assertions=(
         Assertion(
             code="pd_fixed_pdo_review",
-            message="9 V level selection is CFG1=CFG2=CFG3=0; VDD and VBUS sense use datasheet series resistors",
+            message="9 V uses CFG1=6.8k to GND, CFG2/CFG3 open; DP/DM short locally for PD-only operation. VDD and VBUS sense use datasheet series resistors.",
         ),
     ),
-)
+).model_copy(update={
+    # (9.9V - 3.24V)/990ohm feed plus <=9.9V/9.9kohm sense: <8mA.
+    "supply_current_reservations_a": {"vbus": 0.01},
+    "placement_constraints": (
+        # Ground is the buried exposed pad: prove a real plane return rather
+        # than require an external capacitor centre inside the package body.
+        Placement(kind="owned_pin_local", role="decoupling", parameters={
+            "anchor_role": "controller", "owner_pin": "1", "member_pin": "1",
+            "plane_owner_pin": "11", "plane_member_pin": "2",
+            "plane_net": "gnd", "max_plane_via_mm": 3.0,
+            "max_mm": 3.0, "max_route_length_mm": 6.0, "min_route_width_mm": 0.2,
+        }),
+    ),
+})
 
 
 # WCH 1F sections 5.2.1/6.1 specify resistor selection, not three logic outputs.
@@ -523,6 +550,8 @@ CH224K_PD_SELECTABLE = RecipeDefinition(
     family="usb-pd-selectable-trigger",
     default_for_family=True,
     maturity="production",
+    # At the reviewed22V envelope, the complete feed and sense draw <22mA.
+    supply_current_reservations_a={"vbus": 0.025},
     protected_aliases=("usb-pd-selectable-trigger",),
     required_sheet_roles=("power",),
     parameter_defaults={
@@ -568,6 +597,8 @@ CH224K_PD_SELECTABLE = RecipeDefinition(
             "1k 1% 0.5W",
             "Device:R",
             "Resistor_SMD:R_1210_3225Metric",
+            mpn="1210W2F1001T5E",
+            datasheet="https://jlcpcb.com/api/file/downloadByFileSystemAccessId/8586191793700814848",
         ),
         _passive("vbus_sense", "R", "10k"),
         _passive("decoupling", "C", "1uF 10V"),
@@ -602,7 +633,12 @@ CH224K_PD_SELECTABLE = RecipeDefinition(
         NoConnect(role="selector", pin="4"),
     ),
     placement_constraints=(
-        Placement(kind="decoupling_proximity", role="controller", parameters={"max_mm": 3.0}),
+        Placement(kind="owned_pin_local", role="decoupling", parameters={
+            "anchor_role": "controller", "owner_pin": "1", "member_pin": "1",
+            "plane_owner_pin": "11", "plane_member_pin": "2",
+            "plane_net": "gnd", "max_plane_via_mm": 3.0,
+            "max_mm": 3.0, "max_route_length_mm": 6.0, "min_route_width_mm": 0.2,
+        }),
     ),
     electrical_assertions=(
         Assertion(
@@ -628,6 +664,11 @@ CH224K_PD_SELECTABLE = RecipeDefinition(
         ),
     ),
     source_documents=(
+        Source(
+            url="https://datasheet.lcsc.com/datasheet/pdf/4f12eebccb4eda2c0038806df0155265.pdf?productCode=C970725",
+            title="WCH CH224 manual", revision="2.1", reviewed_date="2026-11-06",
+            sections=("4.2 CH224K pins", "6.2 CH224K reference schematic"),
+        ),
         Source(
             url="https://components101.com/sites/default/files/component_datasheet/WCH_CH224K_ENG.pdf",
             title="WCH CH224 manual (English translation)",
@@ -1086,7 +1127,7 @@ AP63203_3V3 = _power_recipe(
     parameters={"output_voltage": 3.3},
     allowed={"output_voltage": (3.3,)},
     ports=(
-        Port(name="input", direction="power"),
+        Port(name="input", direction="power", supply_voltage_range_v=(3.8, 32.0)),
         Port(name="gnd", direction="power"),
         Port(name="output", direction="power"),
         Port(name="enable", direction="input", required=False, default_tie="input"),
@@ -1157,8 +1198,8 @@ AP63203_3V3 = _power_recipe(
             message=(
                 "The composition is limited to 1 A output and the IC's 3.8–32 V input "
                 "operating range; input transients and reverse polarity require external protection. "
-                "The 4.7 uH FXL0630 has 7.5 A saturation and 5.5 A heating ratings, "
-                "33 milliohm maximum DCR. FB senses output directly; EN defaults to VIN, "
+                "The 4.7 uH FXL0630 has 7.5 A saturation and 5.5 A heating test points "
+                "(maximum columns, not guaranteed minima), and 33 milliohm maximum DCR. FB senses output directly; EN defaults to VIN, "
                 "and 100 nF is connected between BST and SW."
             ),
         ),
@@ -1178,18 +1219,121 @@ AP63203_3V3 = _power_recipe(
         ),
     ),
 )
-AP63205_5V = _buck(
-    recipe="ap63205-5v@1",
-    family="ap63205-5v",
-    part="AP63205WU-7",
-    symbol="ap63205:AP63205WU-7",
-    footprint="ap63205:TSOT-23-6_L2.9-W1.6-P0.95-LS2.8-BL",
-    datasheet="https://www.diodes.com/assets/Datasheets/AP63200-AP63201-AP63203-AP63205.pdf",
-    pins_map={"vin": "3", "gnd": "4", "sw": "5", "fb": "1", "en": "2", "boot": "6"},
-    output_voltage=5.0,
-    rated_output_current_a=2.0,
-    fixed_output=True,
-)
+# Pad-to-pad limits are conservative implementation bounds for the data
+# sheet's short VIN/GND, BST/SW and SW/inductor loops, not body-centre limits.
+AP63203_3V3 = AP63203_3V3.model_copy(update={
+    "placement_constraints": AP63203_3V3.placement_constraints + (
+        Placement(kind="owned_bypass", role="input_hf_cap", parameters={
+            "anchor_role": "converter", "power_net": "input", "ground_net": "gnd",
+            "max_mm": 3.0, "max_route_length_mm": 6.0,
+        }),
+        # One member of each capacitance bank is pin-local; the other
+        # ceramics need not all occupy the 3 mm high-frequency loop.
+        Placement(kind="owned_bypass", role="input_cap", parameters={
+            "anchor_role": "converter", "member_index": 0, "power_net": "input",
+            "ground_net": "gnd", "max_mm": 4.0, "max_route_length_mm": 12.0,
+        }),
+        Placement(kind="owned_pin_local", role="output_cap", parameters={
+            "anchor_role": "inductor", "owner_pin": "2", "member_pin": "1", "member_index": 0,
+            "max_mm": 5.0, "max_route_length_mm": 15.0,
+            "plane_owner_role": "converter", "plane_owner_pin": "4", "plane_member_pin": "2",
+            "plane_net": "gnd", "max_plane_via_mm": 3.0,
+        }),
+        # Engineering packing and low-impedance bus envelopes, not numerical
+        # limits quoted from the manufacturer. Every bank member is covered.
+        *(Placement(kind="owned_bypass", role="input_cap", parameters={
+            "anchor_role": "converter", "member_index": index, "power_net": "input",
+            "ground_net": "gnd", "max_mm": 6.0 if index < 3 else 10.0,
+            "max_route_length_mm": 25.0,
+        }) for index in range(1, 8)),
+        *(Placement(kind="owned_pin_local", role="output_cap", parameters={
+            "anchor_role": "inductor", "owner_pin": "2", "member_pin": "1", "member_index": index,
+            "max_mm": 10.0, "max_route_length_mm": 25.0,
+            "plane_owner_role": "converter", "plane_owner_pin": "4", "plane_member_pin": "2",
+            "plane_net": "gnd", "max_plane_via_mm": 3.0,
+        }) for index in range(1, 4)),
+        Placement(kind="owned_pin_local", role="bootstrap_cap", parameters={
+            "anchor_role": "converter", "owner_pin": "6", "member_pin": "1",
+            "return_owner_pin": "5", "return_member_pin": "2",
+            "max_mm": 3.0, "max_route_length_mm": 6.0, "min_route_width_mm": 0.17,
+        }),
+        Placement(kind="owned_pin_local", role="inductor", parameters={
+            "anchor_role": "converter", "owner_pin": "5", "member_pin": "1",
+            "max_mm": 3.0, "current_carrying": True, "max_route_length_mm": 6.0,
+        }),
+        Placement(kind="thermal_current_path", role="converter", parameters={
+            "outer_copper_oz": 2.0, "dual_layer_ground": True,
+            "local_radius_mm": 3.0, "minimum_local_ground_area_mm2": 4.0,
+        }),
+    ),
+})
+AP63205_5V = AP63203_3V3.model_copy(update={
+    "recipe": "ap63205-5v@2",
+    "family": "ap63205-5v",
+    "exact_part": "AP63205WU-7",
+    "protected_aliases": ("ap63205-5v", "AP63205WU-7"),
+    "identity_aliases": ("AP63205WU-7",),
+    "rated_output_current_a": 2.0,
+    "parameter_defaults": {"output_voltage": 5.0},
+    "allowed_parameters": {"output_voltage": (5.0,)},
+    "parts": tuple(
+        _part(
+            "converter", "U", "AP63205WU-7", "ap63205:AP63205WU-7",
+            "ap63205:TSOT-23-6_L2.9-W1.6-P0.95-LS2.8-BL",
+            mpn="AP63205WU-7",
+            datasheet="https://www.diodes.com/assets/Datasheets/AP63200-AP63201-AP63203-AP63205.pdf",
+        ) if part.role == "converter" else
+        part.model_copy(update={"quantity": 7}) if part.role == "output_cap" else part
+        for part in AP63203_3V3.parts
+    ),
+    "pins": AP63203_3V3.pins + tuple(
+        Pin(role="output_cap", index=i, pin=pin, net=net)
+        for i in range(4, 7) for pin, net in (("1", "output"), ("2", "gnd"))
+    ),
+    "placement_constraints": AP63203_3V3.placement_constraints + tuple(
+        Placement(kind="owned_pin_local", role="output_cap", parameters={
+            "anchor_role": "inductor", "owner_pin": "2", "member_pin": "1", "member_index": index,
+            "max_mm": 10.0, "max_route_length_mm": 25.0,
+            "plane_owner_role": "converter", "plane_owner_pin": "4", "plane_member_pin": "2",
+            "plane_net": "gnd", "max_plane_via_mm": 3.0,
+        }) for index in range(4, 7)
+    ),
+    "source_documents": (
+        *_source(
+            "https://www.diodes.com/assets/Datasheets/AP63200-AP63201-AP63203-AP63205.pdf",
+            "AP63205 reviewed application data", "Typical Application",
+            "Electrical Characteristics", "Layout Guidelines",
+            reviewed_date="2026-11-06",
+        ),
+        *_source(
+            "https://www.diodes.com/assets/Evaluation-Boards/AP63205-EVB-User-Guide.pdf",
+            "AP63205 evaluation board", "External Components Selection", "BOM",
+            reviewed_date="2026-11-06",
+        ),
+        *AP63203_3V3.source_documents[2:],
+    ),
+    "electrical_assertions": (
+        Assertion(code="ap63205_support_bounds", message=(
+            "AP63205WU-7 VIN is connected to eight 4.7uF 50V input capacitors and "
+            "a 100nF 50V bypass. Its 3.8–32V steady input range is the IC operating "
+            "range, not a guarantee of regulated 5V below dropout; reverse polarity "
+            "and transients outside that range require external protection. The "
+            "4.7uH FXL0630-4R7-M has 7.5A saturation and 5.5A heating test points "
+            "(maximum columns, not guaranteed minima) and 33 milliohm maximum DCR. FB senses the output directly, "
+            "EN defaults to VIN, and BST has 100nF to SW."
+        )),
+        Assertion(code="ap63205_capacitance_and_thermal_review", message=(
+            "Seven 10uF/25V output capacitors provide 70uF nominal against the "
+            "AP63205 evaluation guide's 66uF recommendation; effective capacitance "
+            "under bias, temperature and tolerance is lower and not guaranteed. "
+            "The eight 4.7uF/50V input capacitors use the AP63203 reviewed bank; "
+            "their effective bias capacitance is estimated, not guaranteed. "
+            "The 2A output rating is bounded by the IC rating, not evidence of "
+            "thermal performance, inductor ripple margin or closed-loop stability "
+            "at every input and load. Verify these on the completed board."
+        )),
+    ),
+})
 def _tps54331_buck(
     *,
     recipe: str,
@@ -2518,6 +2662,7 @@ def _tps552892_autonomous(
     enable_top: str,
     enable_bottom: str,
     external_vcc: bool,
+    supply_voltage_range_v: tuple[float, float],
     source_contract: str,
     compensation_contract: str,
 ) -> RecipeDefinition:
@@ -2545,7 +2690,7 @@ def _tps552892_autonomous(
         parameters={"output_voltage": output_voltage},
         allowed={"output_voltage": (output_voltage,)},
         ports=(
-            Port(name="input", direction="power"),
+            Port(name="input", direction="power", supply_voltage_range_v=supply_voltage_range_v),
             Port(name="gnd", direction="power"),
             Port(name="output", direction="power"),
         ),
@@ -2756,6 +2901,7 @@ TPS552892_12V_2A = _tps552892_autonomous(
     enable_top="220k 1%",
     enable_bottom="39k 1%",
     external_vcc=False,
+    supply_voltage_range_v=(9.0, 36.0),
     source_contract=(
         "This is a 9--36V-input, 12V/2.0A output recipe. At the low 9V "
         "input, 12V/2A and a conservative 85% efficiency require 3.14A "
@@ -2791,6 +2937,7 @@ TPS552892_5V_2A = _tps552892_autonomous(
     enable_top="27.4k 1%",
     enable_bottom="10k 1%",
     external_vcc=True,
+    supply_voltage_range_v=(4.75, 5.25),
     source_contract=(
         "This equal-input conversion is bounded to a regulated 4.75--5.25V "
         "source, such as a USB-C 5V/3A contract, and delivers 5V/2.0A. At "

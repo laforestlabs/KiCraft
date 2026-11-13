@@ -22,6 +22,7 @@ from kicraft.design.stage_reference import (
 from kicraft.design.stage_semantics import (
     DETECTOR_VERSION,
     EXTERNAL_LOAD_CURRENT_CODE,
+    EXTERNAL_OUTPUT_ALLOCATION_CODE,
     complete_class_spellings,
     complete_intent_classification,
     complete_over_rated_supply,
@@ -1341,7 +1342,9 @@ def _name_reconciliation_decider(client, *, stage: str, run_id=None):
     return jev_decider(model=model, guard=getattr(client, "guard", None), run_id=run_id, stage=stage)
 
 
-def _semantic_repair_message(stage: str, diagnostics: list[models.StageDiagnostic]) -> str:
+def _semantic_repair_message(
+    stage: str, diagnostics: list[models.StageDiagnostic], *, auto_default_questions: bool | None = None
+) -> str:
     message = _SEMANTIC_REPAIR_MSG.format(
         diagnostics=json.dumps(
             [{"code": d.code, "message": d.message, "evidence": d.evidence} for d in diagnostics],
@@ -1424,12 +1427,25 @@ def _semantic_repair_message(stage: str, diagnostics: list[models.StageDiagnosti
             "assumption are written for you. If sharing the logic rail is deliberate, state the "
             "load's maximum current on that rail in `assumptions` ending '(defaulted)' instead."
         )
-    if any(d.code == "architecture_external_load_current_unspecified" for d in diagnostics):
-        message += (
-            " Do not guess the external-load current. Return one blocking question "
-            "asking for the maximum total 5V output current, with concrete choices "
-            'such as ["1 A", "2 A", "3 A", "5 A"].'
-        )
+    if any(
+        d.code in {EXTERNAL_LOAD_CURRENT_CODE, EXTERNAL_OUTPUT_ALLOCATION_CODE}
+        for d in diagnostics
+    ):
+        if auto_default_questions is True:
+            message += (
+                " Choose and disclose a conservative maximum supported output allocation, "
+                "not a measured external load consumption. For an unspecified addressable LED "
+                "output use 0.25 A maximum (defaulted), unless the user explicitly specified "
+                "a current; preserve explicit current demands. Sum all onboard and downstream "
+                "loads on each rail and select an adequately rated source with headroom. "
+                "Do not invent a measured panel draw."
+            )
+        else:
+            message += (
+                " Do not guess the external-load current. Return one blocking question "
+                "asking for the maximum total 5V output current, with concrete choices "
+                'such as ["1 A", "2 A", "3 A", "5 A"].'
+            )
     if any(
         d.code
         in {
@@ -4987,15 +5003,17 @@ def drive_stage(
                         }
                     )
                 return parked
-        # The external-load current is a physical fact. Interactive policy parks
-        # immediately; automatic policy must fail honestly rather than inventing a
-        # current or spending another provider call trying to manufacture one.
+        # Interactive and legacy callers may clarify missing external current;
+        # explicit automatic policy instead proceeds to bounded semantic repair.
         if (
             severe
             and stage == "architecture"
             and semantic_mode in {"repair", "enforce"}
-            and not external_load_budget_stated(brief)
-            and any(d.code == EXTERNAL_LOAD_CURRENT_CODE for d in severe)
+            and any(
+                d.code == EXTERNAL_OUTPUT_ALLOCATION_CODE
+                or (d.code == EXTERNAL_LOAD_CURRENT_CODE and not external_load_budget_stated(brief))
+                for d in severe
+            )
         ):
             questions = _normalize_questions([EXTERNAL_LOAD_CURRENT_QUESTION], stage)
             if questions_allowed and (
@@ -5036,52 +5054,6 @@ def drive_stage(
                         }
                     )
                 return parked
-            if auto_default_questions is True:
-                diagnostic_rows = [d.model_dump(exclude_none=True) for d in diagnostics]
-                failure_outcome = {
-                    "failure_kind": EXTERNAL_LOAD_CURRENT_CODE,
-                    "error": next(
-                        d.message for d in severe if d.code == EXTERNAL_LOAD_CURRENT_CODE
-                    ),
-                    "provider_ok": provider_ok,
-                    "schema_ok": schema_ok,
-                    "semantic_clean": False,
-                    "repair_required": True,
-                    "fab_safe": not any(d.severity == "fab_gate" for d in diagnostics),
-                    "diagnostics": diagnostic_rows,
-                }
-                if review_before_commit:
-                    return {
-                        "stage": stage,
-                        "commit_ok": False,
-                        "cost_usd": total_cost,
-                        "attempts": attempts,
-                        "rounds": rounds,
-                        "tool_calls": tool_calls_ct,
-                        "wall_s": round(time.monotonic() - t0, 3),
-                        "cpu_s": round(_child_cpu_s() - cpu0, 3),
-                        **failure_outcome,
-                    }
-                return finalize_stage(
-                    active_client,
-                    run_id=run_id,
-                    stage=stage,
-                    state_path=state_path,
-                    progress=progress,
-                    ok=False,
-                    t0=t0,
-                    cpu0=cpu0,
-                    cost_usd=total_cost,
-                    attempts=attempts,
-                    rounds=rounds,
-                    tool_calls=tool_calls_ct,
-                    emitted_collection_count=emitted_collection_count,
-                    expanded_component_count=expanded_component_count,
-                    defect_codes=tuple(defect_codes),
-                    contract_rejections=contract_rejections,
-                    semantic_repair_rounds=semantic_repair_rounds,
-                    outcome=failure_outcome,
-                )
         repair_source_raw = raw
         while (
             severe
@@ -5092,7 +5064,9 @@ def drive_stage(
             semantic_repair_attempted = True
             semantic_repair_rounds += 1
             attempts += 1
-            repair_message = _semantic_repair_message(stage, severe)
+            repair_message = _semantic_repair_message(
+                stage, severe, auto_default_questions=auto_default_questions
+            )
             repair_messages = _lean_retry(repair_source_raw, repair_message)
             try:
                 repair_facts = run_serialization_recovery(

@@ -1,6 +1,9 @@
 """Legacy recipe identities whose derived artifacts require regeneration."""
 
 _LEGACY_RECIPE_REPLACEMENTS = {
+    "hub75-sn74hct245-interface@1": "hub75-sn74hct245-interface@2",
+    "usb-c-pd-receptacle@1": "usb-c-pd-receptacle@2",
+    "ch224k-pd-trigger@1": "ch224k-pd-trigger@2",
     "rp2040-minimal@1": "rp2040-minimal@3",
     "rp2040-minimal@2": "rp2040-minimal@3",
     "drv8833-dual-motor@1": "drv8833-dual-motor@6",
@@ -15,6 +18,7 @@ _LEGACY_RECIPE_REPLACEMENTS = {
     "stm32g030k6t6-minimal@2": "stm32g030k6t6-minimal@3",
     "tlv62569-3v3@1": "tlv62569-3v3@3",
     "tlv62569-3v3@2": "tlv62569-3v3@3",
+    "ap63205-5v@1": "ap63205-5v@2",
     "me6211-3v3@1": "me6211-3v3@2",
     "mcp1700-3v3@1": "mcp1700-3v3@2",
     "ams1117-3v3@1": "ams1117-3v3@2",
@@ -31,3 +35,8 @@ def legacy_recipe_replacement(value: object) -> str | None:
 def is_legacy_recipe_id(value: object) -> bool:
     """Identify old ownership IDs in raw state without loading design models."""
     return legacy_recipe_replacement(value) is not None
+
+
+def legacy_recipe_requires_new_architecture(value: object) -> bool:
+    """Identify obsolete graphs whose replacement needs a new external control."""
+    return value == "hub75-sn74hct245-interface@1"

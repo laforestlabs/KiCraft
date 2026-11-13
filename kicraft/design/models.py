@@ -455,12 +455,25 @@ class ExternalInterfaceObligation(BaseModel):
 
     kind: Literal["external_interface"]
     original_obligation_id: str = Field(pattern=r"^[a-z][a-z0-9_-]{0,63}$")
-    protocol: str = Field(min_length=1, description="External load interface protocol, e.g. ws2812.")
+    protocol: str = Field(
+        min_length=1,
+        description="External load interface protocol, e.g. hub75 or ws2812. "
+        "Use addressable-led-string-unspecified when the LED string protocol is unspecified, "
+        "or passive-speaker-power-output for a passive speaker driven by this board.",
+    )
 
     @field_validator("protocol", mode="before")
     @classmethod
     def _canonical_protocol(cls, value: object) -> object:
-        return value.strip().casefold().replace("_", "-") if isinstance(value, str) else value
+        if not isinstance(value, str):
+            return value
+        protocol = value.strip().casefold().replace("_", "-")
+        # The generic load category names no signaling technology. Keep it
+        # unspecified; choosing a reviewed default belongs to architecture.
+        return (
+            "addressable-led-string-unspecified"
+            if protocol == "addressable-led-string" else protocol
+        )
 
 
 class ExternalAnalogSourceObligation(BaseModel):

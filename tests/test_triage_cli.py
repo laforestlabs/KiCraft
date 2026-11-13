@@ -333,11 +333,11 @@ def test_compact_routed_validation_keeps_repair_evidence():
         "rejection_reasons": ["unconnected_nets"],
         "drc": {"unconnected": 1, "report_text": "x" * 5000},
         "post_route_repairs": {"gnd_islands": {}},
-        "signal_unconnected_repair": {"ran": True},
+        "unconnected_repair": {"ran": True},
         "illegal_geometry_repair": {"ran": True},
     }
     out = _compact_routed_validation(full)
-    for k in ("post_route_repairs", "signal_unconnected_repair",
+    for k in ("post_route_repairs", "unconnected_repair",
               "illegal_geometry_repair"):
         assert k in out, f"compactor dropped repair-evidence key {k}"
     assert "report_text" not in out["drc"]
@@ -710,3 +710,100 @@ def test_board_code_recovers_existing_active_workspace_read_only(tmp_path, monke
     assert resolved == (workspace if exists else None)
     assert db.read_bytes() == before
     assert set(tmp_path.rglob("*")) == paths_before
+
+
+@pytest.mark.parametrize(
+    ("verified", "wrong_unpriced_variant"), [(True, False), (False, False), (True, True)],
+)
+def test_bom_audit_distinguishes_live_identity_from_missing_assembly_inventory(
+    tmp_path, monkeypatch, verified, wrong_unpriced_variant,
+):
+    from types import SimpleNamespace
+    import kicraft.design.cli_app as cli_app
+    import kicraft.design.library as library
+    from kicraft.parts_library import jlcparts
+
+    run, _, _ = make_run(tmp_path)
+    mpn = "ESP32-S3-WROOM-1-N16R8"
+    manifest = SimpleNamespace(
+        name="esp32-s3-wroom-1-n16r8", mpn=mpn, sourcing={"lcsc": "C2913202"},
+    )
+    conflicting_manifest = SimpleNamespace(
+        name="other-bundle", mpn="ESP32-S3-WROOM-1-N8R8", sourcing={"lcsc": "C2913202"},
+    )
+    monkeypatch.setattr(library, "_load_library_parts", lambda root: (
+        [SimpleNamespace(manifest=manifest), SimpleNamespace(manifest=conflicting_manifest)], [],
+    ))
+    monkeypatch.setattr(jlcparts, "available", lambda: True)
+    monkeypatch.setattr(jlcparts, "dump_age_days", lambda: 0)
+    monkeypatch.setattr(jlcparts, "lookup", lambda cid: None)
+    monkeypatch.setattr(cli_app.lcsc_retail, "enabled", lambda: True)
+    monkeypatch.setattr(cli_app.lcsc_retail, "stock", lambda cid: {
+        "product_code": cid, "product_model": mpn if verified else "UNVERIFIED-ORDER-CODE",
+        "stock": 25_425, "min_buy": 1, "manufacturer": "ESPRESSIF",
+    })
+    _write(run / ".kicraft/state.json", {"bom": {"parts": [
+        {"ref": ref,
+         "mpn": "ESP32-S3-WROOM-1-N8R8" if ref == "U2" and wrong_unpriced_variant else mpn,
+         "symbol": f"{manifest.name}:ESP32-S3-WROOM-1",
+         "footprint": f"{manifest.name}:Physical",
+         "sourcing_note": "LCSC C2913202" if ref == "U1" else None}
+        for ref in ("U1", "U2")
+    ]}})
+    _write(run / ".kicraft/bom_prices.json", {
+        "prices": {"U1": {"lcsc": "C2913202", "stock": 999_999}},
+    })
+    audit = triage.collect_bom_realness(run)
+    assert audit["pass_a_suspects"] == (0 if verified else 1)
+    if verified:
+        assert audit["pass_b"][0]["tag"].startswith("MATCH")
+        assert audit["pass_b"][0]["stock"] is None  # Neither retail nor price-cache stock is assembly stock.
+        if wrong_unpriced_variant:
+            assert audit["pass_c"][0]["tag"].startswith("MPN-MISMATCH")
+            assert audit["pass_d"]["silent_substitution_suspects"] == ["U2"]
+        else:
+            assert audit["pass_c"][0]["tag"] == "LIBRARY-BUNDLE"
+    else:
+        assert audit["pass_b"][0]["tag"].startswith("UNVERIFIED")
+        assert audit["pass_c"][0]["tag"] == "UNVERIFIED-LCSC"
+
+
+@pytest.mark.parametrize("selection", ["C2977594", None, "C3406"])
+def test_bom_audit_uses_procurement_selection_not_footprint_catalog_suffix(
+    tmp_path, monkeypatch, selection,
+):
+    from types import SimpleNamespace
+    import kicraft.design.cli_app as cli_app
+    import kicraft.design.library as library
+    from kicraft.parts_library import jlcparts
+
+    run, _, _ = make_run(tmp_path)
+    manifest = SimpleNamespace(
+        name="dc3-2p54-16pas", mpn="DC3-2.54-16PAS", sourcing={"lcsc": "C2977594"},
+    )
+    monkeypatch.setattr(library, "_load_library_parts",
+                        lambda root: ([SimpleNamespace(manifest=manifest)], []))
+    monkeypatch.setattr(jlcparts, "available", lambda: True)
+    monkeypatch.setattr(jlcparts, "dump_age_days", lambda: 0)
+    monkeypatch.setattr(jlcparts, "lookup", lambda cid: (
+        {"model": "2.54-2*8P简牛", "stock": 35_274} if cid == "C3406" else None
+    ))
+    monkeypatch.setattr(cli_app.lcsc_retail, "enabled", lambda: True)
+    monkeypatch.setattr(cli_app.lcsc_retail, "stock", lambda cid: {
+        "product_code": cid, "product_model": manifest.mpn, "stock": 3565,
+    })
+    _write(run / ".kicraft/state.json", {"bom": {"parts": [{
+        "ref": "J2", "mpn": manifest.mpn,
+        "symbol": "dc3-2p54-16pas:DC3-2.54-16PAS",
+        "footprint": "dc3-2p54-16pas:IDC-TH_16P-P2.54_C3406",
+        "sourcing_note": f"LCSC {selection}" if selection else None,
+    }]}})
+    audit = triage.collect_bom_realness(run)
+    assert audit["pass_d"]["silent_substitution_suspects"] == (
+        ["J2"] if selection == "C3406" else []
+    )
+    if selection is None:
+        assert audit["pass_c"][0]["tag"] == "LIBRARY-BUNDLE"
+    elif selection == "C2977594":
+        assert audit["pass_b"][0]["tag"].startswith("MATCH")
+        assert audit["pass_b"][0]["stock"] is None

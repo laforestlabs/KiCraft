@@ -964,3 +964,41 @@ def test_external_antenna_s3_is_a_module_without_proving_a_complete_radio():
     assert not reviewed_record_realizes_class(
         reviewed_part("stm32g030f6p6"), "microcontroller-module",
     )
+
+
+def test_fxl_4r7_requires_the_reviewed_same_series_carrier():
+    record = reviewed_part("FXL0630-4R7-M")
+    assert record.lcsc == "C167220"
+    assert record.operating_limits["inductance_uh"] == 4.7
+    assert record.operating_limits["dc_resistance_ohm"] == 0.033
+    assert physical_inventory_record(
+        mpn="FXL0630-4R7-M", symbol="Device:L",
+        footprint="inductor-15uh-3a:IND-SMD_L7.0-W6.6_FXL0630",
+    ) == record
+    assert physical_inventory_record(
+        mpn="FXL0630-4R7-M", symbol="Device:L",
+        footprint="Inductor_SMD:L_0603_1608Metric",
+    ) is None
+
+
+@pytest.mark.parametrize(("mpn", "cid", "capacitance"), [
+    ("CL10B104KB8NNNC", "C1591", 0.1),
+    ("CL10B224KB8NNNC", "C64705", 0.22),
+])
+def test_samsung_rated_capacitors_have_exact_physical_witness(mpn, cid, capacitance):
+    record = reviewed_part(mpn)
+    assert record.lcsc == cid
+    assert record.operating_limits["capacitance_uf"] == capacitance
+    assert record.operating_limits["voltage_v"] == 50.0
+    assert physical_inventory_record(mpn=mpn, symbol="Device:C",
+                                     footprint="Capacitor_SMD:C_0603_1608Metric") == record
+
+
+def test_tps26631_exact_carrier_has_no_unconditional_voltage_alias():
+    record = reviewed_part("TPS26631RGER")
+    assert record.lcsc == "C1850273"
+    assert record.port_pins == {"input": "1", "output": "17", "gnd": "8"}
+    assert not record.power_transfer.get("preserves_nominal_voltage")
+    assert physical_inventory_record(
+        mpn="TPS26631RGER", symbol=record.symbol, footprint=record.footprint,
+    ) == record

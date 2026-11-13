@@ -563,7 +563,7 @@ def _leaf_validation(*, unconnected: int, nets: list[str], accepted: bool = True
         "render_diagnostics": {},
         "round_board_pre_route": "",
         "round_board_routed": "",
-        "signal_unconnected_repair": {},
+        "unconnected_repair": {},
         "track_summary": {},
     }
 

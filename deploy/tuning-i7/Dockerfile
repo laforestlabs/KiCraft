@@ -11,9 +11,13 @@ RUN printf 'Acquire::Check-Valid-Until "false";\nAcquire::Check-Date "false";\n'
  && add-apt-repository -y ppa:kicad/kicad-9.0-releases \
  && apt-get update && apt-get install -y kicad \
  && apt-get clean && rm -rf /var/lib/apt/lists/*
+COPY kicad-routing-tools-connectivity.bundle /tmp/kicad-routing-tools-connectivity.bundle
+
 
 RUN git clone https://github.com/drandyhaas/KiCadRoutingTools.git /opt/KiCadRoutingTools \
  && git -C /opt/KiCadRoutingTools checkout 3ceb773722bea67aa3685e7ee430c0c0d17ef38d \
+ && git -C /opt/KiCadRoutingTools fetch /tmp/kicad-routing-tools-connectivity.bundle main \
+ && git -C /opt/KiCadRoutingTools checkout 8eeee55fd4ba4ed600b11bd8214de9994e8f5396 \
  && python3 -m venv --system-site-packages /opt/krt-venv \
  && /opt/krt-venv/bin/pip install --no-cache-dir -r /opt/KiCadRoutingTools/requirements.txt \
  && cd /opt/KiCadRoutingTools \

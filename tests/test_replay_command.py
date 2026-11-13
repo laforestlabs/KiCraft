@@ -4,8 +4,8 @@ workspace (NO synthesis / LLM).
 Two layers:
 
 * Fast unit tests (no pcbnew, no router): workspace resolution in both input
-  modes, missing-artifact gating, the synthesis-skip guarantee, and seed/route
-  threading -- all driven with monkeypatched seams.
+  modes, missing-artifact gating, the synthesis-skip guarantee, and bounded
+  two-phase search scheduling -- all driven with monkeypatched seams.
 * An opt-in end-to-end determinism test (``KICRAFT_REPLAY_E2E=1``): runs
   ``replay --project ... --no-route`` twice on the committed
   ``tests/fixtures/replay_workspace`` and asserts the per-leaf PLACEMENT
@@ -269,89 +269,73 @@ def test_replay_detects_synthesis_mutation(tmp_path, monkeypatch):
     assert cli_app._cmd_replay(args) == 8
 
 
-# ---- _run_layout seed/route threading into the engines -----------------------
+# ---- shared wall-clock ownership across layout phases ------------------------
 
 
-def test_run_layout_threads_seed_and_route_to_solve_hierarchy(tmp_path, monkeypatch):
-    import kicraft.cli.solve_hierarchy as sh
+@pytest.mark.parametrize(
+    ("leaf_seconds", "parent_round_seconds", "expected_rc"),
+    [(768.0, 362.0, 0), (617.0, 593.0, 6), (1053.0, 362.0, 6)],
+)
+def test_run_layout_search_uses_only_remaining_combined_budget(
+    tmp_path, monkeypatch, leaf_seconds, parent_round_seconds, expected_rc,
+):
+    import kicraft.cli.autoexperiment as experiment
+    from kicraft.cli._round_scheduler import Finalize, RoundScheduler
 
-    captured = {}
+    project = _stub_workspace(tmp_path)
+    clock = [0.0]
+    monkeypatch.setenv("KICRAFT_BUILD_MAX_WALL_S", "1620")
+    monkeypatch.setenv("KICRAFT_LEAF_SOLVE_MAX_WALL_S", "351")
+    monkeypatch.setattr(cli_app.time, "monotonic", lambda: clock[0])
 
-    def fake_main(argv):
-        captured["argv"] = list(argv)
-        return 0
+    def bounded_search(argv):
+        args = experiment.parse_args(argv)
+        if args.leaves_only:
+            clock[0] += leaf_seconds
+            return 0
+        started = clock[0]
+        scheduler = RoundScheduler(rounds=args.rounds, max_wall_s=args.max_wall_s)
+        for _ in range(2):
+            plan = scheduler.plan_next(
+                elapsed_s=clock[0] - started, stop_requested=False,
+            )
+            if isinstance(plan, Finalize):
+                return 6
+            clock[0] += parent_round_seconds
+            scheduler.observe_round_end(score=20.0, subprocesses_ok=plan.round_num == 2)
+            scheduler.observe_duration(parent_round_seconds)
+            if plan.round_num == 2:
+                return 0
+        pytest.fail("the permitted second search round was never reached")
 
-    monkeypatch.setattr(sh, "main", fake_main)
+    monkeypatch.setattr(experiment, "main", bounded_search)
     rc = cli_app._run_layout(
-        "fast",
-        tmp_path / "root.kicad_sch",
-        tmp_path / "b.kicad_pcb",
-        seed=5,
-        route=False,
+        "good", project / "DEMO.kicad_sch", project / "DEMO.kicad_pcb",
     )
-    assert rc == 0
-    argv = captured["argv"]
-    assert "--seed" in argv and argv[argv.index("--seed") + 1] == "5"
-    assert "--route" not in argv  # route=False must not pass --route
+    assert rc == expected_rc
+    assert clock[0] <= 1620 * 0.95
 
 
-def test_run_layout_passes_route_when_enabled(tmp_path, monkeypatch):
-    import kicraft.cli.solve_hierarchy as sh
+def test_run_layout_does_not_start_parent_after_combined_deadline(tmp_path, monkeypatch):
+    import kicraft.cli.autoexperiment as experiment
 
-    captured = {}
-    monkeypatch.setattr(sh, "main", lambda argv: captured.update(argv=list(argv)) or 0)
-    cli_app._run_layout(
-        "fast",
-        tmp_path / "root.kicad_sch",
-        tmp_path / "b.kicad_pcb",
-        seed=0,
-        route=True,
-    )
-    assert "--route" in captured["argv"]
+    project = _stub_workspace(tmp_path)
+    clock = [0.0]
+    monkeypatch.setenv("KICRAFT_BUILD_MAX_WALL_S", "1620")
+    monkeypatch.setenv("KICRAFT_LEAF_SOLVE_MAX_WALL_S", "351")
+    monkeypatch.setattr(cli_app.time, "monotonic", lambda: clock[0])
 
-
-def test_run_layout_omits_seed_when_none(tmp_path, monkeypatch):
-    """seed=None (the build default) forwards NO --seed -- the engine keeps its
-    own behavior (autoexperiment draws a random master seed)."""
-    import kicraft.cli.solve_hierarchy as sh
-
-    captured = {}
-    monkeypatch.setattr(sh, "main", lambda argv: captured.update(argv=list(argv)) or 0)
-    cli_app._run_layout("fast", tmp_path / "r.kicad_sch", tmp_path / "b.kicad_pcb")
-    assert "--seed" not in captured["argv"]
-
-
-def test_build_namespace_preserves_engine_defaults(tmp_path, monkeypatch):
-    """A `build`-style namespace (no seed/route/no_fab attrs) must flow
-    seed=None, route=True, do_fab=True into the layout tail -- build unchanged."""
-    captured = {}
-
-    def fake_run_layout(quality, root, pcb, *, seed=None, route=True):
-        captured.update(seed=seed, route=route)
+    def exhausted_leaf_search(argv):
+        args = experiment.parse_args(argv)
+        if not args.leaves_only:
+            pytest.fail("a parent search started after the shared deadline")
+        clock[0] += 1620 * 0.95
         return 0
 
-    monkeypatch.setattr(cli_app, "_run_layout", fake_run_layout)
-    monkeypatch.setattr(
-        cli_app,
-        "_promote_verify_fab",
-        lambda *a, **k: captured.update(do_fab=k.get("do_fab")) or 0,
-    )
-    args = SimpleNamespace(quality="good", no_archive=True)  # build-like
-    rc = cli_app._layout_route_fab(
-        args,
-        object(),
-        tmp_path / "s.json",
-        object(),
-        [],
-        "DEMO",
-        tmp_path,
-        tmp_path / "r.kicad_sch",
-        tmp_path / "b.kicad_pcb",
-    )
-    assert rc == 0
-    assert captured["seed"] is None
-    assert captured["route"] is True
-    assert captured["do_fab"] is True
+    monkeypatch.setattr(experiment, "main", exhausted_leaf_search)
+    assert cli_app._run_layout(
+        "good", project / "DEMO.kicad_sch", project / "DEMO.kicad_pcb",
+    ) != 0
 
 
 # ---- end-to-end determinism (opt-in; slow; spawns layout subprocesses) -------

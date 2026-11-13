@@ -5,7 +5,9 @@ import hashlib
 import json
 import re
 import shutil
+import tempfile
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -26,10 +28,416 @@ from kicraft.autoplacer.brain.subcircuit_render_diagnostics import (
 from kicraft.autoplacer.brain.types import AntennaEdgeIntent, BoardState, Component, Layer, Point
 from kicraft.autoplacer.routing_board import (
     import_routed_copper,
+    run_pcbnew_script,
     validate_routed_board,
 )
 from kicraft.autoplacer.hardware.adapter import KiCadAdapter
-from kicraft.autoplacer.kicad_routing_tools import route_with_kicad_routing_tools
+from kicraft.autoplacer.kicad_routing_tools import (
+    KICAD_ROUTING_TOOLS_COMMIT,
+    KICAD_ROUTING_TOOLS_VERSION,
+    route_with_kicad_routing_tools,
+)
+
+
+def _validate_leaf_current_contracts(
+    board_path: str | Path, cfg: dict[str, Any], validation: dict[str, Any]
+) -> None:
+    """Audit final leaf current paths and locally reconstructible returns."""
+    specs = cfg.get("local_bypasses", [])
+    if not specs:
+        return
+    try:
+        with tempfile.TemporaryDirectory(prefix="kicraft-leaf-current-") as tmp:
+            result_path = Path(tmp) / "audit.json"
+            script = (
+                "import json, pcbnew\n"
+                "from kicraft.autoplacer.hardware.local_contract import audit_local_copper\n"
+                f"board = pcbnew.LoadBoard({str(board_path)!r})\n"
+                "if board is None: raise RuntimeError('Failed to load board')\n"
+                f"specs = json.loads({json.dumps(specs)!r})\n"
+                "selected, errors = [], []\n"
+                "for spec in specs:\n"
+                "    owner, member = spec['owner_ref'], spec['bypass_ref']\n"
+                "    has_owner = board.FindFootprintByReference(owner) is not None\n"
+                "    has_member = board.FindFootprintByReference(member) is not None\n"
+                "    if has_owner != has_member:\n"
+                "        errors.append(f'local contract {owner}/{member}: owner and member split across leaves')\n"
+                "    elif has_owner:\n"
+                "        ground = spec.get('ground_return')\n"
+                "        if isinstance(ground, dict) and isinstance(ground.get('owner_ref'), str) and ground['owner_ref'].strip() and board.FindFootprintByReference(ground['owner_ref']) is None:\n"
+                "            spec = {k: v for k, v in spec.items() if k != 'ground_return'}\n"
+                "        selected.append(spec)\n"
+                "errors.extend(audit_local_copper(board, selected))\n"
+                f"with open({str(result_path)!r}, 'w') as out: json.dump(errors, out)\n"
+            )
+            run_pcbnew_script(script)
+            errors = json.loads(result_path.read_text())
+    except Exception as exc:
+        errors = [f"current contract native audit failed: {exc}"]
+    validation["current_contract_errors"] = errors
+    if errors:
+        validation["accepted"] = False
+        reasons = validation.setdefault("rejection_reasons", [])
+        if "current_contract" not in reasons:
+            reasons.append("current_contract")
+
+
+def _validate_leaf_thermal_requirements(
+    board_path: str | Path, cfg: dict[str, Any], validation: dict[str, Any]
+) -> None:
+    """Reject inadequate thermal geometry for owners present on this leaf."""
+    requirements = cfg.get("thermal_requirements", [])
+    if not requirements:
+        return
+    try:
+        with tempfile.TemporaryDirectory(prefix="kicraft-leaf-thermal-") as tmp:
+            result_path = Path(tmp) / "audit.json"
+            script = (
+                "import json, pcbnew\n"
+                "from kicraft.autoplacer.brain.gnd_pour import audit_thermal_ground\n"
+                f"path = {str(board_path)!r}\n"
+                "board = pcbnew.LoadBoard(path)\n"
+                "if board is None: raise RuntimeError('Failed to load board')\n"
+                f"requirements = json.loads({json.dumps(requirements)!r})\n"
+                "selected = [r for r in requirements if board.FindFootprintByReference(r['owner_ref']) is not None]\n"
+                "errors = []\n"
+                "for requirement in selected:\n"
+                "    try:\n"
+                f"        audit_thermal_ground(path, [requirement], {cfg.get('gnd_zone_net', 'GND')!r})\n"
+                "    except Exception as exc:\n"
+                "        errors.append(str(exc))\n"
+                f"with open({str(result_path)!r}, 'w') as out: json.dump(errors, out)\n"
+            )
+            run_pcbnew_script(script)
+            errors = json.loads(result_path.read_text())
+    except Exception as exc:
+        errors = [f"thermal native audit failed: {exc}"]
+    validation["thermal_contract_errors"] = errors
+    if errors:
+        validation["accepted"] = False
+        reasons = validation.setdefault("rejection_reasons", [])
+        if "thermal_contract" not in reasons:
+            reasons.append("thermal_contract")
+
+
+def _leaf_ground_contracts(board_path: Path, cfg: dict[str, Any]) -> list[dict]:
+    """Select ground returns whose two physical terminals are on this leaf."""
+    if not any(spec.get("ground_return") for spec in cfg.get("local_bypasses", [])):
+        return []
+    import pcbnew
+
+    board = pcbnew.LoadBoard(str(board_path))
+    if board is None:
+        raise ValueError(f"failed to load leaf board: {board_path}")
+    return [
+        spec for spec in cfg.get("local_bypasses", [])
+        if isinstance(spec.get("ground_return"), dict)
+        and board.FindFootprintByReference(spec["ground_return"].get("owner_ref", ""))
+        and board.FindFootprintByReference(spec.get("bypass_ref", ""))
+    ]
+
+
+def _prepare_leaf_ground_reservations(
+    board_path: Path, source_pcb: Path, cfg: dict[str, Any]
+) -> tuple[str | None, set[tuple[str, str]]]:
+    """Protect ordinary native return witnesses before any signal escapes."""
+    import pcbnew
+    from kicraft.autoplacer.brain.breakout_stubs import add_breakout_stubs
+    from kicraft.autoplacer.brain.gnd_pour import gnd_escape_specs
+    from kicraft.autoplacer.kicad_routing_tools import (
+        _project_routing_floors, _propagate_sibling_project_rules,
+        _routing_project, _stamp_local_ground_keepouts,
+    )
+
+    contracts = _leaf_ground_contracts(board_path, cfg)
+    if not contracts:
+        return None, set()
+    limits: dict[tuple[str, str], float] = {}
+    for spec in contracts:
+        ground = spec["ground_return"]
+        limit = float(ground["max_via_distance_mm"])
+        for pin in ((ground["owner_ref"], str(ground["owner_pin"])),
+                    (spec["bypass_ref"], str(ground["member_pin"]))):
+            limits[pin] = min(limit, limits.get(pin, limit))
+    _propagate_sibling_project_rules(str(source_pcb), str(board_path))
+    board = pcbnew.LoadBoard(str(board_path))
+    escapes = []
+    for net in sorted({spec["ground_return"]["net"] for spec in contracts}):
+        for escape in gnd_escape_specs(board, {**cfg, "gnd_zone_net": net, "gnd_pre_escape": True}):
+            key = (escape.ref, str(escape.pad))
+            if key in limits:
+                escape.length_mm = min(escape.length_mm, limits[key])
+                escapes.append(escape)
+    if escapes:
+        sidecars = [board_path.with_suffix(suffix) for suffix in (".kicad_pro", ".kicad_dru")]
+        rules = [(path, path.read_bytes() if path.is_file() else None) for path in sidecars]
+        try:
+            add_breakout_stubs(str(board_path), escapes, cfg=cfg)
+        finally:
+            for path, content in rules:
+                if content is None:
+                    path.unlink(missing_ok=True)
+                else:
+                    path.write_bytes(content)
+    marker = f"KiCraft leaf ground reservation {uuid.uuid4().hex}"
+    project = _routing_project(board_path, {**cfg, "pcb_path": str(source_pcb)})
+    clearance = _project_routing_floors(project, cfg)["clearance"]
+    _stamp_local_ground_keepouts(
+        board_path, {**cfg, "local_bypasses": contracts}, marker,
+        router_clearance_mm=clearance, prepare_thermal=False,
+    )
+    return marker, set(limits)
+
+
+def _finish_leaf_ground_planes(board_path: Path, cfg: dict[str, Any]) -> None:
+    """Refill both faces for leaf-owned ordinary returns before native audit."""
+    from kicraft.autoplacer.brain.gnd_pour import pour_gnd_planes
+
+    contracts = _leaf_ground_contracts(board_path, cfg)
+    if not contracts:
+        return
+    sidecars = [board_path.with_suffix(suffix) for suffix in (".kicad_pro", ".kicad_dru")]
+    rules = [(path, path.read_bytes() if path.is_file() else None) for path in sidecars]
+    try:
+        for net in sorted({spec["ground_return"]["net"] for spec in contracts}):
+            pour_gnd_planes(str(board_path), {**cfg, "gnd_zone_net": net},
+                            layers=("F.Cu", "B.Cu"))
+    finally:
+        for path, content in rules:
+            if content is None:
+                path.unlink(missing_ok=True)
+            else:
+                path.write_bytes(content)
+
+
+def _finish_leaf_current_landings(board_path: Path, cfg: dict[str, Any]) -> dict:
+    """Close shallow same-net via contacts with guarded, full-width copper."""
+    import math
+    import pcbnew
+    from kicraft.autoplacer.brain.breakout_stubs import BreakoutSpec, add_breakout_stubs
+    from kicraft.autoplacer.hardware.local_contract import (
+        _position, _project, _track_via_annular_contact, _via_width, audit_local_copper,
+    )
+
+    empty = {"stubs": 0, "segments": 0, "vias": 0, "skipped": []}
+    if not any("max_route_length_mm" in spec for spec in cfg.get("local_bypasses", [])):
+        return empty
+    board = pcbnew.LoadBoard(str(board_path))
+    contracts = [
+        {key: value for key, value in spec.items() if key != "ground_return"}
+        for spec in cfg.get("local_bypasses", [])
+        if "max_route_length_mm" in spec
+        and board.FindFootprintByReference(spec["owner_ref"])
+        and board.FindFootprintByReference(spec["bypass_ref"])
+    ]
+    if not contracts or not audit_local_copper(board, contracts):
+        return empty
+    nets = set()
+    for spec in contracts:
+        owner = board.FindFootprintByReference(spec.get("route_anchor_ref", spec["owner_ref"]))
+        if owner is None:
+            continue
+        for pair in spec.get("pin_pairs", [spec.get("power_pins", [])]):
+            if not pair:
+                continue
+            number = str(spec.get("route_anchor_pin", pair[0]))
+            nets.update(pad.GetNetname() for pad in owner.Pads()
+                        if pad.GetNumber() == number and pad.GetNetname())
+    vias: dict[int, list] = {}
+    tracks = []
+    for item in board.GetTracks():
+        if item.GetNetname() not in nets:
+            continue
+        if item.GetClass() == "PCB_VIA":
+            vias.setdefault(item.GetNetCode(), []).append(item)
+        elif item.GetClass() == "PCB_TRACK":
+            tracks.append(item)
+    escapes = []
+    seen = set()
+    for track in tracks:
+        start, end = _position(track.GetStart()), _position(track.GetEnd())
+        layer, width = track.GetLayer(), track.GetWidth()
+        for via in vias.get(track.GetNetCode(), []):
+            if not via.IsOnLayer(layer):
+                continue
+            center = _position(via.GetPosition())
+            closest = _project(start, end, center)
+            distance = math.dist(closest, center)
+            if distance <= 2 or distance >= (width + _via_width(via, layer)) / 2:
+                continue
+            if _track_via_annular_contact(
+                start, end, width, center, _via_width(via, layer), via.GetDrillValue()
+            ) is not None:
+                continue
+            key = (closest, center, layer, width)
+            if key in seen:
+                continue
+            seen.add(key)
+            escapes.append(BreakoutSpec(
+                ref="via-landing", pad=str(len(escapes)), net=track.GetNetname(),
+                start_xy=tuple(pcbnew.ToMM(value) for value in closest),
+                waypoints=[tuple(pcbnew.ToMM(value) for value in center)],
+                width_mm=pcbnew.ToMM(width), layer=track.GetLayerName(),
+                via_at_end=False,
+            ))
+    if not escapes:
+        return empty
+    rules = [(board_path.with_suffix(suffix),
+              board_path.with_suffix(suffix).read_bytes()
+              if board_path.with_suffix(suffix).is_file() else None)
+             for suffix in (".kicad_pro", ".kicad_dru")]
+    try:
+        result = add_breakout_stubs(str(board_path), escapes, cfg=cfg)
+        if result["segments"]:
+            board = pcbnew.LoadBoard(str(board_path))
+            pcbnew.ZONE_FILLER(board).Fill(board.Zones())
+            pcbnew.SaveBoard(str(board_path), board)
+        return result
+    finally:
+        for path, content in rules:
+            if content is None:
+                path.unlink(missing_ok=True)
+            else:
+                path.write_bytes(content)
+
+
+def _validate_leaf_input(board_path: Path, marker: str | None, **kwargs) -> dict:
+    """Do not mistake the temporary routing masks for fabricated copper DRC."""
+    if marker is None:
+        return validate_routed_board(str(board_path), **kwargs)
+    from kicraft.autoplacer.kicad_routing_tools import (
+        _propagate_sibling_project_rules, _strip_router_keepouts,
+    )
+
+    with tempfile.TemporaryDirectory(prefix="kicraft-leaf-ground-drc-") as tmp:
+        copy_path = Path(tmp) / board_path.name
+        shutil.copy2(board_path, copy_path)
+        _propagate_sibling_project_rules(str(board_path), str(copy_path))
+        _strip_router_keepouts(copy_path, marker)
+        import pcbnew
+        board = pcbnew.LoadBoard(str(copy_path))
+        pcbnew.ZONE_FILLER(board).Fill(board.Zones())
+        pcbnew.SaveBoard(str(copy_path), board)
+        _propagate_sibling_project_rules(str(board_path), str(copy_path))
+        return validate_routed_board(str(copy_path), **kwargs)
+
+
+def _leaf_gnd_pre_escape_specs(
+    board: Any, extraction: ExtractedSubcircuitBoard, cfg: dict[str, Any],
+    protected_pins: set[tuple[str, str]],
+) -> list:
+    """Defer optional interface-package bonds until signal routing is complete."""
+    from kicraft.autoplacer.brain.gnd_pour import gnd_escape_specs
+    from kicraft.design.models import is_power_or_ground_name
+
+    power = set(cfg.get("power_nets", ())) | {cfg.get("gnd_zone_net", "GND")}
+    signals = {net for net in extraction.external_net_names
+               if net not in power and not is_power_or_ground_name(net)}
+    interface_refs = {
+        fp.GetReferenceAsString() for fp in board.GetFootprints()
+        if any(pad.GetNetname() in signals for pad in fp.Pads())
+    }
+    # Contracted returns already have immutable copper witnesses. Ordinary
+    # interface-package bonds are completed by the existing ground finisher;
+    # locking them here can cage the nearby cross-leaf signal landings.
+    return [spec for spec in gnd_escape_specs(board, cfg)
+            if spec.ref not in interface_refs
+            and (spec.ref, str(spec.pad)) not in protected_pins]
+
+
+def _reserve_signal_escapes(board_path: Path, extraction: ExtractedSubcircuitBoard,
+                            cfg: dict[str, Any]) -> dict[str, Any]:
+    """Reserve signal exits before other locked copper; report every obstruction."""
+    try:
+        import pcbnew
+        from kicraft.autoplacer.brain.breakout_stubs import add_breakout_stubs
+        from kicraft.autoplacer.brain.signal_escape import signal_escape_specs
+
+        board = pcbnew.LoadBoard(str(board_path))
+        if board is None:
+            raise ValueError(f"failed to load {board_path}")
+        specs = signal_escape_specs(board, cfg, set(extraction.external_net_names))
+        del board
+        result = add_breakout_stubs(str(board_path), specs, cfg=cfg) if specs else {
+            "stubs": 0, "vias": 0, "skipped": [],
+        }
+        result["candidates"] = len(specs)
+        print(
+            f"  Signal pre-escapes: {result['stubs']}/{len(specs)} pad(s), "
+            f"{result['vias']} fanout via(s), {len(result['skipped'])} blocked"
+        )
+        if result["skipped"]:
+            print("  Signal pre-escapes blocked: " + ", ".join(result["skipped"]))
+        return result
+    except Exception as exc:
+        print(f"  WARNING: signal pre-escape step failed: {exc}")
+        return {"stubs": 0, "vias": 0, "skipped": [], "error": str(exc)}
+
+
+def _finish_interface_landings(
+    board_path: Path, extraction: ExtractedSubcircuitBoard, cfg: dict[str, Any]
+) -> dict[str, Any]:
+    """Retry only unlanded interface pads against the finished routed copper."""
+    import pcbnew
+    from kicraft.autoplacer.brain.breakout_stubs import add_breakout_stubs
+    from kicraft.autoplacer.brain.signal_escape import (
+        signal_escape_specs, unlanded_interface_components,
+    )
+    from kicraft.design.models import is_power_or_ground_name
+
+    nets = set(extraction.external_net_names) - set(cfg.get("power_nets", ()))
+    nets = {name for name in nets if not is_power_or_ground_name(name)}
+    board = pcbnew.LoadBoard(str(board_path))
+    if board is None:
+        raise ValueError(f"failed to load {board_path}")
+    missing = unlanded_interface_components(board, nets)
+    pads = {label for item in missing for label in item["pads"]}
+    specs = [spec for spec in signal_escape_specs(board, cfg, nets)
+             if f"{spec.ref}.{spec.pad}" in pads]
+    del board
+    if not specs:
+        return {"stubs": 0, "vias": 0, "skipped": []}
+    sidecars = [board_path.with_suffix(suffix) for suffix in (".kicad_pro", ".kicad_dru")]
+    rules = [(path, path.read_bytes() if path.is_file() else None) for path in sidecars]
+    try:
+        return add_breakout_stubs(str(board_path), specs, cfg=cfg)
+    finally:
+        for path, content in rules:
+            if content is None:
+                path.unlink(missing_ok=True)
+            else:
+                path.write_bytes(content)
+
+
+def _audit_interface_landings(board_path: Path, extraction: ExtractedSubcircuitBoard,
+                              validation: dict[str, Any], cfg: dict[str, Any]) -> None:
+    """Require a native landing for every actual cross-leaf signal component."""
+    from kicraft.design.models import is_power_or_ground_name
+
+    signal_nets = set(extraction.external_net_names) - set(cfg.get("power_nets", ()))
+    signal_nets = {name for name in signal_nets if not is_power_or_ground_name(name)}
+    if not signal_nets:
+        validation["interface_landing_audit"] = {"unlanded_components": []}
+        validation["interface_unlanded_nets"] = []
+        return
+    try:
+        with tempfile.TemporaryDirectory(prefix="kicraft-interface-landings-") as tmp:
+            result_path = Path(tmp) / "audit.json"
+            script = (
+                "import json, pcbnew\n"
+                "from kicraft.autoplacer.brain.signal_escape import unlanded_interface_components\n"
+                f"board = pcbnew.LoadBoard({str(board_path)!r})\n"
+                "if board is None: raise RuntimeError('Failed to load board')\n"
+                f"result = unlanded_interface_components(board, set({sorted(signal_nets)!r}))\n"
+                f"with open({str(result_path)!r}, 'w') as out: json.dump(result, out)\n"
+            )
+            run_pcbnew_script(script)
+            missing = json.loads(result_path.read_text())
+        validation["interface_landing_audit"] = {"unlanded_components": missing}
+        validation["interface_unlanded_nets"] = sorted({row["net"] for row in missing})
+    except Exception as exc:
+        validation["interface_landing_audit"] = {"error": str(exc)}
+        validation["interface_unlanded_nets"] = sorted(signal_nets)
 
 
 def _internal_net_verdict(
@@ -90,6 +498,7 @@ def _silk_for_leaf(
     *,
     traces=None,
     vias=None,
+    outline: tuple[Point, Point] | None = None,
 ) -> list:
     """Compute leaf-local rounded-rect silk + optional label for stamping.
 
@@ -109,7 +518,72 @@ def _silk_for_leaf(
     )
 
     bbox = _compute_component_bbox(components, traces=traces, vias=vias)
-    return _build_leaf_silkscreen(components, bbox, extraction, cfg)
+    return _build_leaf_silkscreen(components, bbox, extraction, cfg, outline=outline)
+
+
+def _leaf_mating_edges(
+    board_path: str | Path, components: dict[str, Component], cfg: dict[str, Any],
+) -> dict[str, float]:
+    """Native mating datums, using the parent's marker/barrel/body convention."""
+    zones = cfg.get("component_zones") or {}
+    refs = {
+        ref: zones[ref]["edge"]
+        for ref, comp in components.items()
+        if comp.mating_axis == "in_plane" and comp.opening_direction is not None
+        and isinstance(zones.get(ref), dict)
+        and zones[ref].get("edge") in ("left", "right", "top", "bottom")
+    }
+    if not refs:
+        return {}
+    overhang = max(0.0, float(cfg.get("connector_edge_overhang_mm", 0.5)))
+    pad_clearance = max(0.0, float(cfg.get("connector_edge_pad_clearance_mm", 0.2)))
+    with tempfile.TemporaryDirectory(prefix="kicraft-leaf-mating-") as tmp:
+        result_path = Path(tmp) / "edges.json"
+        script = (
+            "import json, pcbnew\n"
+            "from kicraft.autoplacer.brain.connector_edge_gap import _mouth_bbox, _edge_marker_point\n"
+            "from kicraft.autoplacer.brain.subcircuit_composer import _connector_barrel_edge_anchor\n"
+            "from kicraft.autoplacer.brain.types import Point\n"
+            f"board = pcbnew.LoadBoard({str(board_path)!r})\n"
+            f"refs = json.loads({json.dumps(refs)!r})\n"
+            "limits = {}\n"
+            "for ref, side in refs.items():\n"
+            "    fp = board.FindFootprintByReference(ref)\n"
+            "    if fp is None: raise ValueError(f'missing mating connector {ref}')\n"
+            "    bb = _mouth_bbox(fp, pcbnew)\n"
+            "    lo = Point(pcbnew.ToMM(bb.GetLeft()), pcbnew.ToMM(bb.GetTop()))\n"
+            "    hi = Point(pcbnew.ToMM(bb.GetRight()), pcbnew.ToMM(bb.GetBottom()))\n"
+            "    marker = _edge_marker_point(fp, pcbnew)\n"
+            "    pads = [p.GetBoundingBox() for p in fp.Pads()]\n"
+            "    barrel = None\n"
+            "    if pads:\n"
+            "        p_lo = Point(min(pcbnew.ToMM(p.GetLeft()) for p in pads), min(pcbnew.ToMM(p.GetTop()) for p in pads))\n"
+            "        p_hi = Point(max(pcbnew.ToMM(p.GetRight()) for p in pads), max(pcbnew.ToMM(p.GetBottom()) for p in pads))\n"
+            "        barrel = _connector_barrel_edge_anchor(lo, hi, p_lo, p_hi, edge_marker=marker)\n"
+            "    anchor = Point(*marker) if marker is not None else barrel\n"
+            "    if anchor is None: anchor = Point(lo.x if side == 'left' else hi.x, lo.y if side == 'top' else hi.y)\n"
+            "    datum = anchor.x if side in ('left', 'right') else anchor.y\n"
+            f"    offset = -{pad_clearance!r} if barrel is not None else {overhang!r}\n"
+            "    limit = datum + offset if side in ('left', 'top') else datum - offset\n"
+            "    if side in limits: limit = max(limits[side], limit) if side in ('left', 'top') else min(limits[side], limit)\n"
+            "    limits[side] = limit\n"
+            f"with open({str(result_path)!r}, 'w') as out: json.dump(limits, out)\n"
+        )
+        run_pcbnew_script(script)
+        return json.loads(result_path.read_text())
+
+
+def _clamp_mating_edges(
+    outline: tuple[Point, Point], limits: dict[str, float],
+) -> tuple[Point, Point]:
+    tl, br = outline
+    clipped = (
+        Point(max(tl.x, limits.get("left", tl.x)), max(tl.y, limits.get("top", tl.y))),
+        Point(min(br.x, limits.get("right", br.x)), min(br.y, limits.get("bottom", br.y))),
+    )
+    if clipped[0].x >= clipped[1].x or clipped[0].y >= clipped[1].y:
+        raise ValueError("connector mating boundaries leave no leaf routing area")
+    return clipped
 
 
 def _outline_around_geometry(
@@ -119,6 +593,7 @@ def _outline_around_geometry(
     *,
     traces=None,
     vias=None,
+    mating_edges: dict[str, float] | None = None,
 ) -> tuple[Point, Point] | None:
     """Compute a tight Edge.Cuts outline hugging the same bbox as the silk.
 
@@ -154,7 +629,7 @@ def _outline_around_geometry(
             tl.y = anchor.y - intent.inset_mm
         elif intent.target_edge == "bottom":
             br.y = anchor.y + intent.inset_mm
-    return tl, br
+    return _clamp_mating_edges((tl, br), mating_edges or {})
 
 
 def _center_on_leaf_page(
@@ -194,7 +669,7 @@ def _deterministic_route_signature(board_state: Any, cfg: dict[str, Any]) -> str
         [
             placement,
             [round(tl.x, 3), round(tl.y, 3), round(br.x, 3), round(br.y, 3)],
-            "kicad-routing-tools:0.20.2@3ceb773722bea67aa3685e7ee430c0c0d17ef38d",
+            f"kicad-routing-tools:{KICAD_ROUTING_TOOLS_VERSION}@{KICAD_ROUTING_TOOLS_COMMIT}",
             route_keys,
         ],
         sort_keys=True,
@@ -570,49 +1045,45 @@ def route_local_subcircuit(
         clear_existing_zones=True,
         remove_unmapped_footprints=True,
     )
+    # A component-only extraction canvas may extend in front of a connector.
+    # Establish its real mating edge BEFORE escapes or router copper exist.
+    mating_edges = _leaf_mating_edges(pre_route_board, route_input_board.components, cfg)
+    if mating_edges:
+        route_input_board.board_outline = _clamp_mating_edges(
+            route_input_board.board_outline, mating_edges,
+        )
+        route_adapter.stamp_subcircuit_board(
+            route_input_board, output_path=str(pre_route_board),
+            clear_existing_tracks=True, clear_existing_zones=True,
+            remove_unmapped_footprints=True,
+        )
     route_timing["stamp_pre_route_board_s"] = round(max(0.0, time.monotonic() - stamp_start), 3)
 
     routing_start = time.monotonic()
     leaf_routing_cfg = {**cfg, "pcb_path": str(source_pcb)}
     _breakout_specs = _resolve_breakout_specs(cfg)
 
-    # Fine-pitch signal pads must reserve a legal dog-bone before GND escapes
-    # and power ties lock their only exit corridor.  Stamp in a separate pass:
-    # later producers reload this board, so their shared guard must honour any
-    # signal copper that proved legal rather than merely winning list order.
-    try:
-        import pcbnew
+    # Contracted returns need an actual plane witness before signal copper can
+    # fragment it. Ordinary masks remain active through all routing passes.
+    _ground_marker, _ground_pins = _prepare_leaf_ground_reservations(
+        pre_route_board, source_pcb, cfg
+    )
+    if _ground_marker:
+        leaf_routing_cfg["routing_preserve_existing_copper"] = True
+    # Other dense signal exits still precede non-contract GND and power ties.
+    _signal_escape = _reserve_signal_escapes(pre_route_board, extraction, cfg)
+    if _signal_escape["stubs"] > 0:
+        leaf_routing_cfg["routing_preserve_existing_copper"] = True
 
-        from kicraft.autoplacer.brain.breakout_stubs import add_breakout_stubs
-        from kicraft.autoplacer.brain.signal_escape import fine_pitch_signal_escape_specs
-
-        _signal_board = pcbnew.LoadBoard(str(pre_route_board))
-        _signal_specs = fine_pitch_signal_escape_specs(_signal_board, cfg)
-        del _signal_board
-        if _signal_specs:
-            _signal_escape = add_breakout_stubs(str(pre_route_board), _signal_specs, cfg=cfg)
-            if _signal_escape["stubs"] > 0:
-                leaf_routing_cfg["routing_preserve_existing_copper"] = True
-                print(
-                    f"  Signal pre-escapes: {_signal_escape['stubs']}/{len(_signal_specs)} "
-                    f"pad(s), {_signal_escape['vias']} fanout via(s), "
-                    f"{len(_signal_escape['skipped'])} blocked"
-                )
-    except Exception as exc:  # finishing step must never fail the leaf
-        print(f"  WARNING: signal pre-escape step failed: {exc}")
-
-    # GND pre-escape (default on): plane-bond stubs for fine-pitch GND pads.
-    # It deliberately follows signal reservation: GND is never routed, while a
-    # dense signal pad has no recovery path once a locked plane bond occupies
-    # its only legal corridor.
+    # Escape remaining GND pads after reserving dense signal exits.
     if cfg.get("gnd_pre_escape", True):
         try:
             import pcbnew
 
-            from kicraft.autoplacer.brain.gnd_pour import gnd_escape_specs
-
             _g_board = pcbnew.LoadBoard(str(pre_route_board))
-            _breakout_specs = gnd_escape_specs(_g_board, cfg) + _breakout_specs
+            _breakout_specs = _leaf_gnd_pre_escape_specs(
+                _g_board, extraction, cfg, _ground_pins,
+            ) + _breakout_specs
             del _g_board
         except Exception as exc:  # never fail the leaf on a finishing helper
             print(f"  WARNING: gnd pre-escape spec gen failed: {exc}")
@@ -789,8 +1260,8 @@ def route_local_subcircuit(
             route_timing,
         )
     pre_route_validation_start = time.monotonic()
-    pre_route_validation = validate_routed_board(
-        str(pre_route_board),
+    pre_route_validation = _validate_leaf_input(
+        pre_route_board, _ground_marker,
         cfg=cfg,
         expected_anchor_names=[port.name for port in extraction.interface_ports],
         actual_anchor_names=[port.name for port in extraction.interface_ports],
@@ -869,10 +1340,18 @@ def route_local_subcircuit(
             str(routed_board),
             leaf_routing_cfg,
         )
+        if _ground_marker:
+            from kicraft.autoplacer.kicad_routing_tools import _strip_router_keepouts
+            _strip_router_keepouts(routed_board, _ground_marker)
         if _cache_pcb is not None:
             _cache_dir.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(routed_board, _cache_pcb)
             _cache_meta.write_text(json.dumps(routing_stats))
+    if _ground_marker:
+        from kicraft.autoplacer.kicad_routing_tools import _strip_router_keepouts
+        _strip_router_keepouts(pre_route_board, _ground_marker)
+    # Include any recovered signal exits in the uncentred routed layout.
+    _signal_finish = _finish_interface_landings(routed_board, extraction, cfg)
     route_timing["routing_s"] = round(max(0.0, time.monotonic() - routing_start), 3)
 
     if generate_diagnostics and render_intermediate:
@@ -943,6 +1422,7 @@ def route_local_subcircuit(
     silk_stamp_start = time.monotonic()
     silk_adapter = KiCadAdapter(str(routed_board), config=cfg)
     routed_state_for_silk = silk_adapter.load()
+    mating_edges = _leaf_mating_edges(routed_board, routed_state_for_silk.components, cfg)
     # Shrink Edge.Cuts to hug the post-route geometry the silk hugs, and center
     # the whole leaf on a standard A4 page so the standalone board opens centered in
     # the title block instead of crammed against the top-left origin. Centering is
@@ -958,6 +1438,7 @@ def route_local_subcircuit(
         traces=routed_state_for_silk.traces,
         vias=routed_state_for_silk.vias,
         antenna_edge_intents=routed_state_for_silk.antenna_edge_intents,
+        mating_edges=mating_edges,
     )
     if _new_outline is not None:
         _new_tl, _new_br = _new_outline
@@ -986,6 +1467,7 @@ def route_local_subcircuit(
         cfg,
         traces=routed_state_for_silk.traces,
         vias=routed_state_for_silk.vias,
+        outline=routed_state_for_silk.board_outline if mating_edges else None,
     )
     silk_adapter.stamp_subcircuit_board(
         routed_state_for_silk,
@@ -1062,6 +1544,11 @@ def route_local_subcircuit(
         except Exception as exc:  # finishing step must never fail the leaf
             print(f"  WARNING: power plane step failed: {exc}")
         route_timing["power_pour_s"] = round(max(0.0, time.monotonic() - power_pour_start), 3)
+    _finish_leaf_ground_planes(routed_board, cfg)
+    from kicraft.autoplacer.brain.gnd_pour import finish_local_thermal_ground
+    finish_local_thermal_ground(str(routed_board), cfg)
+    _finish_leaf_current_landings(routed_board, cfg)
+
 
     routed_validation_start = time.monotonic()
     validation = validate_routed_board(
@@ -1078,35 +1565,43 @@ def route_local_subcircuit(
     # on it must not count against the leaf (mirrors poured power/GND nets).
     # Previously set only on the reject path, leaving normal-path leaves blind.
     validation["interface_port_names"] = [port.name for port in extraction.interface_ports]
+    validation["signal_pre_escape"] = _signal_escape
+    validation["signal_finish"] = _signal_finish
     route_timing["routed_validation_s"] = round(
         max(0.0, time.monotonic() - routed_validation_start), 3
     )
 
-    # Leaf-level C1 repair: a leaf a couple of guarded ties short of clean used
-    # to have no lever at all -- `repair_unconnected_signals` was wired into the
-    # parent compose only -- so the sole response to 1-5 residual opens was a
-    # whole new round on a fresh seed (dense-soc plan P1.6). Gated on the opens
-    # that must actually close IN this leaf (poured and interface nets close at
-    # compose), and contained by the same accept-or-revert the parent uses.
+    # The same accept-or-revert pass finishes local signals and configured
+    # power nets, bounded by the existing leaf repair cap.
     _repair_cap = int(cfg.get("leaf_signal_repair_max_open_nets", 6))
-    if cfg.get("leaf_signal_repair_enabled", True) and _repair_cap > 0:
+    if (cfg.get("leaf_signal_repair_enabled", True) and _repair_cap > 0
+            and (cfg.get("signal_unconnected_repair_enabled", True)
+                 or cfg.get("power_strand_repair_enabled", True))):
         from kicraft.autoplacer.brain.leaf_acceptance import (
             acceptance_config_from_dict,
             split_unconnected_nets,
         )
 
         _local_open, _, _ = split_unconnected_nets(validation, acceptance_config_from_dict(cfg))
-        if _local_open and len(_local_open) <= _repair_cap:
-            from kicraft.autoplacer.brain.signal_repair_pass import (
-                attempt_signal_unconnected_repair,
+        _repair_open = set(_local_open) if cfg.get("signal_unconnected_repair_enabled", True) else set()
+        if cfg.get("power_strand_repair_enabled", True):
+            _power_nets = {str(n) for n in cfg.get("power_nets") or ()}
+            _power_nets.discard(str(cfg.get("gnd_zone_net", "GND")))
+            _repair_open.update(_power_nets.intersection(
+                (validation.get("drc") or {}).get("unconnected_nets") or ()
+            ))
+        _repair_open = sorted(_repair_open)
+        if _repair_open and len(_repair_open) <= _repair_cap:
+            from kicraft.autoplacer.brain.unconnected_repair_pass import (
+                attempt_unconnected_repair,
             )
 
             _repair_start = time.monotonic()
             print(
-                f"  leaf signal repair: {len(_local_open)} local open net(s) "
-                f"({', '.join(_local_open)}) -- attempting guarded ties"
+                f"  leaf unconnected repair: {len(_repair_open)} open net(s) "
+                f"({', '.join(_repair_open)}) -- attempting guarded ties"
             )
-            validation = attempt_signal_unconnected_repair(
+            validation = attempt_unconnected_repair(
                 routed_board,
                 cfg,
                 validation,
@@ -1114,16 +1609,20 @@ def route_local_subcircuit(
                 required_anchor_names=[
                     port.name for port in extraction.interface_ports if port.required
                 ],
-                label="leaf signal repair",
+                label="leaf unconnected repair",
             )
             route_timing["leaf_signal_repair_s"] = round(
                 max(0.0, time.monotonic() - _repair_start), 3
             )
-        elif _local_open:
-            validation["signal_unconnected_repair"] = {
+        elif _repair_open:
+            validation["unconnected_repair"] = {
                 "ran": False,
-                "reason": f"{len(_local_open)}_open_nets_over_cap_{_repair_cap}",
+                "reason": f"{len(_repair_open)}_open_nets_over_cap_{_repair_cap}",
             }
+    validation["interface_port_names"] = [port.name for port in extraction.interface_ports]
+    validation["signal_pre_escape"] = _signal_escape
+    validation["signal_finish"] = _signal_finish
+    _audit_interface_landings(routed_board, extraction, validation, cfg)
     if generate_diagnostics and render_intermediate:
         routed_render_start = time.monotonic()
         leaf_diagnostics = generate_leaf_diagnostic_artifacts(
@@ -1296,6 +1795,9 @@ def route_local_subcircuit(
         validation["drc"]["ignored_violation_count"] = len(drc.get("violations", []))
         validation["drc"]["significant_violation_count"] = 0
         validation["drc"]["ignored_clearance_reason"] = _ignore_reason
+
+    _validate_leaf_current_contracts(routed_board, cfg, validation)
+    _validate_leaf_thermal_requirements(routed_board, cfg, validation)
 
     routed_internal, failed_internal = _internal_net_verdict(validation, extraction)
 
@@ -1472,11 +1974,8 @@ def _stamp_trivial_leaf(
     * The composer's blocker extraction reads the same way from
       every leaf.
 
-    The resulting PCB is just the placed footprints; no traces, no
-    vias, no the autorouter invocation. The returned routing dict
-    advertises ``traces=0, vias=0, reason="no_internal_nets"`` and
-    ``routed_board_path`` set to the same file as
-    ``leaf_placed_board``.
+    The autorouter is skipped, but guarded interface escapes may add copper.
+    The routed board and returned copper describe those reservations.
     """
     route_timing: dict[str, float] = {}
     route_total_start = time.monotonic()
@@ -1581,8 +2080,25 @@ def _stamp_trivial_leaf(
 
     # No autorouter is needed, but unrouted copper still has to pass real DRC.
     _propagate_sibling_project_rules(str(source_pcb), str(pre_route_board))
+    _ground_marker, _ = _prepare_leaf_ground_reservations(pre_route_board, source_pcb, cfg)
+    _signal_escape = _reserve_signal_escapes(pre_route_board, extraction, cfg)
     shutil.copy2(pre_route_board, routed_board)
     _propagate_sibling_project_rules(str(pre_route_board), str(routed_board))
+    if _ground_marker:
+        from kicraft.autoplacer.kicad_routing_tools import _strip_router_keepouts
+        _strip_router_keepouts(routed_board, _ground_marker)
+        _strip_router_keepouts(pre_route_board, _ground_marker)
+    _signal_finish = _finish_interface_landings(routed_board, extraction, cfg)
+    if _signal_finish["stubs"]:
+        import pcbnew
+        _filled_board = pcbnew.LoadBoard(str(routed_board))
+        pcbnew.ZONE_FILLER(_filled_board).Fill(_filled_board.Zones())
+        _filled_board.Save(str(routed_board))
+    _finish_leaf_ground_planes(routed_board, cfg)
+    from kicraft.autoplacer.brain.gnd_pour import finish_local_thermal_ground
+    finish_local_thermal_ground(str(routed_board), cfg)
+    _finish_leaf_current_landings(routed_board, cfg)
+    imported_copper = import_routed_copper(str(routed_board))
     validation_start = time.monotonic()
     validation = validate_routed_board(
         str(routed_board),
@@ -1593,6 +2109,11 @@ def _stamp_trivial_leaf(
         timeout_s=int(cfg.get("subcircuit_validation_timeout_s", 30)),
     )
     validation["interface_port_names"] = [port.name for port in extraction.interface_ports]
+    validation["signal_pre_escape"] = _signal_escape
+    validation["signal_finish"] = _signal_finish
+    _audit_interface_landings(routed_board, extraction, validation, cfg)
+    _validate_leaf_current_contracts(routed_board, cfg, validation)
+    _validate_leaf_thermal_requirements(routed_board, cfg, validation)
     route_timing["routed_validation_s"] = round(
         max(0.0, time.monotonic() - validation_start), 3
     )
@@ -1648,18 +2169,22 @@ def _stamp_trivial_leaf(
         {
             "enabled": True,
             "skipped": True,
-            "reason": "no_internal_nets",
+            "reason": (
+                "current_contract_rejection"
+                if validation.get("current_contract_errors")
+                else "no_internal_nets"
+            ),
             "router": "kicad-routing-tools",
-            "traces": 0,
-            "vias": 0,
-            "total_length_mm": 0.0,
+            "traces": int(imported_copper.get("trace_count", 0)),
+            "vias": int(imported_copper.get("via_count", 0)),
+            "total_length_mm": float(imported_copper.get("total_length_mm", 0.0)),
             "round_board_illegal_pre_stamp": "",
             "round_board_pre_route": round_board_pre_route,
             "round_board_routed": round_board_routed,
             "routed_internal_nets": [],
             "failed_internal_nets": [],
-            "_trace_segments": [],
-            "_via_objects": [],
+            "_trace_segments": [copy.deepcopy(t) for t in imported_copper.get("traces", [])],
+            "_via_objects": [copy.deepcopy(v) for v in imported_copper.get("vias", [])],
             "validation": validation,
             "render_diagnostics": diagnostics_payload,
             "leaf_legality_repair": copy.deepcopy(legality_repair),

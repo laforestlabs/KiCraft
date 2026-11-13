@@ -29,6 +29,7 @@ def _trivial_extraction(tmp_path: Path) -> SimpleNamespace:
         ),
         local_state=BoardState(nets={}, components={}, board_outline=None),
         internal_net_names=[],
+        external_net_names=[],
         interface_ports=[],
         notes=[],
     )
@@ -111,6 +112,28 @@ def test_no_internal_nets_does_not_bypass_real_copper_drc(
     else:
         assert routing["validation"]["drc"]["shorts"] == 0
         assert Path(routing["routed_board_path"]).exists()
+
+
+def test_trivial_leaf_rejects_split_current_contract(fixed_leaf_geometry, tmp_path):
+    source = tmp_path / "seed.kicad_pcb"
+    _prototyping_board(source, overlapping_graphic=False)
+    routing, _ = leaf_routing.route_local_subcircuit(
+        _trivial_extraction(tmp_path), solved_components={},
+        cfg={
+            "pcb_path": str(source),
+            "local_bypasses": [{
+                "owner_ref": "PB1", "bypass_ref": "C1",
+                "power_pins": ["1", "1"], "max_route_length_mm": 5,
+                "min_route_width_mm": 0.5,
+            }],
+        },
+        generate_diagnostics=False,
+    )
+    assert routing["failed"]
+    assert routing["reason"] == "current_contract_rejection"
+    assert not routing["validation"]["accepted"]
+    assert any("split across leaves" in error
+               for error in routing["validation"]["current_contract_errors"])
 
 
 def test_missing_source_board_is_not_an_accepted_trivial_leaf(fixed_leaf_geometry, tmp_path):

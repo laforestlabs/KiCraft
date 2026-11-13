@@ -523,3 +523,48 @@ def test_pre_placement_nets_drops_singleton_after_rewrite():
         parent_def, [_artifact(layout)], {0: "BLOCK_0_USB"}
     )
     assert "GND" not in nets
+
+
+def test_parent_rotation_uses_rigid_physical_ports_without_mutating_children():
+    from kicraft.autoplacer.brain.graph import total_ratsnest_length
+    from kicraft.autoplacer.brain.placement_solver import PlacementSolver, _set_block_rotation
+    from kicraft.autoplacer.brain.types import BoardState
+
+    layouts = [
+        _layout(
+            "LEFT", width=20, height=20,
+            components={"U1": _comp("U1", pos=Point(0, 0), width=20, height=20,
+                                    pads=[_pad("U1", "1", -8, 0, "DATA")])},
+            ports=[_port("out", "DATA")],
+            anchors=[InterfaceAnchor(port_name="out", pos=Point(-8, 0), pad_ref=("U1", "1"))],
+        ),
+        _layout(
+            "RIGHT", width=20, height=20,
+            components={"U2": _comp("U2", pos=Point(40, 0), width=20, height=20,
+                                    pads=[_pad("U2", "1", 32, 0, "DATA")])},
+            ports=[_port("in", "DATA")],
+            anchors=[InterfaceAnchor(port_name="in", pos=Point(32, 0), pad_ref=("U2", "1"))],
+        ),
+    ]
+    artifacts = [_artifact(layout) for layout in layouts]
+    refs = {0: "LEFT", 1: "RIGHT"}
+    parent = SubCircuitDefinition(
+        id=_id("PARENT"), schematic_path="", component_refs=[], ports=[],
+        child_ids=[layout.subcircuit_id for layout in layouts], parent_id=None, is_leaf=False,
+    )
+    blocks = {refs[i]: artifact_to_component(artifact, ref=refs[i])
+              for i, artifact in enumerate(artifacts)}
+    state = BoardState(
+        components=blocks, nets=infer_interconnect_nets_pre_placement(parent, artifacts, refs),
+        traces=[], vias=[], silkscreen=[],
+        board_outline=(Point(-20, -20), Point(60, 20)),
+    )
+    assert total_ratsnest_length(state) == pytest.approx(40)
+    PlacementSolver(state)._optimize_block_rotation(blocks["LEFT"], [0, 180], state)
+    assert total_ratsnest_length(state) == pytest.approx(24)
+    assert blocks["LEFT"].rotation == 180
+    _set_block_rotation(blocks["LEFT"], 90)
+    port = blocks["LEFT"].pads[0]
+    assert (port.pos.x, port.pos.y) == pytest.approx((0, 8))
+    original = layouts[0].components["U1"].pads[0]
+    assert (original.pos.x, original.pos.y) == (-8, 0)

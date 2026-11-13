@@ -200,6 +200,28 @@ def _gate_validation_evidence(
     return not failures, {"passed": not failures, "failures": failures}
 
 
+def _gate_current_contract(
+    validation: dict[str, Any],
+    _anchor: dict[str, Any],
+    _cfg: LeafAcceptanceConfig,
+) -> tuple[bool, dict[str, Any]]:
+    """Preserve native current-path rejection through round selection."""
+    errors = list(validation.get("current_contract_errors") or [])
+    failed = bool(errors) or "current_contract" in (validation.get("rejection_reasons") or ())
+    return not failed, {"passed": not failed, "errors": errors}
+
+def _gate_thermal_contract(
+    validation: dict[str, Any],
+    _anchor: dict[str, Any],
+    _cfg: LeafAcceptanceConfig,
+) -> tuple[bool, dict[str, Any]]:
+    """Preserve native thermal rejection through round selection."""
+    errors = list(validation.get("thermal_contract_errors") or [])
+    failed = bool(errors) or "thermal_contract" in (validation.get("rejection_reasons") or ())
+    return not failed, {"passed": not failed, "errors": errors}
+
+
+
 def _gate_no_shorts(
     validation: dict[str, Any],
     _anchor: dict[str, Any],
@@ -243,7 +265,9 @@ def split_unconnected_nets(
     nets = [str(n) for n in (drc.get("unconnected_nets", []) or [])]
     interface = set(validation.get("interface_port_names", []) or [])
     poured = [n for n in nets if _is_poured_net(n, cfg)]
-    iface = [n for n in nets if n in interface and not _is_poured_net(n, cfg)]
+    unlanded = set(validation.get("interface_unlanded_nets", []) or [])
+    iface = [n for n in nets
+             if n in interface and n not in unlanded and not _is_poured_net(n, cfg)]
     excluded = set(poured) | set(iface)
     return [n for n in nets if n not in excluded], poured, iface
 
@@ -265,6 +289,18 @@ def _gate_no_unconnected(
     drc = validation.get("drc", {})
     raw = int(drc.get("unconnected", 0))
     nets = list(drc.get("unconnected_nets", []) or [])
+
+    # This qualifies the interface waiver, independently of the open limit.
+    unlanded = sorted(set(validation.get("interface_unlanded_nets", []) or []))
+    if unlanded:
+        return False, {
+            "passed": False,
+            "failure_class": "router_fail",
+            "unconnected_total": raw,
+            "unconnected_nets": nets,
+            "unlanded_interface_nets": unlanded,
+            "interface_landing_audit": validation.get("interface_landing_audit", {}),
+        }
 
     if cfg.max_unconnected is None:
         return True, {
@@ -536,6 +572,8 @@ _GATES: list[tuple[str, Any]] = [
     ("board_exists", _gate_board_exists),
     ("no_python_exception", _gate_no_python_exception),
     ("validation_evidence", _gate_validation_evidence),
+    ("current_contract", _gate_current_contract),
+    ("thermal_contract", _gate_thermal_contract),
     ("no_shorts", _gate_no_shorts),
     ("no_unconnected", _gate_no_unconnected),
     ("no_illegal_geometry", _gate_no_illegal_geometry),

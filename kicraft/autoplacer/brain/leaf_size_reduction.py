@@ -13,6 +13,11 @@ from kicraft.autoplacer.brain.leaf_geometry import (
     leaf_size_reduction_candidates,
     tight_leaf_geometry_bounds,
 )
+from kicraft.autoplacer.brain.leaf_acceptance import (
+    acceptance_config_from_dict,
+    evaluate_leaf_acceptance,
+)
+
 from kicraft.autoplacer.brain.leaf_routing import (
     _place_fabricated_edge_interfaces,
     route_local_subcircuit,
@@ -595,17 +600,32 @@ def attempt_leaf_size_reduction(
                 summary["attempts"].append(attempt_record)
                 continue
 
+            validation = rerouted.get("validation", {}) or {}
+            leaf_acceptance = evaluate_leaf_acceptance(
+                validation=validation,
+                anchor_validation={},
+                config=acceptance_config_from_dict(candidate_cfg),
+            )
+            rerouted["_round_acceptance"] = {
+                "accepted": leaf_acceptance.accepted,
+                "rejection_reasons": list(leaf_acceptance.rejection_reasons),
+                "gate_results": dict(leaf_acceptance.gate_results),
+                "drc_summary": dict(leaf_acceptance.drc_summary),
+                "notes": list(leaf_acceptance.notes),
+            }
             attempt_record["routing"] = {
                 key: value for key, value in rerouted.items() if not key.startswith("_")
             }
             attempt_record["timing_breakdown"] = dict(reroute_timing)
-            validation = rerouted.get("validation", {}) or {}
             attempt_record["size_reduction_validation"] = copy.deepcopy(validation)
+            attempt_record["leaf_acceptance"] = copy.deepcopy(rerouted["_round_acceptance"])
 
-            if rerouted.get("failed", False) or not validation.get("accepted", False):
+            if (rerouted.get("failed", False) or not validation.get("accepted", False)
+                    or not leaf_acceptance.accepted):
                 _restore_round_boards(preserved_boards)
                 attempt_record["rejection_reason"] = (
                     validation.get("rejection_stage")
+                    or ",".join(leaf_acceptance.rejection_reasons)
                     or validation.get("rejection_message")
                     or rerouted.get("reason")
                     or "reroute_validation_failed"

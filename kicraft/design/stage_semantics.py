@@ -50,12 +50,13 @@ _NONFUNCTIONAL_RE = re.compile(
 _POWER_RE = re.compile(r"\b(power|vbus|vcc|vdd|3v3|5v|1v1|ldo|regulat)\b", re.I)
 # The one code that asks for a fact only the user has (next-steps plan §4 B2).
 EXTERNAL_LOAD_CURRENT_CODE = "architecture_external_load_current_unspecified"
+EXTERNAL_OUTPUT_ALLOCATION_CODE = "architecture_external_output_allocation_unspecified"
 _EXTERNAL_LOAD_PATTERN = re.compile(
     r"\b(?:hub\s*75|(?:addressable\s+)?led\s+(?:strip|string)|"
     r"ws2812(?:[-\w]*)?|external\s+(?:5\s*v\s+)?(?:loads?|panel|display))\b",
     re.I,
 )
-_CURRENT_PATTERN = re.compile(r"\b\d+(?:\.\d+)?\s*(?:a|ma)\b", re.I)
+_CURRENT_PATTERN = re.compile(r"\b(\d+(?:\.\d+)?)\s*(a|ma)\b", re.I)
 
 
 def _text_fragments(value) -> list[str]:
@@ -1262,8 +1263,91 @@ def complete_unsourced_external_rails(
     return completed
 
 
+def _passive_speaker_requested(brief: str, upstream: dict) -> bool:
+    intent = upstream.get("intent") or {}
+    text = (brief or str(intent.get("goal") or "")).lower()
+    if not re.search(r"\b(?:speaker|loudspeaker)s?\b", text):
+        return False
+    # A crossover or a line-level feed to another amplifier has no onboard speaker-power duty.
+    return not bool(re.search(
+        r"\b(?:passive\s+(?:[\w-]+\s+){0,4}crossover|externally[- ]amplified|external\s+amplifier|"
+        r"powered\s+speaker|active\s+speaker|line[- ]level)\b", text
+    ))
+
+
+def _speaker_functional_diagnostics(brief: str, upstream: dict, candidate: dict) -> list[StageDiagnostic]:
+    if not _passive_speaker_requested(brief, upstream):
+        return []
+    blocks = [row for row in candidate.get("blocks") or [] if isinstance(row, dict)]
+    speaker_blocks = [row for row in blocks if re.search(r"speaker", _text(row), re.I)]
+    if any(re.search(r"\b(?:driv\w*|amplif\w*|power(?:ed|ing)?)\b",
+                     str(row.get("purpose") or ""), re.I)
+           for row in speaker_blocks):
+        return []
+    return [_diag(
+        "functional_spec_passive_speaker_drive_omitted", "repair_required",
+        "A passive speaker output must provide speaker power drive, not just a logic-level signaling header. Default an 8 ohm passive speaker if unspecified.",
+        [str(row.get("name") or "") for row in speaker_blocks],
+    )]
+
+
+def _speaker_architecture_diagnostics(brief: str, upstream: dict, candidate: dict) -> list[StageDiagnostic]:
+    if not _passive_speaker_requested(brief, upstream):
+        return []
+    requirements = [row for row in candidate.get("requirements") or [] if isinstance(row, dict)]
+    for row in requirements:
+        text = " ".join(str(row.get(key) or "") for key in ("family", "exact_part", "recipe")).lower()
+        if re.search(r"pam8302|pwm.passive.speaker.driver", text):
+            source = brief or str((upstream.get("intent") or {}).get("goal") or "")
+            # Do not mistake a nearby panel, resistor or other load's rating for the speaker.
+            clauses = re.split(r"[;\n]|\.(?!\d)", source.lower())
+            ratings = []
+            for clause in clauses:
+                speakers = list(re.finditer(r"\b(?:loud)?speakers?\b", clause))
+                for rating in re.finditer(
+                    r"(?<![\w.])(\d+(?:\.\d+)?)[\s-]*(ohms?|ω|w(?:atts?)?)\b", clause
+                ):
+                    for speaker in speakers:
+                        start, end = sorted((rating.end(), speaker.start()))
+                        between = clause[start:end]
+                        if len(between) <= 35 and not re.search(
+                            r"\b(?:resistor|led|panel|display|supply|rail|motor)\b", between
+                        ):
+                            ratings.append(rating.groups())
+                            break
+            for stage in ("intent", "functional_spec"):
+                for obligation in (upstream.get(stage) or {}).get("obligations") or []:
+                    if (
+                        obligation.get("kind") == "quantitative"
+                        and re.search(r"\b(?:loud)?speaker\b", str(obligation.get("quantity") or ""), re.I)
+                        and obligation.get("value") is not None
+                        and str(obligation.get("unit") or "").lower() in {"ohm", "ohms", "ω", "w", "watt", "watts"}
+                    ):
+                        ratings.append((str(obligation["value"]), str(obligation["unit"]).lower()))
+            unsupported = [
+                f"{number} {unit}" for number, unit in ratings
+                if (unit.startswith("ohm") or unit == "ω") and float(number) != 8
+                or unit.startswith("w") and float(number) < 2
+            ]
+            if unsupported:
+                return [_diag(
+                    "architecture_unsupported_speaker_load", "repair_required",
+                    "The reviewed PWM speaker circuit supports an 8 ohm speaker rated at least 2 W; preserve the explicitly requested load and choose a supported design rather than silently changing it.",
+                    unsupported,
+                )]
+            return []
+        if re.search(r"speaker.driver|audio.power|audio.amplif", text):
+            return []
+    return [_diag(
+        "architecture_passive_speaker_drive_omitted", "repair_required",
+        "A GPIO or signaling header cannot drive a passive speaker. Use the reviewed pam8302a-pwm-speaker@1 recipe, with its owned two-pin bridge output, 5 V supply and filtered PWM input.",
+        [str(row.get("id") or "") for row in requirements if re.search(r"speaker", _text(row), re.I)],
+    )]
+
+
 def _functional_spec(brief: str, upstream: dict, candidate: dict) -> list[StageDiagnostic]:
     diagnostics: list[StageDiagnostic] = []
+    diagnostics.extend(_speaker_functional_diagnostics(brief, upstream, candidate))
     intent = upstream.get("intent", {})
     allowed = _text([brief, intent]).lower()
     assumption_rows = [str(item) for item in candidate.get("assumptions") or []]
@@ -3569,8 +3653,661 @@ def architecture_conversion_output_diagnostics(
     ]
 
 
-def _architecture(upstream: dict, candidate: dict) -> list[StageDiagnostic]:
+_LED_OUTPUT_LABEL = re.compile(
+    r"\b(?:ws2812[\w-]*|(?:addressable\s+)?led\s+(?:strip|string|load|output))\b",
+    re.I,
+)
+_OTHER_CURRENT_OWNER = re.compile(
+    r"\b(?:hub\s*75|panel|display|speaker|amplifier|amp|"
+    r"(?:usb[- ]?c\s+)?pd\s+(?:input|source|supply)|"
+    r"(?:input|source|supply|regulator|converter))\b",
+    re.I,
+)
+
+
+def _owned_led_current_obligations(upstream: dict, requirement: dict) -> list[float]:
+    """Recover original quantitative load demands belonging to this output."""
+    owned = _requirement_obligation_ids(requirement)
+    rows = list(requirement.get("obligations") or [])
+    for slot in ("intent", "functional_spec"):
+        rows.extend(
+            row for row in (upstream.get(slot) or {}).get("obligations") or []
+            if isinstance(row, dict) and str(row.get("original_obligation_id") or "") in owned
+        )
+    values = []
+    for row in rows:
+        if not isinstance(row, dict) or row.get("kind") != "quantitative":
+            continue
+        quantity = str(row.get("quantity") or "")
+        if not (re.search(r"\bcurrent\b", quantity, re.I)
+                and re.search(r"\b(?:led|strip|string|load)\b", quantity, re.I)):
+            continue
+        scale = {"a": 1.0, "ma": 0.001}.get(str(row.get("unit") or "").strip().lower())
+        relation = row.get("relation")
+        value = row.get("maximum") if relation == "range" else row.get("value")
+        if (scale is not None and relation in {"equal", "minimum", "maximum", "range"}
+                and isinstance(value, (int, float)) and not isinstance(value, bool)):
+            values.append(float(value) * scale)
+    return values
+
+
+def _led_clause_currents(
+    fragment: str, label: re.Pattern | None, generic: bool,
+    other_labels: tuple[re.Pattern, ...] = (),
+) -> tuple[list[float], bool]:
+    """Bind numeric claims to their nearest named load, not to an entire brief."""
+    values = []
+    ambiguous = False
+    for sentence in re.split(r"(?<!\d)\.|\.(?!\d)|\n+", fragment):
+        led_context = False
+        for clause in re.split(r"[;,]", sentence):
+            targets = list(label.finditer(clause)) if label else []
+            if generic:
+                targets.extend(_LED_OUTPUT_LABEL.finditer(clause))
+            others = list(_OTHER_CURRENT_OWNER.finditer(clause))
+            others.extend(match for other in other_labels for match in other.finditer(clause))
+            # A continuation such as "LED load unspecified; output budgeted to
+            # 0.25 A" retains its owner. An explicitly named different load does not.
+            continued = led_context and not targets and not others
+            led_context = (bool(targets) and not others) or continued
+            if not targets and not continued:
+                continue
+            bound = []
+            for current in _CURRENT_PATTERN.finditer(clause):
+                def distance(owner):
+                    return max(owner.start() - current.end(), current.start() - owner.end(), 0)
+
+                target_distance = min(distance(owner) for owner in targets) if targets else 0
+                if others and min(distance(owner) for owner in others) <= target_distance:
+                    continue
+                bound.append(float(current.group(1)) / (1000 if current.group(2).lower() == "ma" else 1))
+            if len(set(bound)) > 1:
+                ambiguous = True
+            values.extend(bound)
+    return values, ambiguous
+
+
+def _recipe_port_envelope_failures(requirements, definitions, rail_voltages):
+    """Check reviewed whole-circuit input envelopes on their actual bound ports."""
+    failures = []
+    for req in requirements:
+        definition = definitions.get(str(req.get("id") or ""))
+        if definition is None:
+            continue
+        for port in definition.ports:
+            envelope = port.supply_voltage_range_v
+            rail = (req.get("ports") or {}).get(port.name)
+            voltage = rail_voltages.get(rail)
+            if envelope is not None and voltage is not None and not envelope[0] <= voltage <= envelope[1]:
+                failures.append(
+                    f"requirement {req.get('id')!r} recipe {definition.recipe!r} port "
+                    f"{port.name!r} bound to {rail!r} is {voltage:g} V; reviewed circuit "
+                    f"operating range is {envelope[0]:g}–{envelope[1]:g} V"
+                )
+    return failures
+
+
+def _architecture_pd_source_contract(
+    upstream: dict, candidate: dict, brief: str, rails: dict, requirements: list[dict],
+    definitions: dict, reserves: dict,
+) -> list[StageDiagnostic]:
+    """Check the reviewed trigger's operating source, not an adapter measurement."""
+    diagnostics = []
+    answers = [
+        f"{answer.get('text', '')} {answer.get('answer', '')}"
+        for answer in upstream.get("_stage_answers") or [] if isinstance(answer, dict)
+    ]
+    fragments = _text_fragments([brief, upstream.get("intent"), candidate.get("assumptions"),
+                                 candidate.get("topologies"), answers])
+    user_fragments = _text_fragments([brief, upstream.get("intent"), answers])
+    sources = [
+        row for row in requirements
+        if (definition := definitions.get(str(row.get("id") or ""))) is not None
+        and definition.family in {"usb-pd-selectable-trigger", "usb-pd-fixed-trigger"}
+    ]
+    def source_names(req):
+        raw = (req.get("ports") or {}).get("vbus")
+        protected = [
+            (row.get("ports") or {}).get("output") for row in requirements
+            if (definition := definitions.get(str(row.get("id") or ""))) is not None
+            and getattr(definition, "pass_through", False)
+            and (row.get("ports") or {}).get("input") == raw
+        ]
+        return (req.get("id"), raw, *protected)
+
+
+    def owned_by(fragment, req):
+        owners = []
+        for source_req in sources:
+            names = source_names(source_req)
+            if any(
+                name and str(name).casefold() not in {"pd", "source", "input", "supply"}
+                and re.search(r"(?<!\w)" + re.escape(str(name)) + r"(?!\w)", fragment, re.I)
+                for name in names
+            ):
+                owners.append(source_req)
+        return (len(owners) == 1 and owners[0] is req) or (not owners and len(sources) == 1)
+
+    for req in requirements:
+        definition = definitions.get(str(req.get("id") or ""))
+        if definition is None or definition.family not in {
+            "usb-pd-selectable-trigger", "usb-pd-fixed-trigger"
+        }:
+            continue
+        rail = (req.get("ports") or {}).get("vbus")
+        voltage = rails.get(rail)
+        if voltage is None:
+            continue
+        options = (definition.allowed_parameters or {}).get("voltage_options")
+        if options:
+            positions = [float(value) for value in re.findall(r"\d+(?:\.\d+)?", str(options[0]))]
+        else:
+            positions = [float(value) for value in
+                         (definition.allowed_parameters or {}).get("output_voltage", (voltage,))]
+        if not positions:
+            continue
+        if voltage not in positions:
+            diagnostics.append(_diag(
+                "architecture_pd_source_voltage_unsupported", "repair_required",
+                f"PD rail {rail} declares {voltage:g} V, but the selected reviewed trigger "
+                f"supports {', '.join(f'{v:g}' for v in positions)} V. Preserve any explicit "
+                "user input and choose a supported construction.",
+                [str(rail)],
+            ))
+        # The reviewed selectable construction specifies 20 V plus transients;
+        # its shunt supply is reviewed to 22 V. Check every direct load at that
+        # envelope using the ordinary reviewed-part supply rating gate.
+        if len(positions) > 1:
+            peak = max(positions) * 1.1
+            from kicraft.design.part_identity import reviewed_part, reviewed_supply_voltage_limits
+
+            protected = {
+                (row.get("ports") or {}).get("output")
+                for row in requirements
+                if (selected := definitions.get(str(row.get("id") or ""))) is not None
+                and getattr(selected, "pass_through", False)
+                and (row.get("ports") or {}).get("input") == rail
+            }
+            exposed = {rail, *protected}
+            direct = []
+            for row in requirements:
+                if row is req or not exposed.intersection(_requirement_supply_rails(row)):
+                    continue
+                selected = definitions.get(str(row.get("id") or ""))
+                direct.append({
+                    **row,
+                    "exact_part": row.get("exact_part") or
+                                  (selected.exact_part if selected else None),
+                })
+            unqualified = []
+            for row in direct:
+                selected = definitions.get(str(row.get("id") or ""))
+                bound_ports = [
+                    port for port in (selected.ports if selected else ())
+                    if (row.get("ports") or {}).get(port.name) in exposed
+                    and port.direction == "power"
+                ]
+                has_envelope = bool(bound_ports) and all(
+                    port.supply_voltage_range_v is not None for port in bound_ports
+                )
+                exact = row.get("exact_part")
+                record = reviewed_part(str(exact)) if exact else None
+                has_rating = record is not None and any(
+                    high is not None for _, _, high in reviewed_supply_voltage_limits(record)
+                )
+                if not has_envelope and not has_rating:
+                    unqualified.append(
+                        f"requirement {row.get('id')!r} on {rail!r} has neither a reviewed "
+                        "bound-port envelope nor a reviewed part supply rating"
+                    )
+            if unqualified:
+                diagnostics.append(_diag(
+                    "architecture_pd_selectable_supply_unqualified", "repair_required",
+                    f"Selectable PD rail {rail} reaches a {peak:g} V transient envelope; "
+                    "each direct load needs reviewed supply compatibility.",
+                    unqualified,
+                ))
+            rated_candidate = {"rail_voltages": {name: peak for name in exposed}, "requirements": direct}
+            for failure in _architecture_supply_over_rating(rated_candidate):
+                diagnostics.append(_diag(
+                    "architecture_pd_selectable_supply_exceeds_part_rating", "repair_required",
+                    f"Selectable PD rail {rail} can reach {max(positions):g} V and its reviewed "
+                    f"transient envelope reaches {peak:g} V; every directly connected load must "
+                    "tolerate that envelope, not merely the nominal setting.",
+                    failure.evidence,
+                ))
+            envelope_failures = []
+            for operating_voltage in [*positions, peak]:
+                envelope_failures.extend(_recipe_port_envelope_failures(
+                    [row for row in requirements if row is not req], definitions,
+                    {name: operating_voltage for name in exposed}
+                ))
+            if envelope_failures:
+                diagnostics.append(_diag(
+                    "architecture_pd_selectable_supply_exceeds_recipe_envelope", "repair_required",
+                    f"Selectable PD rail {rail} includes positions through {max(positions):g} V "
+                    f"and a reviewed {peak:g} V transient envelope; every bound load port "
+                    "must tolerate all of them.",
+                    envelope_failures,
+                ))
+
+
+        profiles = []
+        for fragment in fragments:
+            for clause in re.split(r"(?<!\d)\.|\.(?!\d)|[;\n]+", fragment):
+                if not owned_by(clause, req):
+                    continue
+                source = re.search(
+                    r"\b(?:usb[- ]?c\s+)?pd\s+(?:source|input|supply|contract)\b",
+                    clause, re.I,
+                )
+                if not source:
+                    for name in source_names(req):
+                        if name and str(name).casefold() not in {"pd", "source", "input", "supply"}:
+                            source = re.search(
+                                r"(?<!\w)" + re.escape(str(name)) + r"(?!\w)", clause, re.I
+                            )
+                            if source:
+                                break
+                if not source:
+                    continue
+                volts = re.findall(r"(?<![\w.])(\d+(?:\.\d+)?)\s*v\b", clause, re.I)
+                currents = list(_CURRENT_PATTERN.finditer(clause))
+                if len(volts) == 1 and len(currents) == 1:
+                    match = currents[0]
+                    others = list(_LED_OUTPUT_LABEL.finditer(clause))
+                    others.extend(owner for owner in _OTHER_CURRENT_OWNER.finditer(clause)
+                                  if not (owner.start() <= source.start() < owner.end()))
+
+                    def distance(owner):
+                        return max(owner.start() - match.end(), match.start() - owner.end(), 0)
+
+                    if others and min(map(distance, others)) <= distance(source):
+                        continue
+                    profiles.append((float(volts[0]), float(match.group(1)) /
+                                     (1000 if match.group(2).lower() == "ma" else 1),
+                                     clause, fragment in user_fragments))
+        conflicting = [profile for profile in profiles
+                       if profile[3] and abs(profile[0] - voltage) >= 0.01]
+        if conflicting:
+            diagnostics.append(_diag(
+                "architecture_pd_explicit_source_voltage_mismatch", "repair_required",
+                f"PD rail {rail} is {voltage:g} V but an explicit source allocation names "
+                "another voltage; retain the user input and choose a compatible reviewed source.",
+                [profile[2] for profile in conflicting],
+            ))
+        matching = [profile for profile in profiles if abs(profile[0] - voltage) < 0.01]
+        needed = reserves.get(rail, 0.0)
+        if not matching:
+            diagnostics.append(_diag(
+                "architecture_pd_source_allocation_unspecified", "repair_required",
+                f"State a numeric PD source voltage and current allocation for {rail} at "
+                f"{voltage:g} V, with positive margin above the bound converter and load "
+                f"planning reserve of {needed:g} A. This is an operating assumption, not a "
+                "measurement; retain any explicit user input and loads.",
+                [str(rail)],
+            ))
+        elif any(current > 3.0 or current <= needed + 1e-9
+                 for _, current, _, _ in matching):
+            diagnostics.append(_diag(
+                "architecture_pd_source_allocation_invalid", "repair_required",
+                f"PD source allocation at {voltage:g} V must exceed the {needed:g} A "
+                "bound planning reserve and must not exceed 3 A: the reviewed receptacle "
+                "construction does not guarantee E-marked operation above 3 A. Preserve "
+                "explicit user requirements and select a supported construction if needed.",
+                [profile[2] for profile in matching],
+            ))
+        controlled = any(
+            (selected := definitions.get(str(row.get("id") or ""))) is not None
+            and getattr(selected, "pass_through", False)
+            and (row.get("ports") or {}).get("input") == rail
+            for row in requirements
+        )
+        direct_5v_buck = any(
+            (row.get("ports") or {}).get("input") == rail
+            and rails.get((row.get("ports") or {}).get("output")) == 5.0
+            and str(row.get("family") or "").startswith(("ap63205", "buck"))
+            for row in requirements
+        )
+        if direct_5v_buck and not controlled:
+            text = " ".join(fragment for fragment in fragments if owned_by(fragment, req)).lower()
+            if not (re.search(r"\b5\s*v\b", text)
+                    and re.search(r"startup|pre[- ]negotiat", text)
+                    and re.search(r"fallback", text)
+                    and re.search(r"(?:not|cannot|can't|no)\b.{0,80}\bregulat", text)
+                    and re.search(r"\bnegotiated\b", text)
+                    and re.search(r"external.{0,30}operation|operation.{0,30}external", text)
+                    and re.search(r"available|availability|adequate", text)):
+                diagnostics.append(_diag(
+                    "architecture_pd_startup_envelope_unspecified", "repair_required",
+                    "State the 5 V pre-negotiation source availability needed for startup; "
+                    "do not assume an arbitrary 500 mA USB limit. A buck fed by 5 V fallback "
+                    "does not establish regulated 5 V: full external-output operation requires "
+                    "the negotiated input voltage and adequate source current. This is an "
+                    "operating envelope, not a claim about any particular adapter.",
+                    [str(rail)],
+                ))
+    return diagnostics
+
+
+def _architecture_bound_load_budget(upstream: dict, candidate: dict, brief: str) -> list[StageDiagnostic]:
+    """Budget external strip outputs and reviewed onboard allocations on their bound rails.
+
+    Reserve full rated converter output unless every protected-rail converter
+    output consumer has a bounded allocation. Linear regulators use a 5%
+    planning allowance and switching converters 80% efficiency. Protected
+    converter inputs use 95% of nominal voltage. None is a measurement or
+    thermal proof.
+    """
+    from kicraft.design.architecture_intent import _supply_port_name
+    from kicraft.design.recipes import get_recipe, registered_recipes
+
+    rails = _architecture_rail_voltages(candidate)
+    requirements = [r for r in candidate.get("requirements") or [] if isinstance(r, dict)]
+    resolutions = {
+        str(row.get("requirement_id")): row.get("recipe")
+        for row in candidate.get("recipe_resolution") or [] if isinstance(row, dict)
+    }
+    definitions = {}
+    for req in requirements:
+        identifier = str(req.get("id") or "")
+        selected = resolutions.get(identifier)
+        if selected:
+            try:
+                definitions[identifier] = get_recipe(selected)
+            except ValueError:
+                continue
+        else:
+            matches = [
+                item.definition for item in registered_recipes()
+                if item.definition.family == req.get("family")
+                and item.definition.default_for_family
+            ]
+            if len(matches) == 1:
+                definitions[identifier] = matches[0]
+
+    envelope_failures = _recipe_port_envelope_failures(requirements, definitions, rails)
+    envelope_diagnostics = [
+        _diag(
+            "architecture_supply_outside_recipe_envelope", "repair_required",
+            "A bound supply rail is outside the selected recipe port's reviewed circuit "
+            "operating range. Choose a compatible construction or regulate the rail.",
+            envelope_failures,
+        )
+    ] if envelope_failures else []
+
+    reserves: dict[str, float] = {}
+    strips = []
+    protected_inputs = {
+        (row.get("ports") or {}).get("output")
+        for row in requirements
+        if (definition := definitions.get(str(row.get("id") or ""))) is not None
+        and getattr(definition, "pass_through", False)
+    }
+    for req in requirements:
+        definition = definitions.get(str(req.get("id") or ""))
+        if definition is None:
+            continue
+        ports = req.get("ports") or {}
+        for port, current in definition.supply_current_reservations_a.items():
+            rail = ports.get(port)
+            if rail in rails:
+                reserves[rail] = reserves.get(rail, 0.0) + current
+        if definition.family in {"ws2812-external-strip", "ws2812-external-strip-header"}:
+            rail = ports.get("vdd_5v")
+            if rail in rails:
+                strips.append((req, rail))
+        output = ports.get("output") or ports.get("vout")
+        input_rail = ports.get("input") or ports.get("vin")
+        rating = definition.rated_output_current_a
+        if (not getattr(definition, "pass_through", False)
+                and rating is not None and output in rails and input_rail in rails
+                and output != input_rail and rails[input_rail] > 0):
+            if definition.family in {"me6211-3v3", "mcp1700-3v3", "ams1117-3v3"}:
+                # Input current cannot be less than output current for an LDO.
+                # The extra 5% is a planning allowance, not a datasheet Iq claim.
+                input_current = rating * 1.05
+            else:
+                input_voltage = rails[input_rail] * (0.95 if input_rail in protected_inputs else 1.0)
+                input_current = rating * rails[output] / (input_voltage * 0.8)
+            reserves[input_rail] = reserves.get(input_rail, 0.0) + input_current
+
+    # Reduce a converter's upstream planning allocation only when every bound
+    # consumer of its output has an explicit reviewed reservation, a known
+    # child-converter reservation, or an unambiguous external LED allocation.
+    # Unknown consumers retain the full rated-output reservation above.
+    load_fragments = _text_fragments([brief, upstream.get("intent"), candidate.get("assumptions")])
+    for answer in upstream.get("_stage_answers") or []:
+        if isinstance(answer, dict) and _external_load_budget_answered([answer]):
+            load_fragments.append(f"{answer.get('text', '')} {answer.get('answer', '')}")
+    labels = {
+        identifier: re.compile(r"(?<!\w)" + re.escape(identifier) + r"(?!\w)", re.I)
+        for req, _rail in strips if (identifier := str(req.get("id") or ""))
+    }
+    strip_values = {}
+    for req, rail in strips:
+        identifier = str(req.get("id") or "")
+        label = labels.get(identifier)
+        other_labels = tuple(pattern for key, pattern in labels.items() if key != identifier)
+        typed = _owned_led_current_obligations(upstream, req)
+        values = list(typed)
+        ambiguous = False
+        for fragment in load_fragments:
+            found, unclear = _led_clause_currents(fragment, label, len(strips) == 1, other_labels)
+            values.extend(found)
+            ambiguous |= unclear
+        if values and all(value > 0 for value in values) and (typed or not ambiguous):
+            strip_values[identifier] = max(values)
+
+    for req in requirements:
+        definition = definitions.get(str(req.get("id") or ""))
+        ports = req.get("ports") or {}
+        input_rail = ports.get("input") or ports.get("vin")
+        output = ports.get("output") or ports.get("vout")
+        if (definition is None or getattr(definition, "pass_through", False)
+                or definition.rated_output_current_a is None
+                or input_rail not in protected_inputs or output not in rails
+                or input_rail not in rails or rails[input_rail] <= 0):
+            continue
+        covered = True
+        external = 0.0
+        consumer_count = 0
+        for consumer in requirements:
+            if consumer is req or output not in _requirement_supply_rails(consumer):
+                continue
+            consumer_count += 1
+            consumer_def = definitions.get(str(consumer.get("id") or ""))
+            cports = consumer.get("ports") or {}
+            supply_ports = [
+                port for port, net in cports.items()
+                if net == output and (port in {"input", "input_positive"}
+                                      or _supply_port_name(port))
+            ]
+            if (consumer_def is None or not supply_ports
+                    or getattr(consumer_def, "pass_through", False)):
+                covered = False
+                break
+            for port in supply_ports:
+                identifier = str(consumer.get("id") or "")
+                is_strip = consumer_def.family in {
+                    "ws2812-external-strip", "ws2812-external-strip-header"
+                } and port == "vdd_5v"
+                if is_strip:
+                    if identifier not in strip_values:
+                        covered = False
+                        break
+                    external += strip_values[identifier]
+                elif port not in consumer_def.supply_current_reservations_a and not (
+                    port in {"input", "vin"} and consumer_def.rated_output_current_a is not None
+                    and (cports.get("output") or cports.get("vout")) in rails
+                ):
+                    covered = False
+                    break
+            if not covered:
+                break
+        if not covered or not consumer_count:
+            continue
+        planned_output = reserves.get(output, 0.0) + external
+        rated = definition.rated_output_current_a
+        if planned_output >= rated:
+            continue
+        if definition.family in {"me6211-3v3", "mcp1700-3v3", "ams1117-3v3"}:
+            old, new = rated * 1.05, planned_output * 1.05
+        else:
+            scale = rails[output] / (rails[input_rail] * 0.95 * 0.8)
+            old, new = rated * scale, planned_output * scale
+        reserves[input_rail] += new - old
+
+    # Series paths consume only their own input reservation plus downstream
+    # planning current, not their full rating or a converter efficiency penalty.
+    paths = []
+    for req in requirements:
+        definition = definitions.get(str(req.get("id") or ""))
+        ports = req.get("ports") or {}
+        if (definition is not None and getattr(definition, "pass_through", False)
+                and ports.get("input") in rails and ports.get("output") in rails):
+            paths.append((req, definition, ports["input"], ports["output"]))
+    path_diagnostics = []
+    pending = list(paths)
+    while pending:
+        ready = [p for p in pending if not any(q[2] == p[3] for q in pending)]
+        if not ready:
+            break
+        for req, definition, input_rail, output in ready:
+            needed = reserves.get(output, 0.0)
+            for strip, rail in strips:
+                if rail == output:
+                    identifier = str(strip.get("id") or "")
+                    if identifier in strip_values:
+                        needed += strip_values[identifier]
+            for consumer in requirements:
+                if consumer is req or output not in _requirement_supply_rails(consumer):
+                    continue
+                consumer_def = definitions.get(str(consumer.get("id") or ""))
+                cports = consumer.get("ports") or {}
+                supply_ports = [
+                    port for port, net in cports.items()
+                    if net == output and (port in {"input", "input_positive"}
+                                          or _supply_port_name(port))
+                ]
+                unknown = not consumer_def or not supply_ports
+                if not unknown:
+                    for port in supply_ports:
+                        if port in consumer_def.supply_current_reservations_a:
+                            continue
+                        if port in {"input", "vin"} and (
+                            consumer_def.rated_output_current_a is not None
+                            or getattr(consumer_def, "pass_through", False)
+                        ) and (cports.get("output") or cports.get("vout")) in rails:
+                            continue
+                        if (consumer_def.family in {
+                            "ws2812-external-strip", "ws2812-external-strip-header"
+                        } and port == "vdd_5v" and
+                                str(consumer.get("id") or "") in strip_values):
+                            continue
+                        unknown = True
+                        break
+                if unknown:
+                    path_diagnostics.append(_diag(
+                        "architecture_power_path_load_unspecified", "repair_required",
+                        f"Series path {req.get('id')} has a downstream consumer without "
+                        "a reviewed current reservation or bounded external load.",
+                        [str(consumer.get("id") or ""), str(output)],
+                    ))
+            capacity = definition.rated_output_current_a
+            if capacity is None or needed >= capacity - 1e-9:
+                path_diagnostics.append(_diag(
+                    "architecture_power_path_capacity_insufficient", "repair_required",
+                    f"Series path {req.get('id')} must have reviewed capacity with positive "
+                    f"margin above the {needed:g} A downstream planning reserve.",
+                    [str(output)],
+                ))
+            reserves[input_rail] = reserves.get(input_rail, 0.0) + needed
+            pending.remove((req, definition, input_rail, output))
+    if pending:
+        path_diagnostics.append(_diag(
+            "architecture_power_path_cycle", "repair_required",
+            "Series power paths must not form a cycle.", [str(p[0].get("id")) for p in pending],
+        ))
+
+    pd_diagnostics = envelope_diagnostics + path_diagnostics + _architecture_pd_source_contract(
+        upstream, candidate, brief, rails, requirements, definitions, reserves
+    )
+    if not strips:
+        return pd_diagnostics
+    producers = _rail_producers(candidate, rails)
+    # Architecture drafts can precede recipe_resolution; use the same registered
+    # family default used above, never an authored converter headline.
+    for producer in producers:
+        if producer["rated_output_current_a"] is None:
+            definition = definitions.get(producer["requirement_id"])
+            if definition:
+                producer["rated_output_current_a"] = definition.rated_output_current_a
+
+    fragments = _text_fragments([brief, upstream.get("intent"), candidate.get("assumptions")])
+    for answer in upstream.get("_stage_answers") or []:
+        if isinstance(answer, dict) and _external_load_budget_answered([answer]):
+            fragments.append(f"{answer.get('text', '')} {answer.get('answer', '')}")
+    # An output can be identified by its requirement id; generic strip language is
+    # usable only when there is one output. Multiple numeric claims are ambiguous.
+    loads: dict[str, float] = {}
+    diagnostics = pd_diagnostics
+    for req, rail in strips:
+        identifier = str(req.get("id") or "")
+        label = labels.get(identifier)
+        other_labels = tuple(pattern for key, pattern in labels.items() if key != identifier)
+        typed_values = _owned_led_current_obligations(upstream, req)
+        values = list(typed_values)
+        ambiguous = False
+        for fragment in fragments:
+            found, unclear = _led_clause_currents(fragment, label, len(strips) == 1, other_labels)
+            values.extend(found)
+            ambiguous |= unclear
+        if (ambiguous and not typed_values) or not values or any(value <= 0 for value in values):
+            diagnostics.append(_diag(
+                EXTERNAL_OUTPUT_ALLOCATION_CODE, "repair_required",
+                f"Powered external LED output {identifier} on {rail} needs an unambiguous maximum "
+                "current budget; when unspecified, default conservatively to 0.25 A and disclose it. "
+                "Preserve any explicit user load instead of reducing it.",
+                [identifier, rail],
+            ))
+            continue
+        # Repeated disclosures describe the same load; the largest claim preserves
+        # explicit higher requirements instead of silently replacing them by a default.
+        loads[rail] = loads.get(rail, 0.0) + max(values)
+
+    for rail, external in loads.items():
+        sources = [p for p in producers if p["rail"] == rail]
+        rated = [p for p in sources if p["rated_output_current_a"] is not None]
+        if len(rated) != 1 or len(sources) != 1:
+            diagnostics.append(_diag(
+                "architecture_external_load_source_capacity_unspecified", "repair_required",
+                f"External output on {rail} needs one bound source with a reviewed output-current rating.",
+                [rail],
+            ))
+            continue
+        source = rated[0]
+        capacity = source["rated_output_current_a"]
+        onboard = reserves.get(rail, 0.0)
+        allowed = max(0.0, capacity - onboard)
+        if external + onboard >= capacity - 1e-9:
+            diagnostics.append(_diag(
+                "architecture_5v_converter_has_no_headroom", "repair_required",
+                f"Rail {rail} source {source['requirement_id']} is rated {capacity:g} A; "
+                f"onboard and downstream reserves total {onboard:g} A, leaving an external "
+                f"cap below {allowed:g} A with positive headroom. The bound external outputs "
+                f"claim {external:g} A. Select a larger reviewed source for explicit loads; "
+                "do not reduce user requirements. Downstream linear and switching conversion "
+                "use planning allowances, not measured consumption.",
+                [rail, source["requirement_id"], f"external {external:g} A", f"reserve {onboard:g} A"],
+            ))
+    return diagnostics
+
+
+def _architecture(upstream: dict, candidate: dict, brief: str = "") -> list[StageDiagnostic]:
     diagnostics = architecture_power_requirement_diagnostics(upstream, candidate)
+    diagnostics.extend(_architecture_bound_load_budget(upstream, candidate, brief))
+    diagnostics.extend(_speaker_architecture_diagnostics(brief, upstream, candidate))
     diagnostics.extend(architecture_conversion_output_diagnostics(upstream, candidate))
     diagnostics.extend(_architecture_supply_over_rating(candidate))
     diagnostics.extend(_architecture_motor_clamp_standoff(candidate))
@@ -4186,7 +4923,7 @@ def diagnose_stage(
     elif stage == "functional_spec":
         findings = _functional_spec(brief, upstream_state, candidate)
     elif stage == "architecture":
-        findings = _architecture(upstream_state, candidate)
+        findings = _architecture(upstream_state, candidate, brief)
     elif stage == "bom":
         findings = _bom(upstream_state, candidate)
     elif stage == "wiring":

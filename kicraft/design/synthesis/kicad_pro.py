@@ -15,8 +15,10 @@ from pathlib import Path
 
 from kicraft.autoplacer.fab_profile import (
     NETCLASS_CLEARANCE_MM,
+    TWO_OUNCE_HOLE_GAP_MM,
     fab_floors,
     fanout_via,
+    requires_two_ounce,
 )
 
 from ..models import Architecture
@@ -108,16 +110,30 @@ def write_kicad_pro(
     project_dir: Path,
     project_stem: str,
     architecture: Architecture,
+    routing_power_nets: set[str] | None = None,
+    *,
+    fab_config: dict | None = None,
 ) -> Path:
     """Write `<project_stem>.kicad_pro` to project_dir. Returns the path."""
     out = project_dir / f"{project_stem}.kicad_pro"
     netclass_patterns = [
-        {"netclass": "Power", "pattern": net} for net in architecture.power_nets
+        {"netclass": "Power", "pattern": net}
+        for net in sorted(set(architecture.power_nets) | (routing_power_nets or set()))
     ]
+    rules = dict(DEFAULT_RULES)
+    classes = [dict(DEFAULT_NETCLASS), dict(POWER_NETCLASS)]
+    if requires_two_ounce(fab_config):
+        floors = fab_floors(fab_config)
+        rules["min_track_width"] = max(rules["min_track_width"], floors["track_mm"])
+        rules["min_clearance"] = max(rules["min_clearance"], floors["clearance_mm"])
+        rules["min_hole_to_hole"] = max(rules["min_hole_to_hole"], TWO_OUNCE_HOLE_GAP_MM)
+        for netclass in classes:
+            netclass["clearance"] = max(netclass["clearance"], floors["clearance_mm"])
+            netclass["track_width"] = max(netclass["track_width"], floors["track_mm"])
     body = {
         "board": {
             "design_settings": {
-                "rules": dict(DEFAULT_RULES),
+                "rules": rules,
                 "meta": {"version": 2},
                 "track_widths": [0.0, 0.2, 0.5],
                 "via_dimensions": [
@@ -140,7 +156,7 @@ def write_kicad_pro(
         "libraries": {"pinned_footprint_libs": [], "pinned_symbol_libs": []},
         "meta": {"filename": f"{project_stem}.kicad_pro", "version": 1},
         "net_settings": {
-            "classes": [dict(DEFAULT_NETCLASS), dict(POWER_NETCLASS)],
+            "classes": classes,
             "meta": {"version": 3},
             "net_colors": None,
             "netclass_assignments": None,

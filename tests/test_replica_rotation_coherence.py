@@ -288,6 +288,8 @@ def test_greedy_group_prefers_initial_angle_on_ties_and_restores_all_members():
         "BLOCK_A": _synthetic_block("BLOCK_A", dims=dims),
         "BLOCK_B": _synthetic_block("BLOCK_B", dims=dims, donor="BLOCK_A"),
     }
+    for ref, component in comps.items():
+        component.pads = [_pad(ref, "1", component.pos.x + 1, component.pos.y)]
     solver = PlacementSolver(_board(comps), config={}, seed=0)
     solver._pinned_targets = {}
     # Constant score => every candidate ties the initial angle.
@@ -298,6 +300,7 @@ def test_greedy_group_prefers_initial_angle_on_ties_and_restores_all_members():
     for ref in ("BLOCK_A", "BLOCK_B"):
         assert comps[ref].rotation == 0.0
         assert (comps[ref].width_mm, comps[ref].height_mm) == (4.0, 2.0)
+        assert (comps[ref].pads[0].pos.x, comps[ref].pads[0].pos.y) == pytest.approx((21, 20))
 
 
 # ---------------------------------------------------------------------------

@@ -15,7 +15,10 @@ from kicraft.design.models import (
     RecipeOwnershipManifest,
     RecipeSelection,
 )
-from kicraft.design.recipe_versions import legacy_recipe_replacement
+from kicraft.design.recipe_versions import (
+    legacy_recipe_replacement,
+    legacy_recipe_requires_new_architecture,
+)
 
 from .models import (
     RecipeDefinition,
@@ -85,7 +88,10 @@ def recipe_summaries(
             "required_sheet_roles": list(definition.required_sheet_roles),
             "parameter_defaults": definition.parameter_defaults,
             "rated_output_current_a": definition.rated_output_current_a,
+            # Planning allocations at the named load ports, not part ratings.
+            "supply_current_reservations_a": definition.supply_current_reservations_a,
             "allowed_parameters": definition.allowed_parameters,
+            "external_interface_protocols": list(definition.external_interface_protocols),
             "external_ports": [port.model_dump() for port in definition.ports],
             "owned_parts": [
                 {"role": part.role, "quantity": part.quantity, "value": part.value, "mpn": part.mpn}
@@ -168,6 +174,7 @@ def migrate_recipe_selection(value: object) -> RecipeSelection:
     replacement = legacy_recipe_replacement(selection.recipe)
     if replacement is not None and (
         selection.recipe.startswith("drv8833-dual-motor@")
+        or legacy_recipe_requires_new_architecture(selection.recipe)
         or selection.recipe in {
             "tlv62569-3v3@1", "tlv62569-3v3@2",
             "stm32g030f6p6-minimal@1", "stm32g030k6t6-minimal@1",

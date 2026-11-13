@@ -78,9 +78,27 @@ def _replace_courtyard_rect(
          if it.GetLayer() == layer),
         pcbnew.FromMM(0.05),
     )
-    for it in [g for g in footprint.GraphicalItems() if g.GetLayer() == layer]:
-        footprint.Remove(it)
     corners = [(left, top), (right, top), (right, bottom), (left, bottom)]
+    graphics = [g for g in footprint.GraphicalItems() if g.GetLayer() == layer]
+    # Reuse the common four-segment courtyard in place.  Removing library
+    # graphics transfers native ownership across SWIG and can invalidate later
+    # footprint traversal in the importing process.
+    if len(graphics) == 4 and all(isinstance(g, pcbnew.PCB_SHAPE) for g in graphics):
+        for i, seg in enumerate(graphics):
+            seg.SetShape(pcbnew.SHAPE_T_SEGMENT)
+            seg.SetWidth(width)
+            seg.SetStart(pcbnew.VECTOR2I(int(corners[i][0]), int(corners[i][1])))
+            seg.SetEnd(pcbnew.VECTOR2I(int(corners[(i + 1) % 4][0]),
+                                       int(corners[(i + 1) % 4][1])))
+        # Shape setters do not invalidate FOOTPRINT's cached courtyard polygon.
+        # Consumers of GetCourtyard must see the new geometry immediately.
+        footprint.InvalidateGeometryCaches()
+        return
+
+    # Delete() destroys each discarded native item in its container and
+    # invalidates its proxy; Remove() instead transfers ownership to Python.
+    for it in graphics:
+        footprint.Delete(it)
     for i in range(4):
         seg = pcbnew.PCB_SHAPE(footprint)
         seg.SetShape(pcbnew.SHAPE_T_SEGMENT)
@@ -90,6 +108,7 @@ def _replace_courtyard_rect(
         seg.SetEnd(pcbnew.VECTOR2I(int(corners[(i + 1) % 4][0]),
                                    int(corners[(i + 1) % 4][1])))
         footprint.Add(seg)
+    footprint.InvalidateGeometryCaches()
 
 
 def ensure_courtyard_clears_pads(

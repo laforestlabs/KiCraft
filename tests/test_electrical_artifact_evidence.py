@@ -156,7 +156,7 @@ def _buck_artifact(recipes, *, defect=None, equal_feedback=False, input_voltage=
 
 
 def _fixed_buck_artifact(*, branches=1, defect=None):
-    recipes = ["ap63205-5v@1"] + ["ap63203-3v3@1"] * (branches - 1)
+    recipes = ["ap63205-5v@2"] + ["ap63203-3v3@1"] * (branches - 1)
     return _buck_artifact(recipes, defect=defect)
 
 
@@ -300,7 +300,7 @@ def test_rp2040_swd_observer_requires_delivered_recovery_and_core_graph():
 def _usb_bridge_artifact(defect=None):
     specs = [
         (
-            "ap63205-5v@1" if defect == "five_volt_logic" else "ap63203-3v3@1",
+            "ap63205-5v@2" if defect == "five_volt_logic" else "ap63203-3v3@1",
             "power", {"power": "POWER"},
             {"input": "VBUS", "output": "+3V3", "gnd": "GND"},
         ),

@@ -683,7 +683,7 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
         bundle="dc3-2p54-16pas",
         symbol="dc3-2p54-16pas:DC3-2.54-16PAS",
         footprint="dc3-2p54-16pas:IDC-TH_16P-P2.54_C3406",
-        physical_features=frozenset({"pin-header", "idc-connector"}),
+        physical_features=frozenset({"pin-header", "idc-connector", "hub75-connector"}),
         contacts=tuple(str(pin) for pin in range(1, 17)),
         manufacturer_sources=(
             "https://datasheet.lcsc.com/datasheet/pdf/055cf18ba17849eca60ce642d5bb6917.pdf?productCode=C2977594",
@@ -3000,7 +3000,7 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
         },
     ),
     # The fixed-output synchronous bucks the corpus's higher-voltage briefs resolve to
-    # (`ap63203-3v3@1` for 3V3, `ap63205-5v@1` for 5V).  Both are rows of the same Diodes
+    # (`ap63203-3v3@1` for 3V3, `ap63205-5v@2` for 5V).  Both are rows of the same Diodes
     # datasheet and the same TSOT-26 pin table (FB 1, EN 2, VIN 3, GND 4, SW 5, BST 6),
     # and both are catalog parts (C780769 / C2071056), so each order code carries its own
     # record -- neither is inferred from the other, and the 5 V part deliberately does NOT
@@ -3508,17 +3508,23 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
         footprint="ch224k:ESSOP-10_L4.9-W3.9-P1.0-LS6.0-TL-EP",
         physical_features=frozenset({"usb-pd-controller", "voltage-selector"}),
         contacts=("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11"),
-        manufacturer_sources=("https://www.lcsc.com/datasheet/C970725.pdf",),
+        manufacturer_sources=(
+            "https://datasheet.lcsc.com/datasheet/pdf/4f12eebccb4eda2c0038806df0155265.pdf?productCode=C970725",
+            "https://components101.com/sites/default/files/component_datasheet/WCH_CH224K_ENG.pdf",
+        ),
         lcsc="C970725",
-        operating_limits={
-            # §9.38 reads the canonical vin_* keys; the WCH CH224K datasheet
-            # specifies a 4.0-30 V input range (and the CFG table selects the
-            # negotiated 5/9/12/15/20 V request).
-            "vin_min_v": 4.0,
-            "vin_max_v": 30.0,
-            "input_voltage_min_v": 4.0,
-            "input_voltage_max_v": 30.0,
-            "output_power_w": 100.0,
+        # WCH 1F §§2, 7.5: 4–22 V is the external source range,
+        # not the VDD pin range. VDD is a 3.24–3.36 V shunt.
+        operating_limits={"output_power_w": 100.0},
+        support_network={
+            "resistor_fed_shunt": {
+                "supply_pin": "1", "ground_pin": "11", "sense_pin": "8",
+                "source_min_v": 4.0, "source_max_v": 22.0,
+                "shunt_min_v": 3.24, "shunt_max_v": 3.36,
+                "shunt_max_a": 0.030,
+                "feed_ohm": 1000.0, "feed_tolerance": 0.01,
+                "sense_ohm": 10000.0, "bypass_f": 1e-6,
+            },
         },
         port_pins={
             "vdd": "1",
@@ -4474,6 +4480,20 @@ _STANDARD_LIBRARY_PARTS: tuple[ReviewedPart, ...] = (
         lcsc="C2979167",
     ),
     ReviewedPart(
+        identity="usb4085-gf-a",
+        family="usb-c-receptacle",
+        package="GCT USB4085 USB-C right-angle through-hole receptacle",
+        bundle="gct-usb4085",
+        symbol="gct-usb4085:USB4085-GF-A_C7095263",
+        footprint="gct-usb4085:USC-C-SMD_USB4085-GF-A",
+        physical_features=frozenset({"usb-c-receptacle"}),
+        contacts=("A1", "A4", "A5", "A6", "A7", "A8", "A9", "A12",
+                  "B1", "B4", "B5", "B6", "B7", "B8", "B9", "B12", "S1"),
+        manufacturer_sources=("https://media.onzuu.com/static/datasheets/gct/usb4085-gf-a.pdf",),
+        lcsc="C7095263",
+        operating_limits={"voltage_v": 48, "current_a": 5},
+    ),
+    ReviewedPart(
         identity="type-c-31-m-12",
         family="usb-c-receptacle",
         package="16-pin USB-C receptacle with shield retention tabs",
@@ -4747,6 +4767,27 @@ _STANDARD_LIBRARY_PARTS: tuple[ReviewedPart, ...] = (
         # sqrt(P*R) = 8.246 V. The manufacturer's land is not IPC nominal.
         operating_limits={"resistance_ohm": 680.0, "tolerance_fraction": 0.001, "power_w": 0.1, "voltage_v": 8.246},
     ),
+    ReviewedPart(
+        identity="1210w2f1001t5e",
+        family="resistor-1210",
+        package="UNI-ROYAL 1210 thick-film resistor; IPC nominal land",
+        bundle="kicad-standard",
+        symbol="Device:R",
+        footprint="Resistor_SMD:R_1210_3225Metric",
+        physical_features=frozenset({"resistor-1210"}),
+        contacts=("1", "2"),
+        manufacturer_sources=(
+            "https://jlcpcb.com/api/file/downloadByFileSystemAccessId/8586191793700814848",
+            "https://www.lcsc.com/product-detail/C52444.html",
+        ),
+        lcsc="C52444",
+        operating_limits={
+            "resistance_ohm": 1000.0, "tolerance_fraction": 0.01,
+            "power_w": 0.5, "voltage_v": 22.36,
+            "full_power_ambient_max_c": 70.0,
+            "temperature_max_c": 155.0,
+        },
+    ),
     # UNI-ROYAL thick film datasheet pp. 2, 4-5: WA = 0.1 W at
     # 70 C, F = 1%, 0603 body 1.60 x 0.80 mm, and 75 V limiting
     # element voltage. Working voltage is min(75 V, sqrt(P * R)),
@@ -4836,6 +4877,63 @@ _STANDARD_LIBRARY_PARTS: tuple[ReviewedPart, ...] = (
         manufacturer_sources=("https://jlcpcb.com/api/file/downloadByFileSystemAccessId/8758069805239296000",),
         lcsc="C304721",
         operating_limits={"resistance_ohm": 22600.0, "tolerance_fraction": 0.01, "power_w": 0.1, "voltage_v": 47.539},
+    ),
+    # Cjiang FXL0630 common body and lands: datasheet pp. 3-4 specifies
+    # 7.0 x 6.6 mm, 8.4 mm land span, 3.7 mm gap and 3.5 mm width.
+    # The existing carrier has 8.684 mm span, 3.836 mm gap and 3.62 mm
+    # width; its pad positions cover the same terminal areas.
+    ReviewedPart(
+        identity="fxl0630-4r7-m",
+        family="power-inductor",
+        package="Cjiang FXL0630 molded SMD power inductor, 7.0 x 6.6 x 2.8 mm",
+        bundle="inductor-15uh-3a",
+        symbol="Device:L",
+        footprint="inductor-15uh-3a:IND-SMD_L7.0-W6.6_FXL0630",
+        physical_features=frozenset({"power-inductor", "buck-inductor"}),
+        contacts=("1", "2"),
+        manufacturer_sources=("https://xonstorage.z8.web.core.windows.net/pdf/changjiangmicroelectronics_fxl10501r0m_apr22_xonlink.pdf",),
+        lcsc="C167220",
+        operating_limits={
+            "inductance_uh": 4.7, "tolerance_fraction": 0.2,
+            "dc_resistance_ohm": 0.033,
+            "saturation_current_30pct_drop_max_column_a": 7.5,
+            "saturation_current_typ_a": 9.0,
+            "current_20c_rise_max_column_a": 5.5,
+            "rms_current_40c_rise_typ_a": 6.0,
+            "test_ambient_c": 25.0, "part_temperature_max_c": 125.0,
+        },
+    ),
+    ReviewedPart(
+        identity="cl10b104kb8nnnc", family="capacitor-0603",
+        package="Samsung CL 0603 X7R MLCC", bundle="kicad-standard",
+        symbol="Device:C", footprint="Capacitor_SMD:C_0603_1608Metric",
+        physical_features=frozenset({"capacitor-0603"}), contacts=("1", "2"),
+        manufacturer_sources=("https://media.digikey.com/pdf/Data%20Sheets/Samsung%20PDFs/CL10B104KB8NNNC_Spec.pdf",),
+        lcsc="C1591",
+        operating_limits={"capacitance_uf": 0.1, "voltage_v": 50.0,
+                          "tolerance_fraction": 0.1, "dielectric": "X7R"},
+    ),
+    ReviewedPart(
+        identity="cl10b224kb8nnnc", family="capacitor-0603",
+        package="Samsung CL 0603 X7R MLCC", bundle="kicad-standard",
+        symbol="Device:C", footprint="Capacitor_SMD:C_0603_1608Metric",
+        physical_features=frozenset({"capacitor-0603"}), contacts=("1", "2"),
+        manufacturer_sources=("https://pdf.digi-electronics.com/pdf/2211/CL10B224KB8NNNC-datasheet.pdf",),
+        lcsc="C64705",
+        operating_limits={"capacitance_uf": 0.22, "voltage_v": 50.0,
+                          "tolerance_fraction": 0.1, "dielectric": "X7R"},
+    ),
+    ReviewedPart(
+        identity="tps26631rger", family="efuse",
+        package="Texas Instruments RGE 24-pin VQFN, 4 x 4 mm, exposed pad",
+        bundle="tps26631rger", symbol="tps26631rger:TPS26631RGER",
+        footprint="tps26631rger:VQFN-24_L4.0-W4.0-P0.50-BL-EP2.5",
+        physical_features=frozenset({"efuse", "power-path"}),
+        contacts=tuple(str(n) for n in range(1, 26)),
+        manufacturer_sources=("https://www.ti.com/lit/ds/symlink/tps2663.pdf",),
+        lcsc="C1850273",
+        port_pins={"input": "1", "output": "17", "gnd": "8"},
+        operating_limits={"input_voltage_min_v": 4.5, "input_voltage_max_v": 60.0},
     ),
     ReviewedPart(
         identity="fxl0630-150-m",

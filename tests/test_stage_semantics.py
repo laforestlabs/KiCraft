@@ -4265,3 +4265,565 @@ def test_native_drv_motor_tvs_standoff_constrains_architecture_vm(voltage, rejec
                           "exact_part": "DRV8833PWPR", "ports": {"vm": "VM"}}],
     }
     assert bool(_architecture_motor_clamp_standoff(candidate)) is rejected
+
+
+@pytest.mark.parametrize(("brief", "needs_drive"), [
+    ("A controller with a header for driving a speaker", True),
+    ("A passive speaker output", True),
+    ("A line-level output to an externally amplified speaker", False),
+    ("A passive crossover fed by an external amplifier for speakers", False),
+    ("A passive two-way speaker crossover", False),
+    ("A line-level output for a powered speaker", False),
+])
+def test_speaker_drive_contract_preserves_load_intent(brief, needs_drive):
+    bare = {
+        "blocks": [{"name": "SPEAKER_OUTPUT", "category": "drive",
+                    "purpose": "Provide a header output for speaker signaling."}],
+    }
+    functional = {d.code for d in diagnose_stage(
+        "functional_spec", brief=brief, upstream_state={}, candidate=bare
+    )}
+    assert ("functional_spec_passive_speaker_drive_omitted" in functional) == needs_drive
+    architecture = {"requirements": [{
+        "id": "speaker_header", "sheet": "SPEAKER OUTPUT", "role": "connector",
+        "family": "pin-header", "functional_blocks": ["SPEAKER_OUTPUT"],
+    }]}
+    codes = {d.code for d in diagnose_stage(
+        "architecture", brief=brief, upstream_state={}, candidate=architecture
+    )}
+    assert ("architecture_passive_speaker_drive_omitted" in codes) == needs_drive
+
+
+def test_speaker_drive_contract_accepts_reviewed_amplifier():
+    brief = "A controller driving a speaker"
+    functional = {"blocks": [{"name": "SPEAKER_OUTPUT", "category": "drive",
+                                "purpose": "Drive a passive speaker."}]}
+    assert "functional_spec_passive_speaker_drive_omitted" not in {
+        d.code for d in diagnose_stage("functional_spec", brief=brief,
+                                       upstream_state={}, candidate=functional)
+    }
+    architecture = {"requirements": [{
+        "id": "speaker", "sheet": "SPEAKER OUTPUT", "role": "driver",
+        "family": "pwm-passive-speaker-driver",
+    }]}
+    assert "architecture_passive_speaker_drive_omitted" not in {
+        d.code for d in diagnose_stage("architecture", brief=brief,
+                                       upstream_state={}, candidate=architecture)
+    }
+
+
+@pytest.mark.parametrize(("brief", "unsupported"), [
+    ("Drive a 4 ohm speaker", True),
+    ("Drive a 4-ohm speaker", True),
+    ("Drive a speaker, 4 ohms", True),
+    ("Drive a speaker rated 8 ohms and 0.5 W", True),
+    ("Drive a speaker rated 8 ohms and 2 W", False),
+    ("Use a 4 ohm resistor and drive an 8 ohm speaker", False),
+    ("Drive a speaker with unspecified impedance", False),
+])
+def test_pwm_speaker_recipe_does_not_substitute_explicit_load(brief, unsupported):
+    candidate = {"requirements": [{
+        "id": "speaker", "sheet": "SPEAKER", "role": "driver",
+        "family": "pwm-passive-speaker-driver",
+    }]}
+    codes = {d.code for d in diagnose_stage(
+        "architecture", brief=brief, upstream_state={}, candidate=candidate
+    )}
+    assert ("architecture_unsupported_speaker_load" in codes) == unsupported
+
+
+def test_pwm_speaker_recipe_retains_typed_speaker_impedance():
+    candidate = {"requirements": [{
+        "id": "speaker", "sheet": "SPEAKER", "role": "driver",
+        "family": "pwm-passive-speaker-driver",
+    }]}
+    upstream = {"intent": {"obligations": [{
+        "kind": "quantitative", "original_obligation_id": "speaker_impedance",
+        "quantity": "speaker impedance", "relation": "equal", "value": 4, "unit": "ohms",
+    }]}}
+    diagnostics = diagnose_stage(
+        "architecture", brief="Drive a speaker", upstream_state=upstream, candidate=candidate
+    )
+    assert any(row.code == "architecture_unsupported_speaker_load" for row in diagnostics)
+
+
+def _bound_led_budget_candidate(current="0.25 A", *, shared_logic=False):
+    requirements = [
+        {"id": "main", "family": "tps552892-autonomous-5v-buck-boost",
+         "ports": {"input": "PD", "output": "+5V"}},
+        {"id": "logic", "family": "ap63203-3v3",
+         "ports": {"input": "+5V" if shared_logic else "PD", "output": "+3V3"}},
+        {"id": "panel", "family": "hub75-level-shift-interface",
+         "ports": {"vdd_5v": "+5V"}},
+        {"id": "strip", "family": "ws2812-external-strip-header",
+         "ports": {"vdd_5v": "+5V"}},
+        {"id": "speaker", "family": "pwm-passive-speaker-driver",
+         "ports": {"vdd": "+5V"}},
+    ]
+    return {
+        "rail_voltages": {"PD": 9.0, "+5V": 5.0, "+3V3": 3.3},
+        "requirements": requirements,
+        "recipe_resolution": [
+            {"requirement_id": identifier, "recipe": recipe}
+            for identifier, recipe in (
+                ("main", "tps552892-5v-2a@1"), ("logic", "ap63203-3v3@1"),
+                ("panel", "hub75-sn74hct245-interface@2"),
+                ("strip", "ws2812-external-strip-header-interface@1"),
+                ("speaker", "pam8302a-pwm-speaker@1"),
+            )
+        ],
+        "assumptions": [
+            "HUB75 display is externally powered and draws 2.5 A.",
+            f"External addressable LED load current is unspecified; 5 V output is budgeted to {current} maximum (defaulted)",
+            "Speaker is budgeted at 0.6 A at 5 V.",
+        ],
+        "topologies": {"5V_BUCK": "5 V converter supplies 20 A"},
+    }
+
+
+def _bound_budget_diagnostics(candidate, brief=""):
+    return diagnose_stage("architecture", brief=brief, upstream_state={}, candidate=candidate)
+
+
+@pytest.mark.parametrize("shared_logic", [False, True])
+def test_bound_led_output_budget_reserves_onboard_and_downstream_loads(shared_logic):
+    safe = _bound_led_budget_candidate(shared_logic=shared_logic)
+    assert "architecture_5v_converter_has_no_headroom" not in {
+        d.code for d in _bound_budget_diagnostics(safe)
+    }
+    unsafe = _bound_led_budget_candidate("2 A", shared_logic=shared_logic)
+    diagnostics = _bound_budget_diagnostics(unsafe)
+    failure = next(d for d in diagnostics if d.code == "architecture_5v_converter_has_no_headroom")
+    assert "+5V" in failure.message and "main" in failure.message
+    assert "external" in failure.message and "reserve" in failure.message
+
+
+def test_bound_led_budget_rejects_equal_capacity_and_preserves_explicit_load():
+    # 0.1 A panel buffer + 0.02 A strip buffer + 0.6 A speaker = 0.72 A.
+    equal = _bound_led_budget_candidate("1.28 A")
+    assert "architecture_5v_converter_has_no_headroom" in {
+        d.code for d in _bound_budget_diagnostics(equal)
+    }
+    defaulted = _bound_led_budget_candidate()
+    assert "architecture_5v_converter_has_no_headroom" in {
+        d.code for d in _bound_budget_diagnostics(defaulted, "Drive an LED strip drawing 2 A.")
+    }
+    assert "0.25 A" in defaulted["assumptions"][1]
+
+
+def test_bound_led_budget_aggregates_outputs():
+    candidate = _bound_led_budget_candidate()
+    candidate["requirements"].append({
+        "id": "strip_two", "family": "ws2812-external-strip-header",
+        "ports": {"vdd_5v": "+5V"},
+    })
+    candidate["assumptions"] = ["strip draws 0.7 A", "strip_two draws 0.7 A"]
+    assert "architecture_5v_converter_has_no_headroom" in {
+        d.code for d in _bound_budget_diagnostics(candidate)
+    }
+
+
+@pytest.mark.parametrize("statement", [
+    "External addressable LED load current is unspecified.",
+    "LED strip current is between 0.2 A and 1 A.",
+])
+def test_bound_led_budget_requires_unambiguous_current_with_default(statement):
+    candidate = _bound_led_budget_candidate()
+    candidate["assumptions"] = [statement]
+    diagnostic = next(d for d in _bound_budget_diagnostics(candidate)
+                      if d.code == "architecture_external_output_allocation_unspecified")
+    assert "0.25 A" in diagnostic.message
+
+
+@pytest.mark.parametrize("brief", [
+    "Use a 9 V 3 A PD input. Drive a 0.25 A LED strip.",
+    "Use a 9 V 3 A PD input and drive a 0.25 A LED strip.",
+    "Drive a 250 mA LED strip and a panel drawing 2 A.",
+])
+def test_bound_led_budget_binds_currents_to_their_load(brief):
+    candidate = _bound_led_budget_candidate()
+    candidate["assumptions"] = []
+    codes = {d.code for d in _bound_budget_diagnostics(candidate, brief)}
+    assert "architecture_external_output_allocation_unspecified" not in codes
+    assert "architecture_5v_converter_has_no_headroom" not in codes
+
+
+def test_bound_led_budget_does_not_borrow_external_panel_current():
+    candidate = _bound_led_budget_candidate()
+    candidate["assumptions"] = []
+    codes = {d.code for d in _bound_budget_diagnostics(
+        candidate, "Drive an LED strip and an externally powered panel drawing 2 A."
+    )}
+    assert "architecture_external_output_allocation_unspecified" in codes
+    assert "architecture_external_load_current_unspecified" not in codes
+
+
+@pytest.mark.parametrize(("slot", "relation", "value", "unit"), [
+    ("intent", "equal", 2, "A"),
+    ("functional_spec", "maximum", 2000, "mA"),
+    ("intent", "minimum", 2, "A"),
+    ("functional_spec", "range", 2000, "mA"),
+])
+def test_bound_led_budget_preserves_owned_typed_load(slot, relation, value, unit):
+    candidate = _bound_led_budget_candidate()
+    candidate["requirements"][3]["obligation_ids"] = ["led-current"]
+    obligation = {
+        "kind": "quantitative", "original_obligation_id": "led-current",
+        "quantity": "LED string load current", "relation": relation, "unit": unit,
+    }
+    if relation == "range":
+        obligation.update(minimum=500, maximum=value)
+    else:
+        obligation["value"] = value
+    upstream = {slot: {"obligations": [obligation]}}
+    diagnostics = diagnose_stage(
+        "architecture", brief="Drive an LED string drawing two amperes.",
+        upstream_state=upstream, candidate=candidate,
+    )
+    failure = next(d for d in diagnostics if d.code == "architecture_5v_converter_has_no_headroom")
+    assert "claim 2 A" in failure.message
+
+
+def test_bound_led_budget_does_not_take_unowned_typed_load():
+    candidate = _bound_led_budget_candidate()
+    upstream = {"intent": {"obligations": [{
+        "kind": "quantitative", "original_obligation_id": "panel-current",
+        "quantity": "LED panel load current", "relation": "equal", "value": 2, "unit": "A",
+    }]}}
+    diagnostics = diagnose_stage(
+        "architecture", brief="Drive an LED string.", upstream_state=upstream, candidate=candidate,
+    )
+    assert "architecture_5v_converter_has_no_headroom" not in {d.code for d in diagnostics}
+
+
+def test_bound_led_budget_reserves_linear_regulator_input_current():
+    candidate = _bound_led_budget_candidate("0.8 A", shared_logic=True)
+    candidate["requirements"][1]["family"] = "me6211-3v3"
+    candidate["recipe_resolution"][1]["recipe"] = "me6211-3v3@2"
+    failure = next(d for d in _bound_budget_diagnostics(candidate)
+                   if d.code == "architecture_5v_converter_has_no_headroom")
+    assert "reserves total 1.245 A" in failure.message
+
+
+def test_bound_led_budget_reads_restored_requirement_obligations():
+    candidate = _bound_led_budget_candidate()
+    candidate["requirements"][3]["obligations"] = [{
+        "kind": "quantitative", "original_obligation_id": "led-current",
+        "quantity": "load current", "relation": "equal", "value": 2000, "unit": "mA",
+    }]
+    diagnostics = _bound_budget_diagnostics(candidate, "Drive an LED string drawing two amperes.")
+    assert "architecture_5v_converter_has_no_headroom" in {d.code for d in diagnostics}
+
+
+def _selectable_pd_budget_candidate():
+    candidate = _bound_led_budget_candidate()
+    candidate["requirements"][0].update(
+        family="ap63205-5v", exact_part="AP63205WU-7"
+    )
+    candidate["requirements"][1]["exact_part"] = "AP63203WU-7"
+    candidate["recipe_resolution"][0]["recipe"] = "ap63205-5v@2"
+    candidate["requirements"].append({
+        "id": "pd", "role": "power_input", "family": "usb-pd-selectable-trigger",
+        "ports": {"vbus": "PD", "gnd": "GND"},
+    })
+    candidate["recipe_resolution"].append({
+        "requirement_id": "pd", "recipe": "ch224k-pd-selectable@1",
+    })
+    candidate["assumptions"].extend([
+        "PD source 9 V 2 A is the assumed operating allocation.",
+        "Adequate 5 V source availability is required for pre-negotiation startup and fallback; "
+        "5 V fallback does not establish regulated 5 V, and full external-output operation "
+        "requires the negotiated input voltage and adequate source current.",
+    ])
+    return candidate
+
+def test_pd_series_path_propagates_actual_planning_reserve_and_iq():
+    candidate = _selectable_pd_budget_candidate()
+    candidate["rail_voltages"]["PD_RAW"] = 9
+    candidate["requirements"][-1]["ports"]["vbus"] = "PD_RAW"
+    candidate["requirements"].append({
+        "id": "path", "role": "regulator", "family": "tps26631-pd-power-path",
+        "ports": {"input": "PD_RAW", "output": "PD", "gnd": "GND"},
+    })
+    candidate["recipe_resolution"].append({
+        "requirement_id": "path", "recipe": "tps26631-pd-inrush-power-path@1",
+    })
+    candidate["assumptions"][-1] = "The power path is off during 5 V fallback."
+    codes = {d.code for d in _bound_budget_diagnostics(candidate)}
+    assert "architecture_pd_source_allocation_invalid" not in codes
+    assert "architecture_power_path_capacity_insufficient" not in codes
+    assert "architecture_pd_startup_envelope_unspecified" not in codes
+    candidate["assumptions"][-2] = "PD source 9 V 1.19 A is assumed."
+    assert "architecture_pd_source_allocation_invalid" in {
+        d.code for d in _bound_budget_diagnostics(candidate)
+    }
+    candidate["assumptions"][-2] = "PD source 9 V 2 A is assumed."
+    candidate["requirements"].append({
+        "id": "unknown", "family": "unreviewed-load", "ports": {"vdd": "+5V"},
+    })
+    failures = _bound_budget_diagnostics(candidate)
+    assert "architecture_power_path_capacity_insufficient" in {d.code for d in failures}
+
+
+@pytest.mark.parametrize("allocations", [
+    ["strip draws 0.25 A", "strip_two draws 0.25 A"],
+    ["strip draws 0.1 A, strip_two draws 0.7 A"],
+    ["strip draws 0.1 A; budget 0.2 A maximum, strip_two draws 0.7 A"],
+])
+def test_pd_known_parallel_led_branches_are_not_double_counted(allocations):
+    candidate = _selectable_pd_budget_candidate()
+    candidate["rail_voltages"]["PD_RAW"] = 9
+    candidate["requirements"][-1]["ports"]["vbus"] = "PD_RAW"
+    candidate["requirements"].append({
+        "id": "path", "family": "tps26631-pd-power-path",
+        "ports": {"input": "PD_RAW", "output": "PD"},
+    })
+    candidate["recipe_resolution"].append({
+        "requirement_id": "path", "recipe": "tps26631-pd-inrush-power-path@1",
+    })
+    candidate["requirements"].append({
+        "id": "strip_two", "family": "ws2812-external-strip-header",
+        "ports": {"vdd_5v": "+5V"},
+    })
+    candidate["assumptions"] = ["PD source 9 V 2 A is assumed.", *allocations]
+    failures = _bound_budget_diagnostics(candidate)
+    assert "architecture_power_path_capacity_insufficient" not in {d.code for d in failures}
+    codes = {d.code for d in failures}
+    assert "architecture_5v_converter_has_no_headroom" not in codes
+    assert "architecture_external_output_allocation_unspecified" not in codes
+
+
+
+def test_selectable_pd_requires_numeric_source_allocation_and_margin():
+    candidate = _selectable_pd_budget_candidate()
+    codes = {d.code for d in _bound_budget_diagnostics(candidate)}
+    assert "architecture_pd_source_allocation_unspecified" not in codes
+    assert "architecture_pd_source_allocation_invalid" not in codes
+    assert "architecture_pd_startup_envelope_unspecified" not in codes
+    assert "architecture_pd_selectable_supply_exceeds_part_rating" not in codes
+
+    candidate["assumptions"][-2] = "9 V PD source budget assumed adequate for concurrent loads."
+    assert "architecture_pd_source_allocation_unspecified" in {
+        d.code for d in _bound_budget_diagnostics(candidate)
+    }
+    candidate["assumptions"][-2] = "PD source 9 V 1 A is assumed."
+    assert "architecture_pd_source_allocation_invalid" in {
+        d.code for d in _bound_budget_diagnostics(candidate)
+    }
+    candidate["assumptions"][-2] = "PD source 9 V 4 A is assumed."
+    assert "architecture_pd_source_allocation_invalid" in {
+        d.code for d in _bound_budget_diagnostics(candidate)
+    }
+    candidate["assumptions"][-2] = "9 V PD source drives an LED string drawing 2 A."
+    assert "architecture_pd_source_allocation_unspecified" in {
+        d.code for d in _bound_budget_diagnostics(candidate)
+    }
+    candidate["assumptions"][-2] = "PD source 9 V 2 A is assumed."
+    assert "architecture_pd_explicit_source_voltage_mismatch" in {
+        d.code for d in _bound_budget_diagnostics(candidate, "Use a 12 V 2 A PD input.")
+    }
+
+
+def test_selectable_pd_checks_positions_transients_and_startup():
+    candidate = _selectable_pd_budget_candidate()
+    candidate["rail_voltages"]["PD"] = 15
+    assert "architecture_pd_source_voltage_unsupported" in {
+        d.code for d in _bound_budget_diagnostics(candidate)
+    }
+    candidate["rail_voltages"]["PD"] = 9
+    candidate["requirements"].append({
+        "id": "motor", "family": "dual-dc-motor-driver", "exact_part": "DRV8833PWPR",
+        "ports": {"vm": "PD"},
+    })
+    failures = _bound_budget_diagnostics(candidate)
+    failure = next(d for d in failures
+                   if d.code == "architecture_pd_selectable_supply_exceeds_part_rating")
+    assert "22 V" in failure.message and "10.8" in failure.evidence[0]
+    candidate["assumptions"].pop()
+    assert "architecture_pd_startup_envelope_unspecified" in {
+        d.code for d in _bound_budget_diagnostics(candidate)
+    }
+
+
+def test_selectable_pd_preserves_larger_explicit_led_load():
+    candidate = _selectable_pd_budget_candidate()
+    failure = next(d for d in _bound_budget_diagnostics(
+        candidate, "Drive an LED strip drawing 2 A."
+    ) if d.code == "architecture_5v_converter_has_no_headroom")
+    assert "claim 2 A" in failure.message
+
+
+def test_selected_recipe_port_envelope_applies_without_exact_part():
+    candidate = _bound_led_budget_candidate()
+    candidate["requirements"][0]["exact_part"] = None
+    failures = _bound_budget_diagnostics(candidate)
+    failure = next(d for d in failures if d.code == "architecture_supply_outside_recipe_envelope")
+    assert "tps552892-5v-2a@1" in failure.evidence[0]
+    candidate["rail_voltages"]["PD"] = 5.0
+    assert "architecture_supply_outside_recipe_envelope" not in {
+        d.code for d in _bound_budget_diagnostics(candidate)
+    }
+
+
+def test_selected_recipe_port_envelope_reads_typed_power_rails():
+    candidate = _bound_led_budget_candidate()
+    candidate["power"] = {"rails": {
+        name: {"voltage": voltage} for name, voltage in candidate.pop("rail_voltages").items()
+    }}
+    assert "architecture_supply_outside_recipe_envelope" in {
+        d.code for d in _bound_budget_diagnostics(candidate)
+    }
+
+
+def test_selectable_pd_checks_recipe_envelope_without_exact_part():
+    candidate = _selectable_pd_budget_candidate()
+    candidate["requirements"][0].update(
+        family="tps552892-autonomous-5v-buck-boost", exact_part=None
+    )
+    candidate["recipe_resolution"][0]["recipe"] = "tps552892-5v-2a@1"
+    assert "architecture_pd_selectable_supply_exceeds_recipe_envelope" in {
+        d.code for d in _bound_budget_diagnostics(candidate)
+    }
+    candidate["requirements"][0].update(family="ap63205-5v", exact_part=None)
+    candidate["recipe_resolution"][0]["recipe"] = "ap63205-5v@2"
+    assert "architecture_pd_selectable_supply_exceeds_recipe_envelope" not in {
+        d.code for d in _bound_budget_diagnostics(candidate)
+    }
+
+
+def test_selectable_pd_rejects_unqualified_direct_load():
+    candidate = _selectable_pd_budget_candidate()
+    candidate["requirements"].append({
+        "id": "unknown_load", "family": "unreviewed-load",
+        "ports": {"input": "PD"},
+    })
+    failures = [d for d in _bound_budget_diagnostics(candidate)
+                if d.code == "architecture_pd_selectable_supply_unqualified"]
+    assert any("unknown_load" in evidence for d in failures for evidence in d.evidence)
+
+
+def _two_pd_sources(aux_voltage=12):
+    return {
+        "rail_voltages": {"PD_MAIN": 9, "PD_AUX": aux_voltage},
+        "requirements": [
+            {"id": "main_source", "family": "usb-pd-selectable-trigger",
+             "ports": {"vbus": "PD_MAIN"}},
+            {"id": "aux_source", "family": "usb-pd-selectable-trigger",
+             "ports": {"vbus": "PD_AUX"}},
+        ],
+        "recipe_resolution": [
+            {"requirement_id": source, "recipe": "ch224k-pd-selectable@1"}
+            for source in ("main_source", "aux_source")
+        ],
+        "assumptions": [
+            "PD source PD_MAIN 9 V 2 A is assumed.",
+            f"PD source PD_AUX {aux_voltage} V 2 A is assumed.",
+        ],
+    }
+
+
+def test_multiple_pd_sources_bind_profiles_and_explicit_conflicts_to_owner():
+    candidate = _two_pd_sources()
+    brief = "PD input PD_MAIN 9 V 2 A. PD input PD_AUX 12 V 2 A."
+    codes = {d.code for d in _bound_budget_diagnostics(candidate, brief)}
+    assert "architecture_pd_explicit_source_voltage_mismatch" not in codes
+    assert "architecture_pd_source_allocation_unspecified" not in codes
+    assert "architecture_pd_source_allocation_invalid" not in codes
+    failures = _bound_budget_diagnostics(candidate, "PD input PD_AUX 20 V 2 A.")
+    mismatch = [d for d in failures if d.code == "architecture_pd_explicit_source_voltage_mismatch"]
+    assert len(mismatch) == 1 and "PD_AUX" in mismatch[0].message
+    candidate["assumptions"].pop()
+    candidate["rail_voltages"]["PD_AUX"] = 9
+    failures = _bound_budget_diagnostics(candidate)
+    missing = [d for d in failures if d.code == "architecture_pd_source_allocation_unspecified"]
+    assert len(missing) == 1 and "PD_AUX" in missing[0].message
+    candidate["assumptions"] = ["PD source 9 V 2 A is assumed."]
+    missing = [d for d in _bound_budget_diagnostics(candidate)
+               if d.code == "architecture_pd_source_allocation_unspecified"]
+    assert len(missing) == 2
+
+
+def test_multiple_pd_sources_do_not_share_startup_disclosure():
+    candidate = _two_pd_sources()
+    candidate["requirements"].extend([
+        {"id": "buck_main", "family": "ap63205-5v",
+         "ports": {"input": "PD_MAIN", "output": "OUT_MAIN"}},
+        {"id": "buck_aux", "family": "ap63205-5v",
+         "ports": {"input": "PD_AUX", "output": "OUT_AUX"}},
+    ])
+    candidate["rail_voltages"].update(OUT_MAIN=5, OUT_AUX=5)
+    candidate["assumptions"].append(
+        "PD_MAIN has adequate 5 V source availability for pre-negotiation startup and fallback; "
+        "5 V fallback does not establish regulated 5 V, and full external-output operation "
+        "requires the negotiated input voltage and adequate source current."
+    )
+    failures = [d for d in _bound_budget_diagnostics(candidate)
+                if d.code == "architecture_pd_startup_envelope_unspecified"]
+    assert len(failures) == 1
+    assert [value.casefold() for value in failures[0].evidence] == ["pd_aux"]
+
+
+@pytest.mark.parametrize(("recipe", "family", "allocation", "accepted"), [
+    ("ch224k-pd-trigger@2", "usb-pd-fixed-trigger", 1.20, False),
+    ("ch224k-pd-trigger@2", "usb-pd-fixed-trigger", 1.21, True),
+    ("ch224k-pd-selectable@1", "usb-pd-selectable-trigger", 1.21, False),
+    ("ch224k-pd-selectable@1", "usb-pd-selectable-trigger", 1.23, True),
+])
+def test_pd_source_margin_includes_controller_vdd_feed(recipe, family, allocation, accepted):
+    candidate = _selectable_pd_budget_candidate()
+    candidate["rail_voltages"]["PD_RAW"] = 9
+    candidate["requirements"][-1].update(
+        family=family, ports={"vbus": "PD_RAW", "gnd": "GND"},
+    )
+    candidate["recipe_resolution"][-1]["recipe"] = recipe
+    candidate["requirements"].append({
+        "id": "path", "family": "tps26631-pd-power-path",
+        "ports": {"input": "PD_RAW", "output": "PD", "gnd": "GND"},
+    })
+    candidate["recipe_resolution"].append({
+        "requirement_id": "path", "recipe": "tps26631-pd-inrush-power-path@1",
+    })
+    candidate["assumptions"][-2] = f"PD source 9 V {allocation} A is assumed."
+    codes = {d.code for d in _bound_budget_diagnostics(candidate)}
+    assert ("architecture_pd_source_allocation_invalid" not in codes) is accepted
+
+
+@pytest.mark.parametrize(("allocation", "accepted"), [(0.1, False), (2.0, True)])
+def test_converter_before_another_series_path_retains_downstream_load(allocation, accepted):
+    rows = [
+        ("pd", "usb-pd-selectable-trigger", "ch224k-pd-selectable@1", {"vbus": "RAW"}),
+        ("entry", "tps26631-pd-power-path", "tps26631-pd-inrush-power-path@1",
+         {"input": "RAW", "output": "PROTECTED"}),
+        ("reg12", "tps54331-12v", "tps54331-12v-1a@2",
+         {"input": "PROTECTED", "output": "12V"}),
+        ("second", "tps26631-pd-power-path", "tps26631-pd-inrush-power-path@1",
+         {"input": "12V", "output": "12V_GATED"}),
+        ("reg3", "ap63203-3v3", "ap63203-3v3@1",
+         {"input": "12V_GATED", "output": "+3V3"}),
+        ("mcu", "unreviewed-logic", None, {"vdd": "+3V3"}),
+    ]
+    candidate = {
+        "rail_voltages": {"RAW": 20.0, "PROTECTED": 20.0, "12V": 12.0,
+                          "12V_GATED": 12.0, "+3V3": 3.3},
+        "requirements": [{"id": identifier, "family": family, "ports": ports}
+                         for identifier, family, recipe, ports in rows],
+        "recipe_resolution": [{"requirement_id": identifier, "recipe": recipe}
+                              for identifier, family, recipe, ports in rows if recipe],
+        "assumptions": [f"PD source 20 V {allocation} A is assumed."],
+    }
+    codes = {d.code for d in _bound_budget_diagnostics(candidate)}
+    assert ("architecture_pd_source_allocation_invalid" not in codes) is accepted
+
+
+def test_led_budget_does_not_borrow_total_rail_capacity_across_semicolon():
+    candidate = _selectable_pd_budget_candidate()
+    candidate["assumptions"] = [
+        "The 5 V output supports up to 2 A total; allocate 0.25 A maximum to the external "
+        "addressable LED string, 0.6 A to the speaker amplifier, and reserve interface "
+        "and regulator loads within the remaining budget.",
+        "PD source 9 V 2 A is assumed.",
+        "5 V pre-negotiation availability is adequate; full operation needs negotiated voltage.",
+    ]
+    codes = {d.code for d in _bound_budget_diagnostics(candidate)}
+    assert "architecture_external_output_allocation_unspecified" not in codes
+    assert "architecture_5v_converter_has_no_headroom" not in codes

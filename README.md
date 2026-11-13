@@ -672,6 +672,83 @@ from the command line.
 - `inspect-subcircuits` — Inspect subcircuit hierarchy
 - `inspect-solved-subcircuits` — Inspect solved subcircuit artifacts
 
+## PD-powered display and speaker constructions
+
+Native-USB ESP32-S3 boards retain a physical programming path and the exact
+selected memory variant. A separate programming socket has a host-only 5 V VBUS
+domain; it is not tied to the negotiated PD rail or the board's 5 V output.
+The MCU owns its USB series pair when the socket's pair is disabled.
+
+`hub75-sn74hct245-interface@2` buffers all thirteen HUB75 control channels and
+defaults its outputs off through an MCU-controlled open-collector enable.
+Panel OE is pulled high while disabled; MCU-facing channels have pulldowns.
+Configure RGB, address, clock, latch and OE before asserting enable. The
+compiler selects a reset-compatible GPIO, not an unqualified reset pull-up.
+The panel's LED supply is external by default, separate from interface power.
+
+For an unspecified addressable-string header, the reviewed construction uses
+WS2812-compatible buffered data and a three-pin header, not a screw terminal.
+The maximum supported external-string allocation defaults to 0.25 A. Explicit
+user loads are retained. Concurrent rail budgeting also includes these
+conservative planning reserves, which are not measured consumption:
+
+| Circuit | Supply | Reserve |
+| --- | --- | --- |
+| Passive-speaker amplifier | 5 V | 0.6 A |
+| HUB75 control interface, excluding panel LEDs | 5 V | 0.1 A |
+| External-string buffer, excluding the string | 5 V | 0.02 A |
+| Fixed 9 V CH224K feed and sense | Raw VBUS | 0.01 A |
+| Selectable CH224K feed and sense | Raw VBUS | 0.025 A |
+| Controlled TPS26631 path and dividers | Path input | 0.003 A |
+
+Downstream switching converters use an 80% planning efficiency; linear converters
+reserve output current plus a 5% allowance. Behind a controlled series path,
+bounded consumer allocations replace full rated converter output only when every
+consumer is covered. Unknown loads and downstream series-path consumers retain
+the full converter rating until their complete loads are accounted for. Source and
+path allocations must both retain positive headroom, including a 5% input-voltage
+allowance; a regulator's capacity is not an external load budget.
+The 80% figure is an input-power planning allowance, not a guaranteed conversion
+efficiency or a thermal qualification. Estimate device losses separately against
+the actual copper, ambient temperature and manufacturer thermal reference.
+
+The PD input uses `tps26631-pd-inrush-power-path@1` to keep downstream bulk and
+regulators off the initial 5 V VBUS. Its reviewed 8–22 V operating circuit provides
+hardware UVLO, controlled cold-start slew and PGOOD-controlled AP6320x enables.
+The 9 kΩ limit setting supports a conservative 1.8 A continuous path allocation;
+fault pulses can exceed that allocation. Raw USB capacitance must remain below
+10 µF including tolerances, and downstream input-equivalent capacitance is limited
+to 250 µF. No external blocking FET is fitted: never backfeed the protected rail.
+These are calculated circuit constraints, not measured startup or thermal results.
+
+PD assumptions state a numerical source contract, pre-negotiation availability
+and fallback limits. A 5 V buck does not promise regulated 5 V from a 5 V fallback
+input. Nominal and selectable/transient voltages propagate through a controlled
+series path only when its complete actual support and pin graph are proven.
+
+`pam8302a-pwm-speaker@1` provides filtered PWM audio and a bridge-driven header
+for a default 8 ohm speaker rated at least 2 W. Neither speaker contact is ground.
+The 2 W figure is the speaker's rating, not delivered audio power. Follow the
+construction's PWM, lead-length, load and thermal constraints; CAD checks are
+not powered-hardware measurements.
+Module supply bypasses and the PAM8302A's local/bulk supply capacitors carry
+canonical owned-pin placement contracts: supply terminals stay within 3 mm of
+the actual supply pad. Capacitor grounds and the construction's actual ground
+reference must share native filled copper or locally bonded vias within 3 mm;
+a nearby same-net via is insufficient. This accommodates real package and RF
+edge geometry without placing capacitors inside an IC footprint. These are
+engineering locality bounds, not powered stability, audio or RF qualification.
+
+An absent entry in the JLC assembly snapshot does not prove a library part is
+fabricated. A fallback must match both its exact LCSC code and ordering code
+against the live distributor. Assembly stock remains unverified, never copied
+from retail inventory; unavailable or mismatched identity evidence still fails.
+Known non-passive stockouts retain the existing explicit warning/substitution
+policy. Assembled chip resistor/capacitor procurement remains strict.
+The audit uses the same explicit procurement-code parser as BOM export; a C-number
+embedded in a symbol or footprint name is not a selected part. Unpinned library
+parts are checked against their owning manifest instead.
+
 ## ESP32 ROM-UART constructions
 
 `esp32-s3-mini-1u-n4r2-uart-minimal@1` and
@@ -923,6 +1000,9 @@ Derived BOMs carrying obsolete ownership must be regenerated upstream.
 Changing their recipe labels is not a migration of the electrical graph.
 Saved ME6211, MCP1700 and AMS1117 `@1` graphs likewise require architecture
 regeneration against their `@2` input/output support contracts, not BOM relabeling.
+HUB75 `@1` requires architecture regeneration for its new enable GPIO, including
+ownership-only saved states. Fixed CH224K `@1` resolves to the corrected `@2`
+construction; the old derived BOM must still be regenerated, never relabelled.
 
 Provider admission reserves conservative full-request exposure before dispatch.
 Verified receipt cost is billed spend; failed, cancelled or missing-cost responses

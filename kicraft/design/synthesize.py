@@ -362,8 +362,6 @@ def run(
                 if lib_path.exists():
                     leaves.append(lib_path)
 
-    pro = write_kicad_pro(project_dir, state.project_stem, state.architecture)
-    record_written(pro)
     ap = write_autoplacer_json(
         project_dir,
         state.project_stem,
@@ -376,6 +374,13 @@ def run(
         intent=state.intent,
     )
     record_written(ap)
+    physical_cfg = json.loads(ap.read_text())
+    routing_power_nets = set(physical_cfg["power_nets"])
+    pro = write_kicad_pro(
+        project_dir, state.project_stem, state.architecture, routing_power_nets,
+        fab_config=physical_cfg,
+    )
+    record_written(pro)
     # Build the artifact record BEFORE the PCB stub — the schematic files
     # exist on disk regardless of whether the stub or the §9 checks pass —
     # so any failure below can still report what was written
@@ -404,6 +409,11 @@ def run(
             artifacts=artifacts.model_copy(update={"status": "failed"}),
             results=[failure],
         ) from exc
+    from kicraft.autoplacer.fab_profile import requires_two_ounce, require_two_ounce_project_rules
+    if requires_two_ounce(physical_cfg):
+        from kicraft.pcb_layers import set_two_ounce_outer_stackup
+        set_two_ounce_outer_stackup(pcb)
+        require_two_ounce_project_rules(pro, physical_cfg)
     record_written(pcb)
     staged_models = stage_3d_models(
         project_dir, state.bom, owned_files=owned_files, on_written=record_written

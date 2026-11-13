@@ -2503,6 +2503,11 @@ def under_rated_capacitors(architecture, bom, nets=None) -> list[tuple[object, s
 
     if nets is None:
         nets = _nets_by_ref(bom)
+    voltages = dict(getattr(architecture, "rail_voltages", {}) or {})
+    if getattr(bom, "recipe_ownership", ()):
+        info, _ = _pin_info_by_ref(bom)
+        _, peaks = _recipe_supply_voltage_analysis(architecture, bom, info, nets, voltages)
+        voltages.update(peaks)
     ratings: dict[str, float | None] = {}
     under: list[tuple[object, str, float, float | None]] = []
     for part in bom.parts:
@@ -2513,8 +2518,8 @@ def under_rated_capacitors(architecture, bom, nets=None) -> list[tuple[object, s
             continue
         try:
             stress = abs(
-                float(architecture.rail_voltages[pair[0]])
-                - float(architecture.rail_voltages[pair[1]])
+                float(voltages[pair[0]])
+                - float(voltages[pair[1]])
             )
         except (KeyError, TypeError, ValueError):
             continue  # AC/signal stress is not proved by a DC rail declaration.
@@ -2616,6 +2621,49 @@ def _reviewed_enable_defects(architecture, part, fact, bom, info, nets) -> list[
     ]
 
 
+def _recipe_requirement_context(architecture, bom, manifest):
+    """Use the actual architecture owner, or the expansion's immutable pin context."""
+    from types import SimpleNamespace
+
+    for requirement in getattr(architecture, "requirements", ()) or ():
+        if requirement.id in manifest.requirement_ids:
+            return requirement
+    owned = [part for part in bom.parts if part.ref in manifest.refs]
+    return SimpleNamespace(
+        id=next(iter(manifest.requirement_ids), manifest.instance),
+        sheet=owned[0].sheet if owned else "",
+        ports=manifest.port_bindings, parameters={},
+    )
+
+
+def _qualified_recipe_pass_through_pairs(architecture, bom) -> tuple[list[tuple[str, str]], list[str]]:
+    """A controlled series path preserves nominal voltage only after full pin proof."""
+    from kicraft.design.recipes import get_recipe
+
+    pairs, bad = [], []
+    for manifest in getattr(bom, "recipe_ownership", ()) or ():
+        try:
+            definition = get_recipe(manifest.recipe)
+        except (KeyError, ValueError):
+            continue
+        if not definition.pass_through:
+            continue
+        source = manifest.port_bindings.get("input")
+        target = manifest.port_bindings.get("output")
+        requirement = _recipe_requirement_context(architecture, bom, manifest)
+        if (not source or not target or source == target
+                or not _has_trusted_recipe_topology_witness(
+                    requirement, bom, None, manifest=manifest,
+                )):
+            bad.append(
+                f"E_POWER_PATH_UNPROVEN {manifest.instance}: controlled input-to-output "
+                "path lacks its actual qualified support and pin graph"
+            )
+            continue
+        pairs.append((source, target))
+    return pairs, bad
+
+
 def _reviewed_pass_through_rails(architecture, bom, info, nets) -> tuple[dict, list[str]]:
     """Infer nominal on-state rails only across explicitly reviewed non-converting paths.
 
@@ -2624,6 +2672,10 @@ def _reviewed_pass_through_rails(architecture, bom, info, nets) -> tuple[dict, l
     """
     rails = dict(architecture.rail_voltages)
     graph: dict[str, set[str]] = defaultdict(set)
+    pairs, errors = _qualified_recipe_pass_through_pairs(architecture, bom)
+    for source, target in pairs:
+        graph[source].add(target)
+        graph[target].add(source)
     for part in bom.parts:
         fact = _reviewed_fact_for_part(part)
         transfer = (fact or {}).get("power_transfer") or {}
@@ -2637,7 +2689,6 @@ def _reviewed_pass_through_rails(architecture, bom, info, nets) -> tuple[dict, l
         if source and target and source != target:
             graph[source].add(target)
             graph[target].add(source)
-    errors: list[str] = []
     remaining = set(graph)
     while remaining:
         pending = [min(remaining)]
@@ -2669,12 +2720,192 @@ def _reviewed_pass_through_rails(architecture, bom, info, nets) -> tuple[dict, l
     return rails, errors
 
 
+def _reviewed_resistor_fed_shunt_defects(part, fact, bom, nets, rails) -> list[str]:
+    """Qualify a reviewed shunt using its actual series feed and local bypass.
+
+    The source rail is not the IC's supply pin. Only the documented unloaded
+    shunt topology is supported; other loads would invalidate the current proof.
+    """
+    spec = (fact.get("support_network") or {}).get("resistor_fed_shunt")
+    if not isinstance(spec, dict):
+        return []
+    def fail(reason):
+        return [f"E_SHUNT_SUPPLY {part.ref}: {reason}"]
+
+    pins = nets.get(part.ref) or {}
+    vdd = pins.get(str(spec["supply_pin"]))
+    ground = pins.get(str(spec["ground_pin"]))
+    sense = pins.get(str(spec["sense_pin"]))
+    if not vdd or not ground or not sense or len({vdd, ground, sense}) != 3:
+        return fail("supply, ground and sense require distinct connected nets")
+    if str(ground).upper() not in _GND_NET_NAMES:
+        return fail("shunt return is not a known ground net")
+    resistors = [p for p in bom.parts if _ref_prefix(p.ref) == "R"
+                 and getattr(p, "symbol", "") == "Device:R"]
+    feeds = [p for p in resistors if vdd in (_two_terminal_part_nets(p, nets) or ())]
+    if len(feeds) != 1:
+        return fail("requires exactly one two-terminal VDD feed resistor")
+    feed = feeds[0]
+    ends = _two_terminal_part_nets(feed, nets)
+    source = ends[0] if ends[1] == vdd else ends[1]
+    voltage = _fact_number(rails, source)
+    if voltage is None or not spec["source_min_v"] <= voltage <= spec["source_max_v"]:
+        return fail(f"feed source {source!r} requires a typed {spec['source_min_v']:g}–{spec['source_max_v']:g} V rail")
+    record = _reviewed_identity_for_bom_part(feed)
+    from kicraft.design.synthesis.fab_export import extract_lcsc_pin
+
+    selected = extract_lcsc_pin(getattr(feed, "sourcing_note", None) or "")
+    if record is not None and selected is not None and selected != record.lcsc:
+        return fail("selected feed sourcing identity contradicts its reviewed resistor rating")
+    limits = record.operating_limits if record is not None else {}
+    resistance = _fact_number(limits, "resistance_ohm")
+    tolerance = _fact_number(limits, "tolerance_fraction")
+    rated_power = _fact_number(limits, "power_w")
+    if (
+        resistance != spec["feed_ohm"] or _resistance_ohms(feed.value) != resistance
+        or tolerance is None or not 0 <= tolerance <= spec["feed_tolerance"]
+        or rated_power is None
+    ):
+        return fail("feed requires an identity-matched resistor with reviewed resistance, tolerance and power")
+    minimum_r = resistance * (1 - tolerance)
+    worst_current = (spec["source_max_v"] - spec["shunt_min_v"]) / minimum_r
+    worst_power = worst_current ** 2 * minimum_r
+    declared_power = re.search(r"(?:^|[\s,])(\d+(?:\.\d+)?)\s*W(?=$|[\s,])", str(feed.value), re.I)
+    if (worst_current > spec["shunt_max_a"] or rated_power < worst_power
+            or (declared_power is not None and float(declared_power.group(1)) < worst_power)):
+        return fail(f"feed worst case {worst_current:.4g} A / {worst_power:.4g} W exceeds its shunt or selected resistor rating")
+    sense_resistors = [p for p in resistors
+                       if set(_two_terminal_part_nets(p, nets) or ()) == {source, sense}
+                       and _resistance_ohms(p.value) == spec["sense_ohm"]]
+    if len(sense_resistors) != 1:
+        return fail("sense pin requires the reviewed resistor to the same source")
+    bypasses = [p for p in bom.parts if _ref_prefix(p.ref) == "C"
+                and str(getattr(p, "symbol", "")).startswith("Device:C")
+                and set(_two_terminal_part_nets(p, nets) or ()) == {vdd, ground}
+                and (cap := _capacitance_farads(p.value)) is not None
+                and cap >= spec["bypass_f"]
+                and (rating := re.search(r"(?:^|[\s,])(\d+(?:\.\d+)?)\s*V(?=$|[\s,])", str(p.value), re.I))
+                and float(rating.group(1)) >= spec["shunt_max_v"]]
+    if len(bypasses) != 1:
+        return fail("requires a rated local bypass capacitor from VDD to ground")
+    allowed = {(part.ref, str(spec["supply_pin"]))}
+    allowed.update((feed.ref, pin) for pin, net in nets[feed.ref].items() if net == vdd)
+    allowed.update((bypasses[0].ref, pin) for pin, net in nets[bypasses[0].ref].items() if net == vdd)
+    if any((ref, pin) not in allowed for ref, pin_nets in nets.items()
+           for pin, net in pin_nets.items() if net == vdd):
+        return fail("additional VDD loads or alternate supply paths are unsupported")
+    sense_allowed = {(part.ref, str(spec["sense_pin"]))}
+    sense_allowed.update((sense_resistors[0].ref, pin)
+                         for pin, net in nets[sense_resistors[0].ref].items() if net == sense)
+    if any((ref, pin) not in sense_allowed for ref, pin_nets in nets.items()
+           for pin, net in pin_nets.items() if net == sense):
+        return fail("additional sense-pin connections are unsupported")
+    return []
+
+
+def _recipe_supply_voltage_analysis(
+    architecture, bom, info, nets, rail_voltages,
+) -> tuple[list[str], dict[str, float]]:
+    """Check qualified circuit ports against actual connected rails, not ownership labels."""
+    from kicraft.design.recipes import get_recipe
+    from types import SimpleNamespace
+
+    manifests = list(getattr(bom, "recipe_ownership", ()) or ())
+    bad = []
+    peak_rails = {}
+    definitions = {}
+    witnesses = {}
+
+    def witness(manifest, definition):
+        key = (manifest.recipe, manifest.instance)
+        if key not in witnesses:
+            req = _recipe_requirement_context(architecture, bom, manifest)
+            witnesses[key] = _has_trusted_recipe_topology_witness(
+                req, bom, None, manifest=manifest,
+            )
+        return witnesses[key]
+
+    for manifest in manifests:
+        try:
+            definition = get_recipe(manifest.recipe)
+        except (KeyError, ValueError):
+            continue  # Unknown/obsolete ownership has its own commit gate.
+        definitions[manifest.recipe] = definition
+        if definition.family not in {"usb-pd-selectable-trigger", "usb-pd-fixed-trigger"}:
+            continue
+        if not witness(manifest, definition):
+            bad.append(f"E_RECIPE_SUPPLY_RANGE {manifest.instance}: PD source graph is unproven")
+            continue
+        options = definition.allowed_parameters.get("voltage_options", ())
+        positions = [
+            float(value) for value in re.findall(r"\d+(?:\.\d+)?", str(options[0]))
+        ] if options else list(definition.allowed_parameters.get("output_voltage", ()))
+        source = manifest.port_bindings.get("vbus")
+        if source and len(positions) > 1:
+            # The qualified selectable construction includes the 20 V position
+            # and its 22 V source envelope. Propagate through proven pass elements.
+            propagated, defects = _reviewed_pass_through_rails(
+                SimpleNamespace(rail_voltages={source: max(positions) * 1.1}),
+                bom, info, nets,
+            )
+            bad.extend(defects)
+            for net, voltage in propagated.items():
+                peak_rails[net] = max(peak_rails.get(net, voltage), voltage)
+
+    qualified_instances = set()
+    for manifest in manifests:
+        definition = definitions.get(manifest.recipe)
+        if definition is None:
+            continue
+        bounded = [port for port in definition.ports if port.supply_voltage_range_v is not None]
+        if not bounded:
+            continue
+        key = (manifest.recipe, manifest.instance)
+        qualified_instances.add(key)
+        if not witness(manifest, definition):
+            bad.append(f"E_RECIPE_SUPPLY_RANGE {manifest.instance}: actual supply graph is unproven")
+            continue
+        for port in bounded:
+            net = manifest.port_bindings.get(port.name)
+            nominal = rail_voltages.get(net)
+            low, high = port.supply_voltage_range_v
+            if nominal is None:
+                bad.append(
+                    f"E_RECIPE_SUPPLY_RANGE {manifest.instance}.{port.name}: "
+                    f"actual supply {net!r} has no typed voltage"
+                )
+                continue
+            for voltage in {nominal, peak_rails.get(net, nominal)}:
+                if not low <= voltage <= high:
+                    bad.append(
+                        f"E_RECIPE_SUPPLY_RANGE {manifest.instance}.{port.name}: "
+                        f"{net!r} reaches {voltage:g} V outside qualified circuit "
+                        f"range {low:g}–{high:g} V"
+                    )
+    for part in bom.parts:
+        recipe = getattr(part, "recipe_id", None)
+        if not recipe:
+            continue
+        try:
+            definition = definitions.get(recipe) or get_recipe(recipe)
+        except (KeyError, ValueError):
+            continue
+        if (any(port.supply_voltage_range_v is not None for port in definition.ports)
+                and (recipe, getattr(part, "recipe_instance", None)) not in qualified_instances):
+            bad.append(f"E_RECIPE_SUPPLY_RANGE {part.ref}: bounded circuit lacks proven ownership")
+    return bad, peak_rails
+
+
 def check_reviewed_input_operating_ranges(architecture, bom) -> CheckResult:
     """§9.38 — compare typed rails with device and selected capacitor ratings."""
     info, _ = _pin_info_by_ref(bom)
     nets = _nets_by_ref(bom)
     rail_voltages, bad = _reviewed_pass_through_rails(architecture, bom, info, nets)
     bad.extend(_catalog_capacitor_voltage_defects(architecture, bom, nets))
+    recipe_bad, peak_rails = _recipe_supply_voltage_analysis(
+        architecture, bom, info, nets, rail_voltages,
+    )
+    bad.extend(recipe_bad)
     # A qualified fixed module also supplies internal recipe nets, which are
     # deliberately absent from architecture rail_voltages.
     for converter in bom.parts:
@@ -2699,6 +2930,7 @@ def check_reviewed_input_operating_ranges(architecture, bom) -> CheckResult:
         if fact is None:
             continue
         bad.extend(_reviewed_enable_defects(architecture, part, fact, bom, info, nets))
+        bad.extend(_reviewed_resistor_fed_shunt_defects(part, fact, bom, nets, rail_voltages))
         limits = fact.get("operating_limits") or {}
         vin = _fact_input_pin_name(fact)
         vin_min = _fact_number(fact, *_INPUT_MIN_KEYS)
@@ -2744,15 +2976,16 @@ def check_reviewed_input_operating_ranges(architecture, bom) -> CheckResult:
             voltage = float(raw_voltage)
         except (TypeError, ValueError):
             voltage = None
+        peak = peak_rails.get(actual_net, voltage)
         if voltage is None:
             bad.append(
                 f"E_INPUT_OPERATING_RANGE {part.ref}.{number}: actual VIN net {actual_net!r} "
                 "has no typed architecture rail_voltages value"
             )
-        elif not vin_min <= voltage <= vin_max:
+        elif voltage < vin_min or max(voltage, peak) > vin_max:
             bad.append(
                 f"E_INPUT_OPERATING_RANGE {part.ref}.{number}: {actual_net!r} is typed "
-                f"{voltage:g}V, outside reviewed {_reviewed_name(fact)!r} {domain} range "
+                f"{voltage:g}V (reviewed peak {peak:g}V), outside reviewed {_reviewed_name(fact)!r} {domain} range "
                 f"{vin_min:g}–{vin_max:g}V"
             )
     return CheckResult(
@@ -3163,6 +3396,32 @@ def _recipe_transfer_pairs(requirement, bom) -> list[tuple[str, str]]:
     return pairs
 
 
+def _independent_receptacle_sources(architecture, bom, pd_requirement) -> set[str]:
+    """Rails physically sourced by a different, fully witnessed input receptacle."""
+    source_recipes = {
+        "usb-c-usb2-device@1": "usb-c-usb2-device",
+        "usb-c-5v-sink@1": "usb-c-power-sink",
+        "usb-c-pd-receptacle@2": "usb-c-pd-receptacle",
+    }
+    sources: set[str] = set()
+    input_key = _requirement_input_key(pd_requirement, bom)
+    pd_input = pd_requirement.ports.get(input_key) if input_key else None
+    for peer in architecture.requirements:
+        if peer is pd_requirement:
+            continue
+        source = peer.ports.get("vbus")
+        if not source or source == pd_input:
+            continue
+        for manifest in getattr(bom, "recipe_ownership", ()) or ():
+            if (source_recipes.get(getattr(manifest, "recipe", None)) != peer.family.casefold()
+                    or (getattr(manifest, "port_bindings", {}) or {}).get("vbus") != source):
+                continue
+            if _has_trusted_recipe_topology_witness(peer, bom, None, manifest=manifest):
+                sources.add(source)
+                break
+    return sources
+
+
 def check_reviewed_power_transfer(architecture, bom) -> CheckResult:
     """§9.39 — conversion obligations require a reviewed input-to-output path."""
     info, _ = _pin_info_by_ref(bom)
@@ -3260,20 +3519,31 @@ def check_reviewed_power_transfer(architecture, bom) -> CheckResult:
             )
         ]
         if is_reviewed_pd:
+            independent_sources = _independent_receptacle_sources(architecture, bom, requirement)
+            # Propagate ownership only over reviewed transfer paths, never
+            # merely because a downstream rail resembles an input's name.
+            independent_rails = set(independent_sources)
+            pending = list(independent_sources)
+            while pending:
+                for neighbor in graph.get(pending.pop(), ()):
+                    if neighbor not in independent_rails:
+                        independent_rails.add(neighbor)
+                        pending.append(neighbor)
             outputs.extend(
                 (f"{peer.id}:{key}", net)
                 for peer in architecture.requirements
                 if peer is not requirement
                 for key, net in peer.ports.items()
-                if net and (_net_looks_power(net) or net == input_net)
+                if net and net not in independent_rails
+                and (_net_looks_power(net) or net == input_net)
             )
-            # A PD controller negotiates a source; it does not create a second
-            # supply.  Every separately declared VBUS/VOUT-like power rail must
-            # therefore have conductor/transfer evidence from its raw VBUS.
+            # Unknown declared rails still need transfer evidence. Independent
+            # input rails and their reviewed descendants have another source.
             outputs.extend(
                 ("declared_power_rail", net)
                 for net in architecture.power_nets
                 if net != input_net
+                and net not in independent_rails
                 and not _net_is_ground(net)
                 and re.search(r"vbus|vout|power", net, re.I)
             )
@@ -3928,17 +4198,15 @@ def _physical_requirement_parts(requirement, bom, reviewed, support_refs: set[st
 def _has_trusted_recipe_topology_witness(
     requirement, bom, component_class: str | None, *, manifest=None
 ) -> bool:
-    """Prove a recipe topology from the committed parts *and* connected pins.
+    """Reconstruct the selected recipe, then prove its exact parts and pin graph.
 
-    Recipe ownership is provenance, not a waiver.  A witness is earned only when the
-    manifest's registered recipe can be reconstructed from exact recipe-owned BOM
-    parts and every pin the definition requires is on its declared net.  This
-    specifically prevents a lone PMOS, a deleted gate-bias resistor, or a source/
-    drain swap from satisfying reverse-polarity protection merely because a recipe
-    label survived normalization.
+    Ownership labels alone are not evidence. Use the registered parameterized
+    expander rather than its base definition: legitimate variants can add,
+    remove, or rewire support parts, but their actual graph must still match.
     """
+    from kicraft.design.models import RecipeSelection
     from kicraft.design.part_identity import lowerer_witnesses_physical_class
-    from kicraft.design.recipes.registry import get_recipe
+    from kicraft.design.recipes.registry import expand_recipe, get_recipe
 
     manifests = [
         row
@@ -3946,99 +4214,90 @@ def _has_trusted_recipe_topology_witness(
                     else getattr(bom, "recipe_ownership", ()) or ())
         if requirement.id in (getattr(row, "requirement_ids", ()) or ())
     ]
-    if not manifests:
-        return False
     nets: dict[tuple[str, str], set[str]] = defaultdict(set)
     for connection in bom.connections:
         for endpoint in connection.endpoints:
             nets[(endpoint.ref, endpoint.pin)].add(connection.net_name)
     no_connects = {(ep.ref, ep.pin) for ep in (getattr(bom, "no_connect_pins", ()) or ())}
+
+    def reference_order(part):
+        return tuple(int(piece) if piece.isdigit() else piece
+                     for piece in re.split(r"(\d+)", str(part.ref)))
+
     for manifest in manifests:
         recipe_id = str(getattr(manifest, "recipe", "") or "")
         if component_class is not None and not lowerer_witnesses_physical_class(
             recipe_id, component_class
         ):
             continue
-        try:
-            definition = get_recipe(recipe_id)
-        except (KeyError, ValueError):
-            continue
-        # A role has no persisted index.  Recipes that repeat a role cannot be
-        # independently reconstructed from the BOM provenance and therefore do
-        # not receive this witness until that evidence exists.
-        roles = [group.role for group in definition.parts]
-        if len(roles) != len(set(roles)):
-            continue
         instance = str(getattr(manifest, "instance", "") or "")
         owned = [
-            part
-            for part in bom.parts
+            part for part in bom.parts
             if getattr(part, "resolution_source", None) == "recipe"
             and getattr(part, "recipe_id", None) == recipe_id
             and getattr(part, "recipe_instance", None) == instance
         ]
         if {part.ref for part in owned} != set(getattr(manifest, "refs", ()) or ()):
             continue
-        parts_by_role: dict[str, list[object]] = defaultdict(list)
-        for part in owned:
-            parts_by_role[str(getattr(part, "recipe_role", "") or "")].append(part)
-        if set(parts_by_role) != set(roles):
+        try:
+            definition = get_recipe(recipe_id)
+            bindings = dict(getattr(manifest, "port_bindings", {}) or {})
+            if any(
+                requirement.ports.get(port.name) not in (None, bindings.get(port.name))
+                for port in definition.ports
+            ):
+                continue
+            canonical = expand_recipe(RecipeSelection(
+                recipe=recipe_id, instance=instance,
+                sheets={role: requirement.sheet for role in definition.required_sheet_roles},
+                parameters={
+                    key: value
+                    for key, value in (getattr(requirement, "parameters", {}) or {}).items()
+                    if key in definition.parameter_defaults
+                },
+                port_bindings=bindings, requirement_ids=[requirement.id],
+                pin_allocations=list(getattr(manifest, "pin_allocations", ()) or ()),
+            ))
+        except (KeyError, ValueError):
             continue
-        for group in definition.parts:
-            members = sorted(parts_by_role[group.role], key=lambda part: str(part.ref))
-            if len(members) != group.quantity or any(
-                member.value != group.value
-                or member.symbol != group.symbol
-                or member.footprint != group.footprint
-                or member.mpn != group.mpn
-                for member in members
+        actual_roles: dict[str, list[object]] = defaultdict(list)
+        expected_roles: dict[str, list[object]] = defaultdict(list)
+        for part in owned:
+            actual_roles[str(getattr(part, "recipe_role", "") or "")].append(part)
+        for part in canonical.parts:
+            expected_roles[part.recipe_role].append(part)
+        if actual_roles.keys() != expected_roles.keys():
+            continue
+        ref_map: dict[str, str] = {}
+        for role, expected_parts in expected_roles.items():
+            actual_parts = sorted(actual_roles[role], key=reference_order)
+            expected_parts = sorted(expected_parts, key=reference_order)
+            if len(actual_parts) != len(expected_parts) or any(
+                any(getattr(actual, field) != getattr(expected, field)
+                    for field in ("value", "symbol", "footprint", "mpn", "sheet"))
+                for actual, expected in zip(actual_parts, expected_parts)
             ):
                 break
+            ref_map.update((expected.ref, actual.ref)
+                           for actual, expected in zip(actual_parts, expected_parts))
         else:
-            refs_by_role = {
-                role: sorted(parts, key=lambda part: str(part.ref))
-                for role, parts in parts_by_role.items()
-            }
-            ports = {port.name: port for port in definition.ports}
-            bindings = dict(getattr(manifest, "port_bindings", {}) or {})
-
-            def expected_net(logical: str) -> str | None:
-                # Parameter-derived nets cannot be proven from a manifest that
-                # does not retain the resolved parameter values.
-                if logical.startswith("@parameter:"):
-                    return None
-                if logical in bindings:
-                    return str(bindings[logical])
-                port = ports.get(logical)
-                if port is not None and port.default_tie:
-                    return str(bindings.get(port.default_tie) or "") or None
-                if logical in definition.internal_nets:
-                    name = definition.recipe.rsplit("@", 1)[0].replace("-", "_")
-                    return f"__KICRAFT_RECIPE__{name}__{instance}__{logical}"
-                return logical
-
-            expected: dict[tuple[str, str], str] = {}
-            for spec in definition.pins:
-                members = refs_by_role.get(spec.role, [])
-                if spec.index >= len(members) or (net := expected_net(spec.net)) is None:
-                    break
-                expected[(members[spec.index].ref, spec.pin)] = net
-            else:
-                owned_pins = {
-                    (str(row.ref), str(row.pin)): row
-                    for row in getattr(manifest, "pins", ()) or ()
-                }
-                if all(
-                    (row := owned_pins.get(key)) is not None
-                    and row.owner == "recipe"
-                    and row.owner_id == recipe_id
-                    and row.requirement_id == requirement.id
-                    and row.net == net
-                    and nets.get(key) == {net}
-                    and key not in no_connects
-                    for key, net in expected.items()
+            owned_pins = {(str(row.ref), str(row.pin)): row
+                          for row in getattr(manifest, "pins", ()) or ()}
+            for expected in canonical.ownership.pins:
+                key = (ref_map[expected.ref], expected.pin)
+                actual = owned_pins.get(key)
+                if (
+                    actual is None or actual.owner != expected.owner
+                    or actual.owner_id != expected.owner_id
+                    or actual.requirement_id != requirement.id
+                    or actual.net != expected.net
+                    or (expected.net is None and (key not in no_connects or key in nets))
+                    or (expected.net is not None
+                        and (nets.get(key) != {expected.net} or key in no_connects))
                 ):
-                    return True
+                    break
+            else:
+                return True
     return False
 
 

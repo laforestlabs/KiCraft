@@ -55,10 +55,11 @@ def build_connectivity_graph(
     """
     active_power_nets = power_nets if power_nets is not None else DEFAULT_POWER_NETS
     g = AdjacencyGraph()
-    for net in nets.values():
+    for net_name in sorted(nets):
+        net = nets[net_name]
         if net.name in ("GND", "/GND"):
             continue
-        refs = list(net.component_refs)
+        refs = sorted(net.component_refs)
         if len(refs) < 2:
             continue
         # Power nets = strong connection, signal nets = weak
@@ -78,11 +79,12 @@ def find_communities(graph: AdjacencyGraph, max_iter: int = 20,
     Returns list of component-ref sets (communities).
     """
     rng = random.Random(seed)
-    labels: dict[str, str] = {n: n for n in graph.nodes}
+    node_order = sorted(graph.nodes)
+    labels: dict[str, str] = {n: n for n in node_order}
 
     for _ in range(max_iter):
         changed = False
-        nodes = list(graph.nodes)
+        nodes = node_order.copy()
         rng.shuffle(nodes)
 
         for node in nodes:
@@ -91,10 +93,10 @@ def find_communities(graph: AdjacencyGraph, max_iter: int = 20,
                 continue
             # Tally weighted votes per label
             votes: dict[str, float] = defaultdict(float)
-            for nbr, w in nbrs.items():
-                votes[labels[nbr]] += w
+            for nbr in sorted(nbrs):
+                votes[labels[nbr]] += nbrs[nbr]
 
-            best_label = max(votes, key=votes.get)
+            best_label = min(votes, key=lambda label: (-votes[label], label))
             if labels[node] != best_label:
                 labels[node] = best_label
                 changed = True
@@ -107,7 +109,7 @@ def find_communities(graph: AdjacencyGraph, max_iter: int = 20,
     for node, label in labels.items():
         communities[label].add(node)
 
-    return [c for c in communities.values() if len(c) >= 1]
+    return [communities[label] for label in sorted(communities)]
 
 
 def minimum_spanning_tree(nodes: list[str],

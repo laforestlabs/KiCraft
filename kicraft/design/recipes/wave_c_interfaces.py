@@ -523,12 +523,13 @@ _HUB75_SIGNALS = (
 _HUB75_GROUND_TIED_SIGNALS = frozenset({"addr_d"})
 _HUB75_GROUND_PINS = (4, 8, 16)
 HUB75_SN74HCT245_INTERFACE = _recipe(
-    recipe="hub75-sn74hct245-interface@1",
+    recipe="hub75-sn74hct245-interface@2",
     family="hub75-level-shift-interface",
     exact="HUB75-SN74HCT245",
     ports=(
         Port(name="vdd_5v", direction="power"),
         Port(name="gnd", direction="power"),
+        Port(name="enable", direction="input", reset_control="external_low"),
         # Semantic channel names, so a model can bind the interface it declared
         # (HUB75_OE, HUB75_CLK, …) by name instead of guessing input0..input11.
         *(
@@ -540,7 +541,9 @@ HUB75_SN74HCT245_INTERFACE = _recipe(
             for name, _pin in _HUB75_SIGNALS
         ),
     ),
-    internal=tuple(f"shifted{i}" for i in range(len(_HUB75_SIGNALS))),
+    internal=tuple(f"shifted{i}" for i in range(len(_HUB75_SIGNALS))) + (
+        "buffer_oe_n", "enable_base",
+    ),
 
     parts=(
         _part(
@@ -561,14 +564,40 @@ HUB75_SN74HCT245_INTERFACE = _recipe(
             mpn="DC3-2.54-16PAS",
         ),
         _passive("decoupling", "C", "100nF", 2),
+        # onsemi SOT-23: B=1, E=2, C=3. LCSC C81464 stocks this exact MPN.
+        _part(
+            "enable_transistor", "Q", "MMBT3904", "Transistor_BJT:MMBT3904",
+            "Package_TO_SOT_SMD:SOT-23", mpn="MMBT3904LT1G",
+            datasheet="https://www.onsemi.com/pdf/datasheet/mmbt3904lt1-d.pdf",
+        ),
+        _passive("enable_base_resistor", "R", "4.7k"),
+        _passive("enable_base_pulldown", "R", "100k"),
+        _passive("buffer_oe_pullup", "R", "10k"),
+        _passive("panel_oe_pullup", "R", "10k"),
+        _passive("input_pulldown", "R", "100k", len(_HUB75_SIGNALS)),
     ),
     pins=(
         *(Pin(role="level_shifter", index=u, pin="20", net="vdd_5v") for u in range(2)),
         *(Pin(role="level_shifter", index=u, pin="10", net="gnd") for u in range(2)),
         *(Pin(role="level_shifter", index=u, pin="1", net="vdd_5v") for u in range(2)),
-        *(Pin(role="level_shifter", index=u, pin="19", net="gnd") for u in range(2)),
+        *(Pin(role="level_shifter", index=u, pin="19", net="buffer_oe_n") for u in range(2)),
         *(Pin(role="decoupling", index=u, pin="1", net="vdd_5v") for u in range(2)),
         *(Pin(role="decoupling", index=u, pin="2", net="gnd") for u in range(2)),
+        Pin(role="enable_transistor", pin="1", net="enable_base"),
+        Pin(role="enable_transistor", pin="2", net="gnd"),
+        Pin(role="enable_transistor", pin="3", net="buffer_oe_n"),
+        Pin(role="enable_base_resistor", pin="1", net="enable"),
+        Pin(role="enable_base_resistor", pin="2", net="enable_base"),
+        Pin(role="enable_base_pulldown", pin="1", net="enable_base"),
+        Pin(role="enable_base_pulldown", pin="2", net="gnd"),
+        Pin(role="buffer_oe_pullup", pin="1", net="vdd_5v"),
+        Pin(role="buffer_oe_pullup", pin="2", net="buffer_oe_n"),
+        Pin(role="panel_oe_pullup", pin="1", net="vdd_5v"),
+        Pin(role="panel_oe_pullup", pin="2", net="shifted12"),
+        *(Pin(role="input_pulldown", index=i, pin="1", net=name)
+          for i, (name, _pin) in enumerate(_HUB75_SIGNALS)),
+        *(Pin(role="input_pulldown", index=i, pin="2", net="gnd")
+          for i in range(len(_HUB75_SIGNALS))),
         *(
             pin
             for i, (name, connector_pin) in enumerate(_HUB75_SIGNALS)
@@ -594,8 +623,46 @@ HUB75_SN74HCT245_INTERFACE = _recipe(
                 "LAT OE) pass through HCT-family 3.3 V to 5 V translation"
             ),
         ),
+        Assertion(
+            code="hub75_reset_disable",
+            message=(
+                "The 5 V pull-up disables both HCT outputs until the 3.3 V enable "
+                "drives the NPN; panel OE is pulled high while disabled. Firmware "
+                "must configure RGB, address, CLK, LAT and panel OE before enable high. "
+                "At 3.3 V the 4.7k base drive is approximately 0.53 mA; the "
+                "10k collector pull-up draws at most 0.55 mA at 5.5 V. HCT VIH is 2 V "
+                "and VIL is 0.8 V at 4.5–5.5 V. No 5 V pull-up reaches an MCU pin."
+            ),
+        ),
     ),
-)
+).model_copy(update={
+    "external_interface_protocols": ("hub75",),
+    "placement_constraints": tuple(
+        Placement(kind="owned_pin_local", role="decoupling", parameters={
+            "anchor_role": "level_shifter", "anchor_index": index, "member_index": index,
+            "owner_pin": "20", "member_pin": "1", "max_mm": 3.0,
+            "max_route_length_mm": 6.0, "min_route_width_mm": 0.2,
+            "plane_owner_pin": "10", "plane_member_pin": "2", "plane_net": "gnd",
+            "max_plane_via_mm": 3.0,
+        }) for index in range(2)
+    ),
+    "source_documents": (
+        Source(
+            url="https://www.ti.com/lit/ds/symlink/sn74hct245.pdf",
+            title="TI SN74HCT245 octal bus transceiver",
+            revision="current", reviewed_date=_DATE,
+            sections=("Recommended operating conditions", "Electrical characteristics", "Function table"),
+        ),
+        Source(
+            url="https://www.onsemi.com/pdf/datasheet/mmbt3904lt1-d.pdf",
+            title="onsemi MMBT3904L NPN transistor",
+            revision="Rev 15", reviewed_date="2026-09-11",
+            sections=("SOT-23: base 1, emitter 2, collector 3", "Electrical characteristics"),
+        ),
+    ),
+    # Controller-side logic allocation only; the panel has its own power budget.
+    "supply_current_reservations_a": {"vdd_5v": 0.1},
+})
 
 WS2812_OUTPUT = _recipe(
     recipe="ws2812-output@1",

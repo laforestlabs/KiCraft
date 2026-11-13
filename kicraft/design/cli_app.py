@@ -470,14 +470,35 @@ def _symbol_footprint_pin_mismatches(bom, project_root: Path) -> list[str]:
     return bad
 
 
-def _unresolved_lcsc(bom, project_root: Path) -> list[str]:
-    """Return BOM parts whose library manifest claims an LCSC that isn't
-    in the offline catalog.
+def _retail_manifest_identity_verified(manifest, part_mpn: str | None = None) -> bool:
+    """Prove a catalog-missing bundle's exact identity, not assembly availability.
 
-    Mirrors the pattern of ``_unresolved_symbols`` / ``_unresolved_footprints``:
-    an empty list means every library-backed LCSC resolves (or the catalog is
-    absent and we can't verify). Catches fabricated C#s smuggled into the
-    parts library without catalog validation.
+    The pruned JLC dump is assembly inventory, not an exhaustive list of real
+    LCSC ordering codes. Only the distributor's matching code AND MPN can
+    establish an absent identity; a stock count, outage or manifest alone cannot.
+    """
+    cid = str((manifest.sourcing or {}).get("lcsc") or "").strip().upper()
+    mpn = str(manifest.mpn or "").strip()
+    if part_mpn and part_mpn.strip().casefold() != mpn.casefold():
+        return False
+    if not cid or not mpn or not lcsc_retail.enabled():
+        return False
+    try:
+        info = lcsc_retail.stock(cid)
+    except lcsc_retail.RetailUnavailable:
+        return False
+    return (
+        str(info.get("product_code") or "").strip().upper() == cid
+        and str(info.get("product_model") or "").strip().casefold() == mpn.casefold()
+    )
+
+
+def _unresolved_lcsc(bom, project_root: Path) -> list[str]:
+    """Return library claims with no catalog or matching distributor identity.
+
+    Existence and stock are separate decisions. A real bundle absent from the
+    assembly snapshot may be verified at its distributor, without inventing
+    JLC assembly inventory; subsequent sourcing checks retain that distinction.
     """
     if not jlcparts.available():
         return []  # can't verify — don't block
@@ -495,10 +516,10 @@ def _unresolved_lcsc(bom, project_root: Path) -> list[str]:
         lcsc = (man.sourcing or {}).get("lcsc")
         if not lcsc:
             continue
-        if not jlcparts.lcsc_exists(lcsc):
+        if not jlcparts.lcsc_exists(lcsc) and not _retail_manifest_identity_verified(man, part.mpn):
             bad.append(
                 f"{part.ref}: library '{lib}' claims LCSC {lcsc} "
-                f"which is not in the offline catalog"
+                f"which has neither an offline catalog entry nor verified distributor identity"
             )
     return bad
 
@@ -567,6 +588,14 @@ def _generic_chip_compatible(part, candidate: dict) -> bool:
             ratings = re.findall(r"(?<![\d.])(\d+(?:\.\d+)?)\s*V\b", description,
                                  re.IGNORECASE)
             if not ratings or max(map(float, ratings)) < float(voltage.group(1)):
+                return False
+        elif power := re.fullmatch(r"(\d+(?:\.\d+)?)(m?W)", token, re.IGNORECASE):
+            needed = float(power.group(1)) * (0.001 if power.group(2).lower() == "mw" else 1.0)
+            ratings = re.findall(r"(?<![\d.])(\d+(?:\.\d+)?)\s*(m?W)\b",
+                                 description, re.IGNORECASE)
+            watts = [float(n) * (0.001 if unit.lower() == "mw" else 1.0)
+                     for n, unit in ratings]
+            if not watts or max(watts) < needed:
                 return False
         elif re.fullmatch(r"X[57]R|C0G|NP0|Y5V", token, re.IGNORECASE):
             if not re.search(r"(?<![A-Za-z0-9])" + re.escape(token)
@@ -969,20 +998,23 @@ def _resolve_bom_mpn_sourcing(
             return
         catalog = hit or {}
         retail = info or {}
+        catalog_mpn = catalog.get("model")
+        if not catalog_mpn and retail.get("product_code") == cid:
+            catalog_mpn = retail.get("product_model")
         manufacturer = catalog.get("brand") or catalog.get("manufacturer")
         if (
             not manufacturer
             and retail.get("product_code") == cid
             and isinstance(retail.get("product_model"), str)
             and retail["product_model"].strip().casefold()
-            == str(catalog.get("model") or "").strip().casefold()
+            == str(catalog_mpn or "").strip().casefold()
         ):
             manufacturer = retail.get("manufacturer")
         receipt.append(
             {
                 "ref": part.ref,
                 "exact_lcsc": cid,
-                "catalog_mpn": (hit or {}).get("model"),
+                "catalog_mpn": catalog_mpn,
                 "manufacturer": manufacturer,
                 "package": (hit or {}).get("package"),
                 "description": (hit or {}).get("description"),
@@ -991,7 +1023,7 @@ def _resolve_bom_mpn_sourcing(
                 "retail_min_buy": (info or {}).get("min_buy"),
                 "retail_status": verdict,
                 "picky_selection": picky,
-                "verdict": "pass" if verdict == "ok" else "unverified",
+                "verdict": "pass" if verdict == "ok" and hit is not None else "unverified",
             }
         )
 
@@ -1146,6 +1178,13 @@ def _resolve_bom_mpn_sourcing(
             # the identity heuristics read stock naming conventions only.
             fp_lib = _lib_prefix(part.footprint or "")
             fp_is_bundle = fp_lib in manifest_by_name
+            bundle_manifest = manifest_by_name.get(fp_lib)
+            verified_missing_bundle = (
+                hit is None
+                and bundle_manifest is not None
+                and str((bundle_manifest.sourcing or {}).get("lcsc") or "").strip().upper() == cid
+                and _retail_manifest_identity_verified(bundle_manifest, part.mpn)
+            )
             if fp_is_bundle:
                 # Bundle-pin equality (KC-9EZE3S appendix): an explicit pin on
                 # a curated bundle that differs from the bundle's own C# is
@@ -1173,7 +1212,7 @@ def _resolve_bom_mpn_sourcing(
                     or (value_token and not chip_value_matches(value_token.split()[0], hit))
                 ):
                     conflict = "the catalog value, package or specified ratings do not match the chip footprint"
-            if hit is None:
+            if hit is None and not verified_missing_bundle:
                 bad.append(
                     f"{part.ref} ({label}): sourcing_note claims LCSC "
                     f"{cid} which is not in the offline catalog; "
@@ -1189,7 +1228,7 @@ def _resolve_bom_mpn_sourcing(
                     f"for: find it with lookup_lcsc_id, or add_part_from_lcsc "
                     f"{cid} and use that bundle's own symbol/footprint ids"
                 )
-            elif (hit.get("stock") or 0) < floor:
+            elif hit is not None and (hit.get("stock") or 0) < floor:
                 _out_of_stock(
                     part,
                     label=label,
@@ -1200,6 +1239,11 @@ def _resolve_bom_mpn_sourcing(
                     ),
                 )
             else:
+                if hit is None:
+                    warnings.append(
+                        f"{part.ref} ({cid}): exact distributor identity verified; "
+                        "not listed in the offline JLC catalog, so assembly stock is unverified"
+                    )
                 verdict, info = _retail_verdict(cid, picky=_assembled_chip_rc(part))
                 if verdict == "dry":
                     _out_of_stock(
@@ -1226,8 +1270,12 @@ def _resolve_bom_mpn_sourcing(
             # stock (both inventories) is gated here.
             cid = str((man.sourcing or {}).get("lcsc")).strip().upper()
             hit = jlcparts.lookup(cid)
-            if hit is None and _assembled_chip_rc(part):
-                bad.append(f"{part.ref}: bundle LCSC {cid} is absent from the offline catalog")
+            if hit is None and (
+                _assembled_chip_rc(part) or not _retail_manifest_identity_verified(man, part.mpn)
+            ):
+                bad.append(
+                    f"{part.ref}: bundle LCSC {cid} has no verified catalog or distributor identity"
+                )
             elif hit is not None and (hit.get("stock") or 0) < floor:
                 _out_of_stock(
                     part,
@@ -1239,6 +1287,11 @@ def _resolve_bom_mpn_sourcing(
                     ),
                 )
             else:
+                if hit is None:
+                    warnings.append(
+                        f"{part.ref} ({cid}): exact distributor identity verified; "
+                        "not listed in the offline JLC catalog, so assembly stock is unverified"
+                    )
                 verdict, info = _retail_verdict(cid, picky=_assembled_chip_rc(part))
                 if verdict == "dry":
                     _out_of_stock(
@@ -1275,10 +1328,10 @@ def _resolve_bom_mpn_sourcing(
             key = (kw, single, part.symbol, part.footprint)
             if key not in best_by_kw:
 
-                def _kw_candidates(term: str) -> list[dict]:
+                def _kw_candidates(term: str, *, limit: int = 10) -> list[dict]:
                     stocked = [
                         c
-                        for c in jlcparts.search(term, limit=10)
+                        for c in jlcparts.search(term, limit=limit)
                         if (c.get("stock") or 0) >= floor
                         and _lcsc_identity_conflict(part, c) is None
                     ]
@@ -1309,6 +1362,17 @@ def _resolve_bom_mpn_sourcing(
                     relaxed = jlcparts.relax_keyword(kw)
                     if relaxed:
                         cands = _kw_candidates(relaxed)
+                if not cands and _assembled_chip_rc(part):
+                    # The catalog's MPN substring search can return only zero-stock
+                    # virtual rows for "10k 0603", preventing its description
+                    # search entirely. A bounded wider class-qualified search
+                    # reaches exact-value rows hidden by substring near-misses
+                    # (e.g. 9k behind 4.99k), without relaxing predicates.
+                    kind = ("resistor" if (part.footprint or "").startswith("Resistor_SMD:")
+                            else "capacitor")
+                    size = re.search(r"_(\d{3,4})(?:_|$)", part.footprint or "")
+                    if size:
+                        cands = _kw_candidates(f"{kw.split()[0]} {size.group(1)} {kind}", limit=100)
                 best = None
                 unv = False
                 for cand in cands[:_RETAIL_WALK_CAP_KW]:
@@ -1490,10 +1554,13 @@ def _unresolved_architecture_parts(architecture, project_root: Path) -> list[str
                 f"architecture references '{name}' but its symbol {sym!r} did not resolve: {e}"
             )
         lcsc = (man.sourcing or {}).get("lcsc")
-        if lcsc and jlcparts.available() and not jlcparts.lcsc_exists(lcsc):
+        if (
+            lcsc and jlcparts.available() and not jlcparts.lcsc_exists(lcsc)
+            and not _retail_manifest_identity_verified(man)
+        ):
             errors.append(
                 f"architecture references '{name}' but its LCSC {lcsc} "
-                f"is not in the offline catalog"
+                f"has neither an offline catalog entry nor verified distributor identity"
             )
     return errors
 
@@ -4664,9 +4731,9 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
         if bad_lcsc:
             failures.append(
                 (
-                    "part library manifest(s) claim an LCSC that is not in "
-                    "the offline parts catalog; re-vendor the part with a "
-                    "valid LCSC or update the manifest",
+                    "part library LCSC identity could not be verified against "
+                    "the offline catalog or its live distributor; check the "
+                    "ordering code and supplier availability",
                     bad_lcsc,
                 )
             )
@@ -5112,9 +5179,9 @@ def _run_layout(
 
     # WS2 wall budgets: a build under a harness watchdog (self-eval) exports
     # KICRAFT_BUILD_MAX_WALL_S so the search self-limits and finalizes a
-    # best-so-far board instead of being SIGKILLed with zero artifacts. Split
-    # across the two phases (leaves dominate) and derive a per-leaf deadline so
-    # one pathological leaf can't consume the whole leaf phase in a single round.
+    # best-so-far board instead of being SIGKILLed with zero artifacts. Leaves
+    # get an initial 65% slice; the parent may use all unused time within the
+    # same combined 95% search budget, leaving 5% for promotion and export.
     try:
         _build_budget_s = float(os.environ.get("KICRAFT_BUILD_MAX_WALL_S", "0") or 0.0)
     except ValueError:
@@ -5123,9 +5190,7 @@ def _run_layout(
     parent_wall_args: list[str] = []
     if _build_budget_s > 0:
         _leaf_budget = _build_budget_s * 0.65
-        _parent_budget = _build_budget_s * 0.30
         leaf_wall_args = ["--max-wall-s", f"{_leaf_budget:.0f}"]
-        parent_wall_args = ["--max-wall-s", f"{_parent_budget:.0f}"]
         # No single leaf may eat more than ~a third of the leaf phase (so >=3
         # leaves get a shot); the floor keeps a normal-speed leaf effectively
         # uncapped. Env-passed so it reaches the solve_subcircuits subprocess.
@@ -5133,6 +5198,7 @@ def _run_layout(
             "KICRAFT_LEAF_SOLVE_MAX_WALL_S", f"{max(180.0, _leaf_budget / 3.0):.0f}"
         )
 
+    _search_started = time.monotonic() if _build_budget_s > 0 else 0.0
     print(
         f"[build]   leaf phase: {preset['leaf_rounds']}x{preset['leaf_attempts']} "
         f"designs/leaf + auto-pin best ..."
@@ -5150,6 +5216,12 @@ def _run_layout(
     )
     if leaf_rc != 0:
         return leaf_rc
+    if _build_budget_s > 0:
+        _remaining = _build_budget_s * 0.95 - (time.monotonic() - _search_started)
+        if _remaining <= 0:
+            print("[build]   search deadline exhausted before parent composition", file=sys.stderr)
+            return 1
+        parent_wall_args = ["--max-wall-s", str(_remaining)]
     print(f"[build]   parent phase: {preset['parent_rounds']} round(s) from pinned leaves ...")
     return _autoexperiment_main(
         common + ["--parents-only", "--rounds", str(preset["parent_rounds"]), *parent_wall_args]
@@ -6905,6 +6977,23 @@ def _shipped_advisory_codes(state) -> list[str]:
     )
 
 
+def _canonical_thermal_for_config(state, config: dict, *, do_fab: bool) -> list[dict]:
+    """Validate persisted thermal data against current recipe and BOM authority."""
+    saved = config.get("thermal_requirements", [])
+    if state is None or state.architecture is None or state.bom is None:
+        if do_fab:
+            raise ValueError("fabrication requires architecture and BOM to verify thermal requirements")
+        return saved
+    from kicraft.design.synthesis.autoplacer import canonical_recipe_thermal_requirements
+
+    canonical = canonical_recipe_thermal_requirements(state.architecture, state.bom)
+    if not isinstance(saved, list) or sorted(
+            json.dumps(row, sort_keys=True) for row in saved
+    ) != sorted(json.dumps(row, sort_keys=True) for row in canonical):
+        raise ValueError("autoplacer thermal requirements differ from current recipes; regenerate synthesis")
+    return canonical
+
+
 def _promote_verify_fab(
     state,
     state_path: Path,
@@ -6916,6 +7005,7 @@ def _promote_verify_fab(
     done_label: str = "BUILD COMPLETE",
     do_fab: bool = True,
     verify_summary_out: dict | None = None,
+    allow_routed: bool = True,
 ) -> int:
     """Steps 3-5 of the build tail: promote the routed parent to the
     project's main PCB, gate it (no shorts, no unconnected), and export
@@ -6961,11 +7051,17 @@ def _promote_verify_fab(
     # "no fresh routed parent" (rc6) and fall through to the inspection preview
     # rather than silently shipping a stale board as fab-ready (the silent-stale
     # class this gate exists to kill).
-    routed_fresh = routed is not None and artifact_paths.produced_by_this_run(
+    routed_fresh = allow_routed and routed is not None and artifact_paths.produced_by_this_run(
         routed, run_id=run_id, run_started_at=run_started_at
     )
     if not routed_fresh:
-        if routed is not None:
+        if routed is not None and not allow_routed:
+            print(
+                f"[build]     ignoring rejected routed parent {routed.name}; "
+                "the parent search did not select a successful round",
+                file=sys.stderr,
+            )
+        elif routed is not None:
             print(
                 f"[build]     ignoring STALE routed parent {routed.name} "
                 f"(not from run {run_id}); this run produced no fresh routed board",
@@ -7031,10 +7127,9 @@ def _promote_verify_fab(
             )
         else:
             print(
-                "error: the layout engine produced no routed parent board -- the "
-                "parent compose/route failed (board not routable as placed). "
-                "Inspect the boards under .experiments/ for what this run "
-                "actually produced.",
+                "error: the layout engine produced no selected routed parent board -- "
+                "parent compose/route failed or no successful round could be pinned. "
+                "Inspect the recorded round diagnostics under .experiments/.",
                 file=sys.stderr,
             )
         if partial is not None and pcb.is_file():
@@ -7097,6 +7192,61 @@ def _promote_verify_fab(
         if state is not None and state.intent is not None and state.bom is not None else None
     )
     gate = _verify_routed_board(pcb, required_same_edge_refs=required_same_edge_refs)
+    # Recheck the promoted native geometry, not the leaf-placement proposal.
+    # A failed/unreadable contract is a fabrication failure, never an advisory.
+    config_path = project_dir / f"{stem}_autoplacer.json"
+    try:
+        config = json.loads(config_path.read_text()) if config_path.is_file() else {}
+        specs = config.get("local_bypasses", [])
+        if state is not None and state.architecture is not None and state.bom is not None:
+            from kicraft.design.synthesis.autoplacer import _recipe_local_bypasses
+            required = _recipe_local_bypasses(state.architecture, state.bom)
+            if any(spec not in specs for spec in required):
+                raise ValueError("autoplacer config lacks current recipe local contracts; regenerate synthesis")
+        thermal_requirements = _canonical_thermal_for_config(state, config, do_fab=do_fab)
+        config["thermal_requirements"] = thermal_requirements
+        from kicraft.pcb_layers import has_two_ounce_outer_stackup
+        heavy_copper = has_two_ounce_outer_stackup(pcb)
+        if thermal_requirements and not heavy_copper:
+            raise ValueError("required 2 oz outer copper stackup is absent")
+        if heavy_copper:
+            from kicraft.autoplacer.fab_profile import fab_floors, require_two_ounce_project_rules
+            from kicraft.autoplacer.routing_board import require_copper_min_width, require_two_ounce_holes
+            physical_cfg = {**config, "thermal_requirements": thermal_requirements or [
+                {"outer_copper_oz": 2.0}
+            ]}
+            require_two_ounce_project_rules(pcb.with_suffix(".kicad_pro"), physical_cfg)
+            require_copper_min_width(pcb, fab_floors(physical_cfg)["track_mm"])
+            require_two_ounce_holes(pcb)
+        if specs or thermal_requirements:
+            import tempfile
+            from kicraft.autoplacer.routing_board import run_pcbnew_script
+            with tempfile.TemporaryDirectory(prefix="kicraft-local-contract-") as tmp:
+                result_path = Path(tmp) / "result.json"
+                script = (
+                    "import json\n"
+                    "from pathlib import Path\n"
+                    "from kicraft.autoplacer.brain.placement_solver import local_contract_violations\n"
+                    "from kicraft.autoplacer.hardware.adapter import KiCadAdapter\n"
+                    "from kicraft.autoplacer.hardware.local_contract import audit_local_copper\n"
+                    f"config = json.loads({json.dumps(config)!r})\n"
+                    f"pcb = {str(pcb)!r}\n"
+                    "adapter = KiCadAdapter(pcb, config)\n"
+                    "errors = local_contract_violations(adapter.load(), config.get('local_bypasses', []))\n"
+                    "errors.extend(audit_local_copper(adapter.board, config.get('local_bypasses', [])))\n"
+                    "if config.get('thermal_requirements'):\n"
+                    "    from kicraft.autoplacer.brain.gnd_pour import audit_thermal_ground\n"
+                    "    audit_thermal_ground(pcb, config['thermal_requirements'])\n"
+                    f"Path({str(result_path)!r}).write_text(json.dumps(errors))\n"
+                )
+                run_pcbnew_script(script)
+                local_errors = json.loads(result_path.read_text())
+                if local_errors:
+                    gate["fab_acceptable"] = False
+                    gate.setdefault("reasons", []).extend(local_errors)
+    except Exception as exc:
+        gate["fab_acceptable"] = False
+        gate.setdefault("reasons", []).append(f"local contract verification failed: {exc}")
     expected_refs = {p.ref for p in (state.bom.parts if state and state.bom else [])}
     missing_refs = _missing_component_refs(expected_refs, gate["tracks"].get("footprint_refs"))
     castellation_violations = _castellation_geometry_violations(state, pcb)
@@ -7751,6 +7901,23 @@ def _layout_route_fab(
     route = getattr(args, "route", True)
     do_fab = not getattr(args, "no_fab", False)
     done_label = getattr(args, "done_label", "BUILD COMPLETE")
+    # Reject stale recipe-owned thermal metadata before spending a routing round.
+    # Project-only replay remains a non-fab diagnostic when state is unavailable.
+    try:
+        config_path = project_dir / f"{stem}_autoplacer.json"
+        config = json.loads(config_path.read_text()) if config_path.is_file() else {}
+        thermal = _canonical_thermal_for_config(state, config, do_fab=do_fab)
+        if thermal:
+            from kicraft.autoplacer.fab_profile import require_two_ounce_project_rules
+            from kicraft.pcb_layers import has_two_ounce_outer_stackup
+            config["thermal_requirements"] = thermal
+            if not has_two_ounce_outer_stackup(pcb):
+                raise ValueError("required 2 oz outer copper stackup is absent before layout")
+            require_two_ounce_project_rules(pcb.with_suffix(".kicad_pro"), config)
+    except Exception as exc:
+        print(f"error: thermal contract verification failed: {exc}", file=sys.stderr)
+        return 7
+
 
     # Establish this run's identity BEFORE the layout subprocess spawns, so the
     # compose subprocess inherits KICRAFT_RUN_ID (stamped into metadata.json) and
@@ -7781,6 +7948,14 @@ def _layout_route_fab(
         print(f"warning: leaf canvas pre-render failed: {e}", file=sys.stderr)
 
     if rc != 0:
+        if rc == 6 and route:
+            # Autoexperiment reports that no successful parent was selected.
+            # A failed router can still leave a fresh board at the canonical
+            # routed path; expose only a partial preview, never verify/export it.
+            return _promote_verify_fab(
+                state, state_path, artifacts, stem, project_dir, pcb,
+                done_label=done_label, do_fab=do_fab, allow_routed=False,
+            )
         failure_summary = _latest_layout_failure_summary(project_dir, state_path)
         failure_summary.setdefault("evidence", {})["layout_exit_code"] = f"rc={rc}"
         _persist_pcb_diagnostics(

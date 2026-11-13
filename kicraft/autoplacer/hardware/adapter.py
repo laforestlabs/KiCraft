@@ -1210,6 +1210,7 @@ class KiCadAdapter:
                 break
 
         if existing_zone:
+            zone = existing_zone
             # Update outline to match current board size
             outline = existing_zone.Outline()
             outline.RemoveAllContours()
@@ -1228,7 +1229,6 @@ class KiCadAdapter:
             zone.SetDoNotAllowVias(False)
             zone.SetDoNotAllowPads(False)
             zone.SetDoNotAllowCopperPour(False)
-            zone.SetLocalClearance(pcbnew.FromMM(self.cfg.get("zone_clearance_mm", 0.3)))
             zone.SetMinThickness(pcbnew.FromMM(self.cfg.get("zone_min_thickness_mm", 0.25)))
             zone.SetPadConnection(pcbnew.ZONE_CONNECTION_THERMAL)
             zone.SetThermalReliefGap(pcbnew.FromMM(self.cfg.get("zone_thermal_gap_mm", 0.5)))
@@ -1241,6 +1241,10 @@ class KiCadAdapter:
             outline.Append(x2, y2)
             outline.Append(x1, y2)
             board.Add(zone)
+
+        from kicraft.autoplacer.brain.gnd_pour import _gnd_zone_clearance_mm
+
+        zone.SetLocalClearance(pcbnew.FromMM(_gnd_zone_clearance_mm(self.cfg)))
 
         # Fill all zones
         filler = pcbnew.ZONE_FILLER(board)

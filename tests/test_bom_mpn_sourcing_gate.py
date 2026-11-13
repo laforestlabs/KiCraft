@@ -55,6 +55,9 @@ class _FakeCatalog:
     def lookup(self, lcsc_id):
         return self.by_lcsc.get(str(lcsc_id).upper())
 
+    def lcsc_exists(self, lcsc_id):
+        return self.lookup(lcsc_id) is not None
+
     @staticmethod
     def bom_keyword(value, footprint):
         from kicraft.parts_library.jlcparts import bom_keyword
@@ -102,7 +105,10 @@ class _FakeRetail:
             raise RetailUnavailable("storefront down")
         e = self.by_lcsc.get(cid, {"stock": self.default_stock, "min_buy": 1})
         return {"lcsc": cid, "stock": e["stock"],
-                "min_buy": e.get("min_buy", 1), "checked_at": "t"}
+                "min_buy": e.get("min_buy", 1), "checked_at": "t",
+                "product_code": e.get("product_code"),
+                "product_model": e.get("product_model"),
+                "manufacturer": e.get("manufacturer")}
 
     def in_stock(self, cid, *, picky):
         info = self.stock(cid)
@@ -230,6 +236,81 @@ def test_keyword_qualifiers_relax_on_miss(tmp_path, monkeypatch):
     assert p.sourcing_note == "LCSC C14663"
 
 
+@pytest.mark.parametrize(("value", "model", "cid"), [
+    ("10k", "0603WAF1002T5E", "C25804"),
+    ("100k", "0603WAF1003T5E", "C25803"),
+])
+def test_stocked_description_rows_survive_dry_mpn_substring_shadow(
+    tmp_path, monkeypatch, value, model, cid,
+):
+    # Real catalog shape: MPN substring hits exist, but all are virtual and
+    # dry; the class-qualified description search has stocked physical chips.
+    _install(monkeypatch, _FakeCatalog(by_mpn={
+        f"{value} 0603".upper(): [
+            {"lcsc": "C9900211269", "model": f"{value} 0603",
+             "stock": 0, "package": "0603"}],
+        f"{value} 0603 resistor".upper(): [
+            {"lcsc": cid, "model": model, "stock": 1000, "package": "0603",
+             "type": "Basic", "description": f"{value}Ω 75V 100mW ±1% Chip Resistor"}],
+    }))
+    p = _part(ref="R1", mpn=None, symbol="Device:R",
+              footprint="Resistor_SMD:R_0603_1608Metric")
+    p.value = value
+    assert _resolve_bom_mpn_sourcing(_bom(p), tmp_path)[0] == []
+    assert p.sourcing_note == f"LCSC {cid}"
+
+
+def test_bounded_class_search_reaches_exact_value_after_substring_near_misses(
+    tmp_path, monkeypatch,
+):
+    class LimitedCatalog(_FakeCatalog):
+        def search(self, query, limit=10):
+            return super().search(query, limit)[:limit]
+
+    near = {"lcsc": "C23046", "model": "0603WAF4991T5E", "stock": 1000,
+            "package": "0603", "description": "4.99kΩ 75V 100mW ±1% Chip Resistor"}
+    exact = {"lcsc": "C49653600", "model": "GR0603F9KT5G00", "stock": 1000,
+             "package": "0603", "description": "9kΩ 75V 100mW ±1% Chip Resistor"}
+    _install(monkeypatch, LimitedCatalog(by_mpn={"9K 0603 RESISTOR": [near] * 58 + [exact]}))
+    p = _part(ref="R1", mpn=None, symbol="Device:R",
+              footprint="Resistor_SMD:R_0603_1608Metric")
+    p.value = "9k 1%"
+    assert _resolve_bom_mpn_sourcing(_bom(p), tmp_path)[0] == []
+    assert p.sourcing_note == "LCSC C49653600"
+
+
+def test_class_fallback_still_enforces_voltage_power_and_retail(tmp_path, monkeypatch):
+    rows = [
+        {"lcsc": "C1", "model": "0603WAF1002T5E", "stock": 1000,
+         "package": "0603", "description": "10kΩ 25V 50mW Chip Resistor"},
+        {"lcsc": "C2", "model": "0603WAF1002T5E", "stock": 1000,
+         "package": "0603", "description": "10kΩ 75V 100mW Chip Resistor"},
+    ]
+    _install(monkeypatch, _kw_catalog("10k 0603 resistor", rows),
+             _FakeRetail(by_lcsc={"C2": {"stock": 0}}))
+    p = _part(ref="R1", mpn=None, symbol="Device:R",
+              footprint="Resistor_SMD:R_0603_1608Metric")
+    p.value = "10k 50V 100mW"
+    bad, _ = _resolve_bom_mpn_sourcing(_bom(p), tmp_path)
+    assert bad and p.sourcing_note is None
+
+
+
+def test_reviewed_power_bypass_capacitor_is_pinned_to_its_orderable_carrier(
+    tmp_path, monkeypatch,
+):
+    from kicraft.design.recipes.wave_b_power import _catalog_cap
+
+    group = _catalog_cap("bypass", "100nF 50V X7R")
+    row = {"lcsc": "C1591", "model": "CL10B104KB8NNNC", "stock": 1000,
+           "package": "0603", "description": "100nF 50V X7R ±10% 0603 MLCC"}
+    _install(monkeypatch, _FakeCatalog(by_mpn={group.mpn: [row]}))
+    p = BomPart(ref="C1", sheet="A", value=group.value, symbol=group.symbol,
+                footprint=group.footprint, mpn=group.mpn)
+    bad, _ = _resolve_bom_mpn_sourcing(_bom(p), tmp_path)
+    assert bad == []
+    assert p.sourcing_note == "LCSC C1591"
+
 def test_pin_header_kicadism_is_normalized_and_pinned(tmp_path, monkeypatch):
     # The J2 case: value "PinHeader_1x02" matches nothing; the footprint
     # normalizes to a term the catalog answers.
@@ -294,6 +375,7 @@ def test_catalog_unavailable_fails_open(tmp_path, monkeypatch):
 
 class _Man:
     name = "tps5430"
+    mpn = "TPS5430DDAR"
     sourcing = {"lcsc": "C9864"}
 
 
@@ -1162,3 +1244,84 @@ def test_missing_manufacturer_requires_matching_retail_product_identity(
     assert (receipts[0]["manufacturer"] == "KANGNEX") is identified
     if not identified:
         assert receipts[0]["manufacturer"] is None
+
+
+@pytest.mark.parametrize("already_pinned", [False, True])
+def test_real_bundle_missing_assembly_snapshot_keeps_exact_identity_without_inventing_stock(
+    tmp_path, monkeypatch, already_pinned,
+):
+    retail = _FakeRetail(by_lcsc={"C9864": {
+        "stock": 123, "product_code": "C9864", "product_model": "TPS5430DDAR",
+        "manufacturer": "Texas Instruments",
+    }})
+    _install_bundle(monkeypatch, _FakeCatalog(), retail)
+    part = _bundle_part()
+    if already_pinned:
+        part.sourcing_note = "LCSC C9864"
+    bom = _bom(part)
+    assert cli_app._unresolved_lcsc(bom, tmp_path) == []
+    receipts = []
+    bad, warnings = _resolve_bom_mpn_sourcing(bom, tmp_path, receipts)
+    assert bad == []
+    assert part.mpn == "TPS5430DDAR" and part.sourcing_note == "LCSC C9864"
+    assert any("assembly stock is unverified" in warning for warning in warnings)
+    assert receipts[0]["assembly_stock"] is None
+    assert receipts[0]["retail_stock"] == 123
+    assert receipts[0]["manufacturer"] == "Texas Instruments"
+    assert receipts[0]["verdict"] == "unverified"
+
+
+@pytest.mark.parametrize(
+    ("product_code", "product_model", "available", "enabled"),
+    [
+        ("C9865", "TPS5430DDAR", True, True),
+        ("C9864", "TPS5431DDAR", True, True),
+        (None, None, True, True),
+        ("C9864", "TPS5430DDAR", False, True),
+        ("C9864", "TPS5430DDAR", True, False),
+    ],
+)
+def test_catalog_missing_bundle_requires_matching_live_code_and_exact_mpn(
+    tmp_path, monkeypatch, product_code, product_model, available, enabled,
+):
+    retail = _FakeRetail(
+        by_lcsc={"C9864": {
+            "stock": 1_000_000, "product_code": product_code, "product_model": product_model,
+        }},
+        up=available, on=enabled,
+    )
+    _install_bundle(monkeypatch, _FakeCatalog(), retail)
+    bom = _bom(_bundle_part())
+    assert cli_app._unresolved_lcsc(bom, tmp_path)
+    bad, _ = _resolve_bom_mpn_sourcing(bom, tmp_path)
+    assert bad
+    assert bom.parts[0].sourcing_note is None
+
+
+def test_live_identity_does_not_convert_a_stockout_into_orderability(tmp_path, monkeypatch):
+    retail = _FakeRetail(by_lcsc={"C9864": {
+        "stock": 0, "product_code": "C9864", "product_model": "TPS5430DDAR",
+    }})
+    _install_bundle(monkeypatch, _FakeCatalog(), retail)
+    bom = _bom(_bundle_part())
+    assert cli_app._unresolved_lcsc(bom, tmp_path) == []
+    receipts = []
+    bad, warnings = _resolve_bom_mpn_sourcing(
+        bom, tmp_path, receipts, named_parts=["TPS5430DDAR"],
+    )
+    assert bad == []  # Existing explicit-part stockout policy retains the real part.
+    assert any("0 available" in warning for warning in warnings)
+    assert any("0 available" in assumption for assumption in bom.assumptions)
+    assert not any(row["verdict"] == "pass" for row in receipts)
+
+
+def test_live_bundle_identity_does_not_authorize_a_different_bom_ordering_code(tmp_path, monkeypatch):
+    retail = _FakeRetail(by_lcsc={"C9864": {
+        "stock": 123, "product_code": "C9864", "product_model": "TPS5430DDAR",
+    }})
+    _install_bundle(monkeypatch, _FakeCatalog(), retail)
+    part = _bundle_part()
+    part.mpn = "TPS5431DDAR"
+    bom = _bom(part)
+    assert cli_app._unresolved_lcsc(bom, tmp_path)
+    assert _resolve_bom_mpn_sourcing(bom, tmp_path)[0]

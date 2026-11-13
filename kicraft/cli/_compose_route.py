@@ -9,6 +9,8 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from kicraft.autoplacer.config import jsonable_config_value
+
 if TYPE_CHECKING:
     from kicraft.cli._compose_state import ParentCompositionState
 
@@ -39,6 +41,15 @@ def _route_parent_board(
     # parent key is authoritative for this route; kicad_routing_tools_timeout_s
     # remains the LEAF/local-subcircuit cap.
     route_cfg = {**cfg, "pcb_path": str(stamped_pcb)}
+    route_cfg["kicad_routing_tools_ordering"] = cfg.get(
+        "kicad_routing_tools_parent_ordering", "inside_out"
+    )
+    # Native local returns and thermal spreading are parent-owned constraints.
+    # Preserve their existing B.Cu copper while adding foreign interconnects.
+    route_cfg["routing_local_ground_reservations"] = bool(
+        cfg.get("thermal_requirements")
+        or any("ground_return" in spec for spec in cfg.get("local_bypasses", []))
+    )
     _parent_timeout = cfg.get(
         "kicad_routing_tools_parent_timeout_s",
         cfg.get("kicad_routing_tools_timeout_s"),
@@ -81,10 +92,55 @@ def _route_parent_board(
             "validation": {},
             "routing_stats": {},
         }
+    cfg = dict(cfg)
+    plan = routing_stats.get("local_ground_reservation_plan")
+    if plan is not None:
+        cfg["_parent_ground_reservation_plan"] = plan
 
+
+    thermal_requirements = cfg.get("thermal_requirements") or []
+    ground_returns = [spec for spec in cfg.get("local_bypasses", [])
+                      if "ground_return" in spec]
+    needs_ground_finish = bool(thermal_requirements or ground_returns)
     gnd_net = cfg.get("gnd_zone_net", "GND")
-    if gnd_net:
-        pour_gnd_planes(str(routed_pcb), cfg, layers=("B.Cu", "F.Cu"))
+    return_nets = set()
+    for spec in ground_returns:
+        ground = spec["ground_return"]
+        if not isinstance(ground, dict) or any(
+            not isinstance(ground.get(key), str) or not ground[key].strip()
+            for key in ("owner_ref", "owner_pin", "member_pin", "net")
+        ):
+            raise ValueError("local ground return requires explicit owner ref, pins and canonical net")
+        net = ground["net"]
+        return_nets.add(net)
+    if thermal_requirements and not gnd_net:
+        raise RuntimeError("thermal requirement needs a ground net")
+    required_nets = return_nets | ({gnd_net} if thermal_requirements else set())
+    original_copper = import_routed_copper(str(routed_pcb)) if needs_ground_finish else None
+    if needs_ground_finish:
+        from kicraft.autoplacer.brain.gnd_pour import add_gnd_pour_and_thermal_vias
+
+        if thermal_requirements and any(
+            float(r.get("outer_copper_oz", 0)) != 2.0
+            or set(r.get("ground_layers", ())) != {"F.Cu", "B.Cu"}
+            or not r.get("connected_ground_spreading")
+            for r in thermal_requirements
+        ):
+            raise ValueError("unsupported thermal fabrication contract")
+        for net in sorted(required_nets):
+            net_cfg = {**cfg, "gnd_zone_net": net,
+                       "local_bypasses": [spec for spec in ground_returns
+                                          if spec["ground_return"]["net"] == net]}
+            result = add_gnd_pour_and_thermal_vias(str(routed_pcb), net_cfg)
+            if not result.get("zone_filled") or result.get("error") or result.get("escape_error"):
+                raise RuntimeError(f"required ground finishing failed for {net}: {result}")
+
+    plane_nets = required_nets | ({gnd_net} if gnd_net else set())
+    for net in sorted(plane_nets):
+        net_cfg = {**cfg, "gnd_zone_net": net}
+        plane_result = pour_gnd_planes(str(routed_pcb), net_cfg, layers=("B.Cu", "F.Cu"))
+        if net in required_nets and (plane_result.get("error") or plane_result.get("zones", 0) < 2):
+            raise RuntimeError(f"required dual ground planes failed for {net}: {plane_result}")
 
     # Pour the primary power rail (e.g. VBUS) as an F.Cu plane, post-route only:
     # it lives on the signal layer, so pouring it before routing would saturate
@@ -97,59 +153,8 @@ def _route_parent_board(
             str(routed_pcb), cfg, layers=(cfg.get("power_plane_layer", "F.Cu"),)
         )
 
-    # GND island repair (convergence loop): the single-pass track-based
-    # repair (repair_stranded_gnd) ties stranded fill islands with same-net
-    # tracks, but the parent re-pour after power-plane addition refills ALL
-    # zones (including GND) at higher priority, which can re-fragment the
-    # GND plane -- leaving islands that a second pass would tie. The
-    # convergence loop also tries via-stitching for cross-layer overlapping
-    # fill islands (B.Cu <-> F.Cu), which the track-only pass cannot bridge.
-    # pcbnew work -> subprocess. Each repair persists its summary through a
-    # sidecar the parent re-prints and stores: the subprocess's own stdout is
-    # swallowed by _run_pcbnew_script, which left the 1/655 investigation
-    # unable to tell whether these passes ran at all (KC-ZRAUR7 workstream B).
     post_route_repairs: dict[str, Any] = {}
-    if gnd_net and cfg.get("gnd_strand_repair_enabled", True):
-        sidecar = Path(str(routed_pcb) + ".gnd_island_repair.json")
-        try:
-            from kicraft.autoplacer.routing_board import run_pcbnew_script
 
-            _rep_cfg = json.dumps({
-                k: cfg[k]
-                for k in (
-                    "gnd_zone_net",
-                    "gnd_strand_repair_enabled",
-                    "gnd_strand_repair_max_mm",
-                    "gnd_parent_repair_max_iter",
-                    "gnd_edge_spine_enabled",
-                    "gnd_edge_spine_width_mm",
-                    "gnd_edge_spine_max_inset_mm",
-                    "component_zones",
-                                                            "via_drill_mm",
-                    "via_size_mm",
-                    "hole_to_hole_min_mm",
-                )
-                if k in cfg
-            })
-            run_pcbnew_script(
-                "import json\n"
-                "from kicraft.autoplacer.brain.gnd_pour import repair_parent_gnd_islands\n"
-                f"cfg = json.loads({_rep_cfg!r})\n"
-                f"s = repair_parent_gnd_islands({str(routed_pcb)!r}, cfg)\n"
-                f"open({str(sidecar)!r}, 'w').write(json.dumps(s))\n"
-            )
-            s = json.loads(sidecar.read_text(encoding="utf-8"))
-            post_route_repairs["gnd_islands"] = s
-            print(f"  parent gnd island repair: {s.get('stranded')} stranded, "
-                  f"{s.get('tied_pads')} tied, {s.get('vias')} vias, "
-                  f"{(s.get('edge_spine') or {}).get('stubs', 0)} spine stubs, "
-                  f"{s.get('unresolved')} unresolved, "
-                  f"iterations: {s.get('iterations')}")
-        except Exception as exc:
-            post_route_repairs["gnd_islands"] = {"failed": str(exc)}
-            print(f"warning: parent gnd island repair failed: {exc}", file=sys.stderr)
-        finally:
-            sidecar.unlink(missing_ok=True)
 
     # Power strand repair: the power-rail pour fragments exactly like the GND
     # plane (KC-Z57JEZ: +3V3 split into two F.Cu islands around a fine-pitch
@@ -161,18 +166,7 @@ def _route_parent_board(
         try:
             from kicraft.autoplacer.routing_board import run_pcbnew_script
 
-            _pwr_cfg = json.dumps({
-                k: cfg[k]
-                for k in (
-                    "power_strand_repair_enabled",
-                    "power_plane_enabled",
-                    "power_plane_nets",
-                    "power_plane_max_nets",
-                    "gnd_zone_net",
-                    "gnd_strand_repair_max_mm",
-                                                        )
-                if k in cfg
-            })
+            _pwr_cfg = json.dumps(jsonable_config_value(cfg))
             run_pcbnew_script(
                 "import json\n"
                 "from kicraft.autoplacer.brain.gnd_pour import repair_stranded_power\n"
@@ -191,6 +185,53 @@ def _route_parent_board(
             print(f"warning: power strand repair failed: {exc}", file=sys.stderr)
         finally:
             sidecar.unlink(missing_ok=True)
+
+    # GND island repair (convergence loop): the single-pass track-based
+    # repair (repair_stranded_gnd) ties stranded fill islands with same-net
+    # tracks, but the parent re-pour after power-plane addition refills ALL
+    # zones (including GND) at higher priority, which can re-fragment the
+    # GND plane -- leaving islands that a second pass would tie. The
+    # convergence loop also tries via-stitching for cross-layer overlapping
+    # fill islands (B.Cu <-> F.Cu), which the track-only pass cannot bridge.
+    # pcbnew work -> subprocess. Each repair persists its summary through a
+    # sidecar the parent re-prints and stores: the subprocess's own stdout is
+    # swallowed by _run_pcbnew_script, which left the 1/655 investigation
+    # unable to tell whether these passes ran at all (KC-ZRAUR7 workstream B).
+    if cfg.get("gnd_strand_repair_enabled", True):
+        for net in sorted(plane_nets):
+            sidecar = Path(str(routed_pcb) + ".gnd_island_repair.json")
+            try:
+                from kicraft.autoplacer.routing_board import run_pcbnew_script
+
+                # The finisher consumes fabrication and pour settings as well
+                # as local contracts. Pass the same configuration used by
+                # routing; dropping individual guards here changes geometry.
+                repair_cfg = {**cfg, "gnd_zone_net": net}
+                _rep_cfg = json.dumps(jsonable_config_value(repair_cfg))
+                run_pcbnew_script(
+                    "import json\n"
+                    "from kicraft.autoplacer.brain.gnd_pour import repair_parent_gnd_islands\n"
+                    f"cfg = json.loads({_rep_cfg!r})\n"
+                    f"s = repair_parent_gnd_islands({str(routed_pcb)!r}, cfg)\n"
+                    f"open({str(sidecar)!r}, 'w').write(json.dumps(s))\n"
+                )
+                s = json.loads(sidecar.read_text(encoding="utf-8"))
+                if net == gnd_net:
+                    post_route_repairs["gnd_islands"] = s
+                else:
+                    post_route_repairs.setdefault("ground_return_islands", {})[net] = s
+                print(f"  parent {net} island repair: {s.get('stranded')} stranded, "
+                      f"{s.get('tied_pads')} tied, {s.get('vias')} vias, "
+                      f"{(s.get('edge_spine') or {}).get('stubs', 0)} spine stubs, "
+                      f"{s.get('unresolved')} unresolved, iterations: {s.get('iterations')}")
+            except Exception as exc:
+                if net in required_nets:
+                    raise RuntimeError(f"required ground island repair failed for {net}: {exc}") from exc
+                if net == gnd_net:
+                    post_route_repairs["gnd_islands"] = {"failed": str(exc)}
+                print(f"warning: parent {net} island repair failed: {exc}", file=sys.stderr)
+            finally:
+                sidecar.unlink(missing_ok=True)
 
     # Root parent has no interface anchors -- skip anchor validation.
     # Anchor completeness is a leaf-level gate, not a parent-level gate.
@@ -221,41 +262,47 @@ def _route_parent_board(
             routed_pcb, cfg, validation
         )
 
-    # C1 signal unconnected repair: routing can leave a signal net open. Attempt a constrained
-    # local bend/via repair (guarded copper only), then accept-or-revert on a
-    # full re-DRC: unconnected must strictly drop and shorts must not rise,
-    # else the board is byte-restored and the honest verdict below stands.
-    # Design: docs/plans/unconnected-signal-repair-c1-design.md.
+    # Finish power and signal opens with guarded copper, retaining the shared
+    # full re-DRC accept-or-revert gate.
     unconnected = int((validation.get("drc") or {}).get("unconnected", 0) or 0)
-    if unconnected > 0 and cfg.get("signal_unconnected_repair_enabled", True):
-        # Poured POWER nets are normally the strand repair's turf (the signal
-        # repair skips every net with a zone), but a power net the strand
-        # repair just reported unresolved fell between the two systems on
-        # 1/655: the straight-tie-only strand repair skipped no_clear_path
-        # while the rich bend/via repair filtered VBUS out as pour-owned.
-        # Hand exactly those nets to the signal repair -- its accept-or-revert
-        # gate makes trying safe. GND stays excluded (plane machinery owns it).
-        pwr = post_route_repairs.get("power_strand") or {}
-        extra = sorted({
-            str(lbl).split(":", 1)[0]
-            for lbl in (pwr.get("skipped") or [])
-            if ":" in str(lbl)
-        })
-        repair_cfg = {**cfg, "signal_repair_extra_nets": extra} if extra else cfg
-        validation = _attempt_signal_unconnected_repair(
-            routed_pcb, repair_cfg, validation
+    if unconnected > 0 and (
+        cfg.get("signal_unconnected_repair_enabled", True)
+        or cfg.get("power_strand_repair_enabled", True)
+    ):
+        validation = _attempt_unconnected_repair(
+            routed_pcb, cfg, validation
         )
         unconnected = int(
             (validation.get("drc") or {}).get("unconnected", 0) or 0
         )
     elif unconnected > 0:
-        validation["signal_unconnected_repair"] = {
+        validation["unconnected_repair"] = {
             "ran": False, "reason": "disabled"
         }
 
     # Import all copper from the routed board (child + new parent traces +
     # any repair ties; must run AFTER the repair so its copper is captured).
     copper = import_routed_copper(str(routed_pcb))
+
+    if needs_ground_finish:
+        from kicraft.autoplacer.brain.copper_accounting import fingerprint_trace, fingerprint_via
+        from kicraft.autoplacer.kicad_routing_tools import _preservation_group
+        custody = {
+            name: _preservation_group(original_copper.get(name, []), copper.get(name, []), fp)
+            for name, fp in (("traces", fingerprint_trace), ("vias", fingerprint_via))
+        }
+        if any(group["missing_count"] for group in custody.values()):
+            raise RuntimeError(f"ground finishing lost routed copper: {custody}")
+        validation["ground_finish_custody"] = custody
+        if thermal_requirements:
+            from kicraft.autoplacer.brain.gnd_pour import audit_thermal_ground
+            from kicraft.pcb_layers import set_two_ounce_outer_stackup
+
+            validation["thermal_ground"] = audit_thermal_ground(
+                str(routed_pcb), thermal_requirements, str(gnd_net)
+            )
+            validation["thermal_finish_custody"] = custody
+            set_two_ounce_outer_stackup(routed_pcb)
 
     # A parent must close every net. Unlike a leaf -- whose interface ports are
     # legitimately open, so validate_routed_board waives unconnected -- unrouted
@@ -314,15 +361,15 @@ def _route_parent_board(
     }
 
 
-def _attempt_signal_unconnected_repair(
+def _attempt_unconnected_repair(
     routed_pcb, cfg: dict, validation: dict
 ) -> dict:
-    """Parent-side entry to the shared accept-or-revert C1 repair pass."""
-    from kicraft.autoplacer.brain.signal_repair_pass import (
-        attempt_signal_unconnected_repair,
+    """Parent-side entry to the shared accept-or-revert repair pass."""
+    from kicraft.autoplacer.brain.unconnected_repair_pass import (
+        attempt_unconnected_repair,
     )
 
-    return attempt_signal_unconnected_repair(routed_pcb, cfg, validation)
+    return attempt_unconnected_repair(routed_pcb, cfg, validation)
 
 
 def _attempt_illegal_geometry_repair(
@@ -387,23 +434,7 @@ def _attempt_illegal_geometry_repair(
         pour_nets = {str(cfg.get("gnd_zone_net", "GND"))}
         pour_nets.update(cfg.get("power_plane_nets") or [])
         if pour_nets & set(s.get("nets") or []):
-            _rep_cfg = json.dumps({
-                k: cfg[k]
-                for k in (
-                    "gnd_zone_net",
-                    "gnd_strand_repair_enabled",
-                    "gnd_strand_repair_max_mm",
-                    "gnd_parent_repair_max_iter",
-                    "gnd_edge_spine_enabled",
-                    "gnd_edge_spine_width_mm",
-                    "gnd_edge_spine_max_inset_mm",
-                    "component_zones",
-                    "via_drill_mm",
-                    "via_size_mm",
-                    "hole_to_hole_min_mm",
-                )
-                if k in cfg
-            })
+            _rep_cfg = json.dumps(jsonable_config_value(cfg))
             run_pcbnew_script(
                 "import json\n"
                 "from kicraft.autoplacer.brain.gnd_pour import "
@@ -418,6 +449,8 @@ def _attempt_illegal_geometry_repair(
             k: cfg[k]
             for k in (
                 "gnd_zone_net",
+                "thermal_requirements",
+                "fab_capability",
                 "power_plane_nets",
                 "signal_repair_max_mm",
                 "via_size_mm",

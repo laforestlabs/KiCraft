@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Callable, Literal
 
@@ -76,6 +77,19 @@ class RecipePort(BaseModel):
     # An externally biased control input requires an MCU pad without a reset
     # pull-up. This is a DC compatibility requirement, not a ramp guarantee.
     reset_control: Literal["external_low"] | None = None
+    # Inclusive reviewed steady input envelope for this whole circuit, not a
+    # silicon absolute maximum or a guarantee about startup or output loading.
+    supply_voltage_range_v: tuple[float, float] | None = None
+
+    @model_validator(mode="after")
+    def _validate_supply_voltage_range(self):
+        if self.supply_voltage_range_v is not None:
+            low, high = self.supply_voltage_range_v
+            if self.direction != "power":
+                raise ValueError("supply voltage range is only valid on power ports")
+            if not math.isfinite(low) or not math.isfinite(high) or low > high:
+                raise ValueError("supply voltage range must have finite ordered bounds")
+        return self
 
 
 class RecipeAllocatablePin(BaseModel):
@@ -133,6 +147,11 @@ class RecipeDefinition(BaseModel):
     # (a converter, LDO or charger); None means "this part is not rated here",
     # which the design checks treat as unproven rather than as a number.
     rated_output_current_a: float | None = Field(default=None, gt=0)
+    # A qualified series switch transfers load current without converter losses.
+    pass_through: bool = False
+    # Conservative design allocations, not measured consumption or silicon ratings.
+    # Keys name the actual supply ports so shared-rail budgets can be summed.
+    supply_current_reservations_a: dict[str, float] = Field(default_factory=dict)
     required_sheet_roles: tuple[str, ...]
     parameter_defaults: dict[str, JsonScalar] = Field(default_factory=dict)
     allowed_parameters: dict[str, tuple[str | int | float | bool, ...]] = Field(
@@ -159,6 +178,18 @@ class RecipeDefinition(BaseModel):
     @model_validator(mode="after")
     def _default_ties_name_another_port(self):
         names = {port.name for port in self.ports}
+        if self.pass_through:
+            power_ports = {port.name for port in self.ports if port.direction == "power"}
+            if not {"input", "output"} <= power_ports:
+                raise ValueError(
+                    f"recipe {self.recipe} pass-through requires input and output power ports"
+                )
+        for port, current in self.supply_current_reservations_a.items():
+            if port not in names or not math.isfinite(current) or current <= 0:
+                raise ValueError(
+                    f"recipe {self.recipe} supply reservation must name a declared port "
+                    "and a positive finite current"
+                )
         for port in self.ports:
             if port.default_tie is None:
                 continue

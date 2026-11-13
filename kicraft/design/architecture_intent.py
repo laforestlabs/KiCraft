@@ -22,6 +22,7 @@ once, here.
 
 from __future__ import annotations
 
+import copy
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -1523,6 +1524,163 @@ def _complete_driver_logic_supplies(payload: dict) -> None:
             row["supply_bindings"] = {**explicit, "logic_vdd": rail}
 
 
+def _complete_pd_power_paths(intent: ArchitectureIntent) -> ArchitectureIntent:
+    """Separate each unambiguous reviewed PD entry from its board loads."""
+    recipes = [r.definition for r in registered_recipes()
+               if r.definition.recipe == "tps26631-pd-inrush-power-path@1"]
+    if len(recipes) != 1:
+        return intent
+    path = recipes[0]
+    rails = dict(intent.power.rails)
+    requirements = list(intent.requirements)
+    assumptions = list(intent.assumptions)
+    sheets = list(intent.sheets)
+    sources = [r for r in requirements if r.family in {
+        "usb-pd-fixed-trigger", "usb-pd-selectable-trigger",
+    }]
+    for source in sources:
+        matches = [(name, rail) for name, rail in rails.items()
+                   if rail.from_ref == f"{source.id}.vbus" or
+                   (name in {source.supply, source.supply_bindings.get("vbus")} and
+                    rail.from_ref is not None and any(
+                        r.family == "usb-c-pd-receptacle" and
+                        rail.from_ref == f"{r.id}.vbus" for r in requirements))]
+        if len(matches) != 1:
+            continue
+        name, rail = matches[0]
+        # Keep authored paths authoritative, but their mere presence does not
+        # protect board converters that still bypass them on the raw node.
+        authored_paths = [
+            r for r in requirements if r.family == path.family
+            and (r.supply == name or r.supply_bindings.get("input") == name)
+        ]
+        if authored_paths:
+            bypassed = [
+                r.id for r in requirements if r.family in {"ap63203-3v3", "ap63205-5v"}
+                and (r.supply == name or r.supply_bindings.get("input") == name)
+            ]
+            if bypassed:
+                protected = [
+                    net for net, candidate in rails.items()
+                    if any(candidate.from_ref == f"{series.id}.output"
+                           for series in authored_paths)
+                ]
+                raise ArchitectureIntentError([IntentDiagnostic(
+                    code="pd_power_path_bypassed",
+                    message=(
+                        f"Board converters {', '.join(bypassed)} bypass the authored controlled "
+                        f"PD path on raw rail {name!r}. Supply them from a rail sourced by "
+                        "the path's output, not the raw input; power-good then controls "
+                        "their enables. Authored power wiring is not silently changed."
+                    ),
+                    requirement_id=source.id,
+                    evidence=[f"raw_rail={name}", f"protected_output_rails={protected}"],
+                )])
+            continue
+        # A shared source node is ambiguous, never guess which source owns it.
+        if sum(1 for r in sources if r.id != source.id and
+               (r.supply == name or r.supply_bindings.get("vbus") == name)) > 0:
+            continue
+        raw = f"{name}_RAW"
+        identifier = f"{source.id}_power_path"
+        stem = re.sub(r"[^A-Z0-9_]", "_", identifier.upper())[:48]
+        if (len(identifier) > 64 or raw in rails or any(r.id == identifier for r in requirements)
+                or any(s.stem == stem or s.name == stem.replace("_", " ") for s in sheets)):
+            continue
+        rails[raw] = rail
+        rails[name] = rail.model_copy(update={"from_ref": f"{identifier}.output"})
+        # Only the PD controller and its PD-only receptacle are moved; programming
+        # sockets and ordinary output headers retain their original bindings.
+        updated = []
+        for row in requirements:
+            if row.id == source.id or (row.family == "usb-c-pd-receptacle" and
+                                       (row.supply == name or
+                                        row.supply_bindings.get("vbus") == name)):
+                row = row.model_copy(update={
+                    "supply": raw if row.supply == name else row.supply,
+                    "supply_bindings": {k: raw if v == name else v
+                                        for k, v in row.supply_bindings.items()},
+                    "ties": {k: raw if k == "vbus" and v == name else v
+                             for k, v in row.ties.items()},
+                })
+            updated.append(row)
+        requirements = updated
+        sheets.append(IntentSheet(name=stem.replace("_", " "), stem=stem,
+                                  role="power_input",
+                                  function="Controlled PD input power path"))
+        requirements.append(IntentRequirement(
+            id=identifier, sheet=stem.replace("_", " "), role="regulator", family=path.family,
+            exact_part=path.exact_part, supply=raw,
+            functional_blocks=list(source.functional_blocks),
+        ))
+        assumptions.append(
+            f"{source.id}: at 5 V pre-negotiation {identifier} holds downstream loads off. "
+            "The path has a conservative 3 mA input-current allowance; the CH224K VDD "
+            "feed is bounded by 5.06 mA at 5 V including resistor tolerance, plus "
+            "VBUS-sense current. The path adds "
+            "0.1 uF nominal (0.11 uF maximum) raw capacitance, in addition to other "
+            "raw-node capacitance. These are design assumptions, not measurements."
+        )
+    signals = list(intent.signals)
+    for series in (row for row in requirements if row.family == path.family):
+        outputs = [name for name, rail in rails.items()
+                   if rail.from_ref == f"{series.id}.output"]
+        if len(outputs) != 1:
+            continue
+        output = outputs[0]
+        consumers = [
+            row for row in requirements
+            if row.family in {"ap63203-3v3", "ap63205-5v"}
+            and (row.supply == output or row.supply_bindings.get("input") == output)
+        ]
+        if not consumers:
+            continue
+        pg_ref = f"{series.id}.power_good"
+        existing = [signal for signal in signals if signal.from_ref == pg_ref]
+        if len(existing) > 1:
+            raise ArchitectureIntentError([IntentDiagnostic(
+                code="pd_power_good_control_conflict",
+                message=f"{pg_ref} has multiple authored control nets; combine them explicitly.",
+                requirement_id=series.id,
+            )])
+        peers = set(existing[0].peers()) if existing else set()
+        for consumer in consumers:
+            enable = f"{consumer.id}.enable"
+            conflicting = (
+                "enable" in consumer.ties or "enable" in consumer.supply_bindings
+                or "enable" in consumer.reference_bindings
+                or any(enable in (signal.from_ref, *signal.peers())
+                       and signal.from_ref != pg_ref for signal in signals)
+            )
+            if conflicting:
+                raise ArchitectureIntentError([IntentDiagnostic(
+                    code="pd_power_good_control_conflict",
+                    message=(f"{enable} has an explicit control that cannot be combined "
+                             f"with {pg_ref} without a reviewed hardware gate."),
+                    requirement_id=consumer.id,
+                )])
+            peers.add(enable)
+        if existing:
+            index = signals.index(existing[0])
+            signals[index] = existing[0].model_copy(update={"to": sorted(peers)})
+        else:
+            name = f"{series.id}_POWER_GOOD".upper().replace("-", "_")
+            if name in rails or any(signal.name == name for signal in signals):
+                raise ArchitectureIntentError([IntentDiagnostic(
+                    code="pd_power_good_control_conflict",
+                    message=f"Derived power-good net {name!r} collides with an authored net.",
+                    requirement_id=series.id,
+                )])
+            signals.append(IntentSignal.model_validate({
+                "name": name, "from": pg_ref, "to": sorted(peers),
+            }))
+    return intent.model_copy(update={
+        "power": intent.power.model_copy(update={"rails": rails}),
+        "requirements": requirements, "sheets": sheets, "assumptions": assumptions,
+        "signals": signals,
+    })
+
+
 def complete_architecture_payload(payload: dict) -> dict:
     """Drop the duplicate power statements the deterministic contracts can only refuse.
 
@@ -1539,6 +1697,7 @@ def complete_architecture_payload(payload: dict) -> dict:
     """
     if not isinstance(payload, dict):
         return payload
+    payload = copy.deepcopy(payload)
     # Requirement production precedes family/interface repairs so the same contracts see generated
     # and authored controls. The producer acts only on one unowned, unambiguous safe jumper fact.
     _complete_explicit_input_sources(payload)
@@ -1554,13 +1713,16 @@ def complete_architecture_payload(payload: dict) -> dict:
     by_id = {str(row.get("id") or ""): row for row in requirements}
     recipes = tuple(registered_recipes())
     lowerers = {family: row for row in registered_lowerers() for family in row.families}
+    catalogs = {}
     supply_ports: dict[str, str] = {}
     for requirement in requirements:
+        catalog = (
+            _catalog(IntentRequirement.model_validate(requirement), recipes, lowerers)
+            if requirement.get("sheet") else None
+        )
+        catalogs[requirement["id"]] = catalog
         rail = requirement.get("supply")
-        if not rail:
-            continue
-        catalog = _catalog(IntentRequirement.model_validate(requirement), recipes, lowerers)
-        if catalog is not None:
+        if rail and catalog is not None:
             port = _supply_port(catalog, rail)
             if port is not None:
                 supply_ports[requirement["id"]] = port
@@ -1576,6 +1738,64 @@ def complete_architecture_payload(payload: dict) -> dict:
         peers = signal.get("to")
         rows = peers if isinstance(peers, list) else [peers]
         return [str(row) for row in rows if row is not None]
+
+    # An authored power wire may name a connector-to-input connection while the
+    # rail already owns its peer pin. Preserve that physical connection under
+    # the rail's name, rather than creating a second signal net on the same pin.
+    rails = (payload.get("power") or {}).get("rails") or {}
+    bound_power: dict[str, set[str]] = {}
+    for net, rail in rails.items():
+        reference = rail.get("from") if isinstance(rail, dict) else None
+        if reference:
+            bound_power.setdefault(reference, set()).add(net)
+    for identifier, requirement in by_id.items():
+        catalog = catalogs.get(identifier)
+        if catalog is None:
+            continue
+        bindings = dict(requirement.get("supply_bindings") or {})
+        if requirement.get("supply") and identifier in supply_ports:
+            bindings[supply_ports[identifier]] = requirement["supply"]
+        for port, direction in catalog.directions.items():
+            if direction != "power":
+                continue
+            nets = bound_power.setdefault(f"{identifier}.{port}", set())
+            if _reference_port_name(port):
+                nets.add(GND_NET)
+            for net in (
+                bindings.get(port), (requirement.get("ties") or {}).get(port),
+                (requirement.get("reference_bindings") or {}).get(port),
+            ):
+                if net in rails or net == GND_NET:
+                    nets.add(net)
+    retained = []
+    for signal in signals:
+        references = [signal.get("from"), *_peers(signal)]
+        endpoints = [_endpoint(reference) for reference in references]
+        if not endpoints or any(
+            endpoint is None or catalogs.get(endpoint[0]) is None
+            or catalogs[endpoint[0]].directions.get(endpoint[1]) != "power"
+            for endpoint in endpoints
+        ):
+            retained.append(signal)
+            continue
+        known = set().union(*(bound_power.get(reference, set()) for reference in references))
+        net = next(iter(known)) if len(known) == 1 else None
+        if net in (None, GND_NET) or (
+            (signal.get("name") in rails or signal.get("name") == GND_NET) and signal["name"] != net
+        ) or any(
+            not bound_power.get(reference)
+            and by_id[identifier].get("role") != "connector"
+            and port != _supply_port(catalogs[identifier], net)
+            for reference, (identifier, port) in zip(references, endpoints)
+        ):
+            retained.append(signal)
+            continue
+        for reference, (identifier, port) in zip(references, endpoints):
+            if not bound_power.get(reference):
+                by_id[identifier].setdefault("supply_bindings", {})[port] = net
+                bound_power[reference] = {net}
+    signals = retained
+    payload["signals"] = signals
 
     def _duplicates_a_binding(reference: str) -> bool:
         parts = _endpoint(reference)
@@ -2022,7 +2242,8 @@ def derive_architecture(
     Raises `ArchitectureIntentError` carrying *every* blocking refusal at once, so a rejected draft
     names all the parts, ports and rails it could not derive wiring from in a single answer.
     """
-    intent = ArchitectureIntent.model_validate(intent)
+    intent = ArchitectureIntent.model_validate(intent).model_copy(deep=True)
+    intent = _complete_pd_power_paths(intent)
     intent, storage_diagnostic = _append_data_logger_storage(intent, functional_spec)
     recipes = tuple(registered_recipes())
     lowerers = {family: row for row in registered_lowerers() for family in row.families}
@@ -2112,6 +2333,30 @@ def derive_architecture(
     for row in intent.requirements:
         if row.sheet not in sheet_names:
             continue
+        # A generic external-strip construction is not a promise of a particular
+        # connector. Select the reviewed header variant only when the retained
+        # physical obligation calls for it; do not replace a named real part.
+        owned = _owned_obligations(row)
+        physical = {
+            obligation.component_class.casefold()
+            for obligation in owned if obligation.kind == "physical"
+        }
+        if (
+            row.family == "ws2812-external-strip"
+            and row.exact_part in {None, "WS2812-EXTERNAL-STRIP"}
+            and "pin-header" in physical
+            and "screw-terminal" not in physical
+        ):
+            row = row.model_copy(update={
+                "family": "ws2812-external-strip-header",
+                "exact_part": "WS2812-EXTERNAL-STRIP-HEADER",
+            })
+            models_by_id[row.id] = row
+            derived_notes.append(
+                f"{row.id}: selected the reviewed WS2812 output with 3-pin header "
+                "for the requested pin-header; header rating is 3 A per contact "
+                "and actual supported load is limited by the complete power path (derived)"
+            )
         catalog = _catalog(row, recipes, lowerers)
         for obligation in _owned_obligations(row):
             if obligation.kind != "external_interface":
@@ -2132,6 +2377,32 @@ def derive_architecture(
                     requirement_id=row.id,
                     sheet=row.sheet,
                 )
+            elif obligation.protocol == "addressable-led-string-unspecified":
+                derived_notes.append(
+                    f"{row.id}: unspecified addressable LED string protocol defaults to "
+                    "WS2812; the original interface obligation remains unspecified (derived)"
+                )
+        if catalog and catalog.recipe and any(
+            obligation.kind == "external_interface" for obligation in owned
+        ):
+            from kicraft.design.part_identity import reviewed_part
+
+            definition = catalog.recipe.definition
+            for connector_class in physical & {"pin-header", "screw-terminal"}:
+                if not any(
+                    (record := reviewed_part(part.mpn or part.value)) is not None
+                    and connector_class in record.physical_features
+                    and record.symbol == part.symbol and record.footprint == part.footprint
+                    for part in definition.parts
+                ):
+                    _fail(
+                        "external_interface_connector_unrealized",
+                        f"requirement {row.id!r} must use a reviewed {connector_class} "
+                        "in its external interface construction; a different connector "
+                        "does not satisfy the physical obligation",
+                        requirement_id=row.id,
+                        sheet=row.sheet,
+                    )
         if catalog is None:
             continue  # model-owned, or refused below once we know whether a signal needs its pins
         catalogs[row.id] = catalog
@@ -2971,26 +3242,53 @@ def derive_architecture(
             failed_edges.add(label)
             return None
         if mode == "usb":
+            explicit_vbus = {
+                rail
+                for signal in intent.signals
+                if signal.from_ref.rsplit(".", 1)[-1].lower() in _USB_DATA_PORTS
+                and any(peer.startswith(EDGE_PREFIX) for peer in signal.peers())
+                for rail in signal.rails
+            }
             vbus = _usb_vbus_rail(intent)
-            if vbus is None:
+            # Loads on an unsourced 5 V rail are not power sources: the new
+            # receptacle may legitimately power them. A declared source or a
+            # separate physical input/connector on that rail is different.
+            source_owned = vbus is not None and (
+                intent.power.rails[vbus].from_ref is not None
+                or any(
+                    (
+                        owner.role == "power_input"
+                        or owner.family in {
+                            _USB_DEVICE_CONNECTOR_FAMILY,
+                            "usb-c-power-sink",
+                            "usb-c-pd-receptacle",
+                        }
+                    )
+                    and vbus in bindings.get(owner_id, {}).values()
+                    for owner_id, owner in requirements.items()
+                )
+            )
+            if explicit_vbus and (vbus is None or source_owned):
                 _fail(
                     "usb_connector_supply_unknown",
-                    (
-                        f"edge {label!r} carries the native USB data pair but its 5 V supply "
-                        "cannot be selected unambiguously. Declare the socket's supply under "
-                        "power.rails, then set rails on both USB data signals to exactly that "
-                        "one declared 5 V rail (for example [\"VBUS\"] when VBUS is the socket "
-                        "supply). Separate host VBUS and board +5V rails must not be joined "
-                        "merely because both are 5 V."
-                    ),
+                    f"edge {label!r} needs a 5 V host rail not already sourced "
+                    "by another supply or connector; do not join two power inputs.",
                     requirement_id=source.requirement.id,
-                    evidence=[
-                        f"{name}: voltage={rail.voltage}, from={rail.from_ref!r}"
-                        for name, rail in intent.power.rails.items()
-                    ],
                 )
                 failed_edges.add(label)
                 return None
+            if vbus is None or source_owned:
+                vbus = f"{requirement_id.upper()}_VBUS"
+                occupied = rail_names | {signal.name for signal in signals} | {GND_NET}
+                while vbus in occupied:
+                    vbus += "_HOST"
+                intent.power.rails[vbus] = IntentRail(voltage=5.0)
+                rail_names.add(vbus)
+                derived_notes.append(
+                    f"{requirement_id}: separate USB data receptacle uses isolated "
+                    f"host-only 5 V rail {vbus} for its protection circuit; it does "
+                    "not power the board or join the board supply (derived)"
+                )
             catalogs[requirement_id] = _Catalog(
                 directions=dict.fromkeys(("vbus", "gnd", "usb_dm", "usb_dp"), "bidirectional"),
                 source="recipe",
@@ -3109,12 +3407,9 @@ def derive_architecture(
         source = _lookup(signal.from_ref, context=f"signal {signal.name!r}")
         if source is None:
             continue
-        # A port that already carries a net: the design said the same connection twice, and one
-        # pin cannot be on two nets. A declared rail or ground owns the net (the implicit binding
-        # plus a named wire); two *signals* out of one physical pin are one net under two names, so
-        # the first name owns it and this signal's peers join it, reported rather than refused.
-        # Two different *sinks* naming one port is untouched below and stays a refusal: that is two
-        # nets on one pin.
+        # Rails and ground retain their authoritative binding. Different named signals
+        # must not be silently shorted by sharing a source port; intentional fanout
+        # carries one named net to multiple peers.
         source_net = bindings.get(source.requirement.id, {}).get(source.port)
         if source_net in rail_names or source_net == GND_NET:
             if signal.name in rail_names and signal.name != source_net:
@@ -3166,10 +3461,14 @@ def derive_architecture(
                 )
                 continue
             if signal.name != source_net:
-                renamed.append(
-                    f"{signal.name}: peers of {signal.from_ref} join net {source_net} "
-                    "(the net that already owns the pin) (derived)"
+                _bind(
+                    source.requirement.id,
+                    source.port,
+                    signal.name,
+                    source.direction,
+                    context=f"signal {signal.name!r}",
                 )
+                continue
             _join_peers(signal, source, source_net)
             continue
         if signal.name in rail_names or signal.name == GND_NET:
@@ -3358,6 +3657,36 @@ def derive_architecture(
                 context=f"tie {port_name!r}",
             )
 
+    # "none" is not evidence of a physical programming path. The downstream
+    # programming gate has no programming-disabled exemption, so refuse this
+    # unsupported contract before committing the architecture.
+    for requirement_id, catalog in sorted(catalogs.items()):
+        if (
+            catalog.recipe is None
+            or catalog.recipe.definition.recipe not in _NATIVE_USB_MCU_RECIPES
+            or catalog.recipe.definition.exact_part == "RP2040"
+        ):
+            continue
+        requirement = requirements[requirement_id]
+        model = models_by_id[requirement_id]
+        parameters = requirement.parameters
+        if (
+            model.programming == "none"
+            or parameters.get("programming") == "none"
+            or (parameters.get("native_usb") is False
+                and (model.programming or parameters.get("programming"))
+                not in {"uart", "rom_uart", "usb_uart_bridge", "swd", "jtag"})
+        ):
+            _fail(
+                "mcu_programming_access_required",
+                f"requirement {requirement_id!r} disables native USB without a "
+                "supported programming path. Select native_usb and provide its "
+                "data connector, or declare and wire a supported alternative; "
+                "an external programmer assertion is not a physical circuit.",
+                requirement_id=requirement_id,
+                sheet=requirement.sheet,
+            )
+
     # A typed UART bridge carries RP2040 serial traffic, not its programming protocol.
     # Where no native USB pair or programming mode was requested, provide independent SWD
     # recovery instead of adding another USB PHY to the bridge's connector.
@@ -3482,6 +3811,62 @@ def derive_architecture(
                 f"{requirement_id}: native-USB MCU needs a data connector; bound "
                 f"{_USB_DEVICE_CONNECTOR_RECIPE} ({connector_id}) (derived)"
             )
+
+    # The HUB75 buffer is normally disabled in hardware. Only derive its active-high
+    # control from the unique allocatable MCU actually driving its channel nets.
+    # An authored control remains authoritative; a split/unknown owner requires repair.
+    hub75_channels = {
+        "r0", "g0", "b0", "r1", "g1", "b1", "addr_a", "addr_b",
+        "addr_c", "addr_d", "clk", "lat", "oe",
+    }
+    for requirement_id, catalog in sorted(catalogs.items()):
+        if (catalog.recipe is None or
+                catalog.recipe.definition.recipe != "hub75-sn74hct245-interface@2" or
+                bindings.get(requirement_id, {}).get("enable")):
+            continue
+        channel_nets = {
+            net for port, net in bindings.get(requirement_id, {}).items()
+            if port in hub75_channels and net != GND_NET and net not in rail_names
+        }
+        owners = {
+            owner_id for owner_id, owner_catalog in catalogs.items()
+            if owner_catalog.recipe is not None
+            and owner_catalog.recipe.definition.allocatable_pins
+            and any(net in channel_nets and _direction(
+                owner_catalog, models_by_id[owner_id], port
+            ) == "output" for port, net in bindings.get(owner_id, {}).items())
+        }
+        if len(owners) != 1:
+            _fail(
+                "hub75_enable_owner_ambiguous",
+                f"requirement {requirement_id!r} needs an explicit enable signal: "
+                "its HUB75 channels do not have one unique MCU owner",
+                requirement_id=requirement_id,
+                sheet=requirements[requirement_id].sheet,
+                evidence=[f"channel_mcu_owners={','.join(sorted(owners)) or '(none)'}"],
+            )
+            continue
+        owner = next(iter(owners))
+        port = f"output_{requirement_id}_enable"
+        net = f"{requirement_id}_BUFFER_ENABLE".upper()
+        if port in bindings.get(owner, {}) or any(
+            _net_identity(net) == _net_identity(existing)
+            for existing in (*endpoints, *rail_names)
+        ):
+            _fail(
+                "hub75_enable_binding_conflict",
+                f"requirement {requirement_id!r} needs an explicit enable signal: "
+                "the derived MCU port or net is already in use",
+                requirement_id=requirement_id,
+                sheet=requirements[requirement_id].sheet,
+            )
+            continue
+        _bind(owner, port, net, "output", context="HUB75 buffer enable")
+        _bind(requirement_id, "enable", net, "input", context="HUB75 buffer enable")
+        derived_notes.append(
+            f"{requirement_id}: {owner}.{port} controls the normally disabled HUB75 "
+            "buffers; configure all panel signals before asserting enable (derived)"
+        )
 
     # A required port the reviewed recipe allows grounding and the design does not use (HUB75's
     # spare address channel, a connector shell) is tied low here, once, instead of being asked for

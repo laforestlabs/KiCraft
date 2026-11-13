@@ -60,6 +60,43 @@ def test_grows_courtyard_so_pads_clear(tmp_path):
     assert after >= 0.2 - 1e-4, after
 
 
+def test_imported_connector_remains_usable_after_courtyard_growth(tmp_path):
+    """The add-part hygiene pass must not poison its subsequent mouth check."""
+    from kicraft.design.cli_app import _mouth_undetectable
+    from kicraft.design.synthesis.footprint_library import load_footprint_file
+
+    source = (
+        Path("kicraft/parts_library/gct-usb4085/gct-usb4085.pretty")
+        / "USC-C-SMD_USB4085-GF-A.kicad_mod"
+    )
+    pretty = tmp_path / "connector.pretty"
+    pretty.mkdir()
+    path = pretty / source.name
+    path.write_bytes(source.read_bytes())
+    fp = load_footprint_file(pcbnew, path)
+    # Deliberately shrink the copied real connector, independent of the
+    # maintained asset's qualified courtyard dimensions.
+    graphics = [g for g in fp.GraphicalItems() if g.GetLayer() == pcbnew.F_CrtYd]
+    assert len(graphics) == 4
+    corners = [(-1, -1), (1, -1), (1, 1), (-1, 1)]
+    for i, seg in enumerate(graphics):
+        seg.SetStart(pcbnew.VECTOR2I(*(pcbnew.FromMM(v) for v in corners[i])))
+        seg.SetEnd(pcbnew.VECTOR2I(*(pcbnew.FromMM(v) for v in corners[(i + 1) % 4])))
+    fp.InvalidateGeometryCaches()
+    assert courtyard_pad_clearance_mm(fp) < 0.2
+    assert ensure_courtyard_clears_pads(fp)
+    assert len(list(fp.Pads())) == 20
+    assert courtyard_pad_clearance_mm(fp) >= 0.2 - 1e-4
+    assert not ensure_courtyard_clears_pads(fp)
+    assert not _mouth_undetectable(fp, pcbnew)
+
+    pcbnew.PCB_IO_KICAD_SEXPR().FootprintSave(str(pretty), fp)
+    reloaded = load_footprint_file(pcbnew, path)
+    assert len(list(reloaded.Pads())) == 20
+    assert courtyard_pad_clearance_mm(reloaded) >= 0.2 - 1e-4
+    assert not _mouth_undetectable(reloaded, pcbnew)
+
+
 def test_already_clear_courtyard_is_untouched(tmp_path):
     pretty = _pretty_with_testconn(tmp_path)
     # First grow makes it clear; a second grow must be a no-op (idempotent).

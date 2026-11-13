@@ -59,7 +59,7 @@ PARENT_STATE_KEYS = (
 ROUTED_VALIDATION_KEYS = (
     "accepted", "rejection_reasons", "drc",
     # conditional (only when the wrapper ran) — see _compact_routed_validation
-    "power_first", "post_route_repairs", "signal_unconnected_repair",
+    "power_first", "post_route_repairs", "unconnected_repair",
     "illegal_geometry_repair",
 )
 
@@ -969,7 +969,7 @@ def collect_leaves(exp: Path) -> list[dict]:
                 "unconnected": drc.get("unconnected"),
                 "unconnected_nets": drc.get("unconnected_nets"),
             } if isinstance(drc, dict) else None,
-            "signal_repair": la_raw.get("signal_unconnected_repair"),
+            "unconnected_repair": la_raw.get("unconnected_repair"),
             "placement": {
                 "median_pin_mm": pdiag.get("median_pin_mm"),
                 "max_pin_mm": pdiag.get("max_pin_mm"),
@@ -1054,7 +1054,7 @@ def collect_parent(exp: Path) -> dict:
             "drc_flags": {k: drc.get(k) for k in
                           ("timed_out", "missing_cli", "skipped_routing") if drc.get(k)},
             "repairs": {k: rv.get(k) for k in (
-                "post_route_repairs", "signal_unconnected_repair",
+                "post_route_repairs", "unconnected_repair",
                 "illegal_geometry_repair") if rv.get(k) is not None},
         }
     return out
@@ -1568,12 +1568,10 @@ def _mpn_related(a: str, b: str) -> bool:
 
 
 def _cnum_of(part: dict) -> str | None:
-    for s in (part.get("symbol") or "", part.get("footprint") or ""):
-        m = re.search(r"(?<![A-Za-z0-9])C\d{4,}", s)
-        if m:
-            return m.group(0)
-    m = re.search(r"\bC\d{4,}\b", part.get("sourcing_note") or "")
-    return m.group(0) if m else None
+    """Audit the selected procurement code, never a mechanical-library name."""
+    from kicraft.design.synthesis.fab_export import extract_lcsc_pin
+
+    return extract_lcsc_pin(part.get("sourcing_note") or "")
 
 
 def collect_bom_realness(run: Path) -> dict:
@@ -1588,6 +1586,40 @@ def collect_bom_realness(run: Path) -> dict:
     catalog = jlcparts.available()
     out: dict = {"catalog_present": catalog,
                  "catalog_age_days": jlcparts.dump_age_days() if catalog else None}
+    manifest_by_name = {}
+    lib_loaded = False
+    sd = stem_dir(run)
+    try:
+        from kicraft.design.library import _load_library_parts
+        # project tier resolves under <stem_dir>/.kicraft/parts — pass the
+        # SYNTHESIZED PROJECT dir, not the run dir
+        active, _broken = _load_library_parts(sd)
+        manifest_by_name = {pm.manifest.name: pm.manifest for pm in active}
+        lib_loaded = True
+    except Exception as exc:  # library optional for triage
+        out["library_note"] = f"parts-library manifests unavailable: {exc}"
+    manifests_by_lcsc = collections.defaultdict(list)
+    for man in manifest_by_name.values():
+        cid = str((man.sourcing or {}).get("lcsc") or "").strip().upper()
+        if cid:
+            manifests_by_lcsc[cid].append(man)
+    verified_distributors = {}
+
+    def distributor_manifest(cid, *, owner=None, part_mpn=None):
+        from kicraft.design.cli_app import _retail_manifest_identity_verified
+
+        code = str(cid or "").strip().upper()
+        candidates = [owner] if owner is not None else manifests_by_lcsc.get(code, ())
+        for man in candidates:
+            if str((man.sourcing or {}).get("lcsc") or "").strip().upper() != code:
+                continue
+            key = (code, man.name, man.mpn, part_mpn)
+            if key not in verified_distributors:
+                verified_distributors[key] = _retail_manifest_identity_verified(man, part_mpn)
+            if verified_distributors[key]:
+                return man
+        return None
+
 
     prices = (_jdict(run / ".kicraft" / "bom_prices.json")).get("prices") or {}
     pass_a, suspects = [], 0
@@ -1597,7 +1629,10 @@ def collect_bom_realness(run: Path) -> dict:
         cnum = e.get("lcsc")
         cand = jlcparts.lookup(cnum) if (catalog and cnum) else None
         if catalog and cand is None:
-            verdict, suspects = "SUSPECT/HALLUCINATED (C# not in catalog)", suspects + 1
+            if distributor_manifest(cnum) is not None:
+                verdict = "REAL distributor identity; assembly stock unverified"
+            else:
+                verdict, suspects = "UNVERIFIED (C# not in assembly catalog)", suspects + 1
         elif cand is None:
             verdict = f"(no catalog) bom_prices stock={e.get('stock')}"
         elif cand.get("stock"):
@@ -1616,8 +1651,25 @@ def collect_bom_realness(run: Path) -> dict:
         cand = jlcparts.lookup(c) if catalog else None
         bm = (p.get("mpn") or "").strip()
         if cand is None:
-            tag = "SUSPECT (not in catalog)" if catalog else "(no catalog)"
-            pass_b.append({"ref": p.get("ref"), "lcsc": c, "bom_mpn": bm, "tag": tag})
+            lib = (p.get("symbol") or "").partition(":")[0]
+            owner = manifest_by_name.get(lib)
+            if owner is None:
+                owner = manifest_by_name.get((p.get("footprint") or "").partition(":")[0])
+            man = distributor_manifest(c, owner=owner) if catalog and owner is not None else None
+            if man is not None:
+                cm = str(man.mpn or "").strip()
+                tag = (
+                    "MATCH (distributor verified; assembly stock unverified)"
+                    if bm and bm.casefold() == cm.casefold()
+                    else "MPN-MISMATCH — wrong part?" if bm else "no-bom-mpn"
+                )
+                pass_b.append({
+                    "ref": p.get("ref"), "lcsc": c, "bom_mpn": bm,
+                    "cat_mpn": cm, "stock": None, "tag": tag,
+                })
+            else:
+                tag = "UNVERIFIED (not in assembly catalog)" if catalog else "(no catalog)"
+                pass_b.append({"ref": p.get("ref"), "lcsc": c, "bom_mpn": bm, "tag": tag})
             continue
         cm = (cand.get("model") or "").strip()
         if bm and cm and _mpn_related(bm, cm):
@@ -1633,18 +1685,6 @@ def collect_bom_realness(run: Path) -> dict:
 
     covered = set(prices.keys()) | {p.get("ref") for p in parts if _cnum_of(p)}
     pass_c = []
-    manifest_by_name = {}
-    lib_loaded = False
-    sd = stem_dir(run)
-    try:
-        from kicraft.design.library import _load_library_parts
-        # project tier resolves under <stem_dir>/.kicraft/parts — pass the
-        # SYNTHESIZED PROJECT dir, not the run dir
-        active, _broken = _load_library_parts(sd)
-        manifest_by_name = {pm.manifest.name: pm.manifest for pm in active}
-        lib_loaded = True
-    except Exception as exc:  # library optional for triage
-        out["library_note"] = f"parts-library manifests unavailable: {exc}"
     for p in parts:
         ref = p.get("ref")
         if ref in covered:
@@ -1666,12 +1706,23 @@ def collect_bom_realness(run: Path) -> dict:
         elif not lcsc:
             pass_c.append({"ref": ref, "tag": "ORPHAN",
                            "note": f"{lib} manifest has no sourcing.lcsc"})
+        elif p.get("mpn") and str(p["mpn"]).strip().casefold() != str(man.mpn or "").strip().casefold():
+            pass_c.append({
+                "ref": ref, "tag": "MPN-MISMATCH — wrong part?",
+                "note": f"{lib} is {man.mpn!r}, BOM claims {p['mpn']!r}",
+            })
         elif catalog and jlcparts.lookup(lcsc) is None:
-            pass_c.append({"ref": ref, "tag": "FABRICATED-LCSC",
-                           "note": f"{lib} claims {lcsc}, not in catalog"})
+            if distributor_manifest(lcsc, owner=man, part_mpn=p.get("mpn")) is not None:
+                pass_c.append({
+                    "ref": ref, "tag": "LIBRARY-BUNDLE",
+                    "note": f"{lib} lcsc={lcsc} (distributor identity verified; assembly stock unverified)",
+                })
+            else:
+                pass_c.append({"ref": ref, "tag": "UNVERIFIED-LCSC",
+                               "note": f"{lib} claims {lcsc}, no verified catalog or distributor identity"})
         else:
             pass_c.append({"ref": ref, "tag": "LIBRARY-BUNDLE",
-                           "note": f"{lib} lcsc={lcsc} (sourceable, not yet priced)"})
+                           "note": f"{lib} lcsc={lcsc} (identity verified; stock checked separately)"})
     out["pass_c"] = pass_c
 
     subs = bom.get("substitutions") or []
@@ -1681,7 +1732,7 @@ def collect_bom_realness(run: Path) -> dict:
         # An MPN mismatch WITH a ledger entry is a recorded, gated deviation;
         # WITHOUT one it is the silent_substitution class.
         "silent_substitution_suspects": [
-            r["ref"] for r in pass_b
+            r["ref"] for r in [*pass_b, *pass_c]
             if r.get("tag", "").startswith("MPN-MISMATCH") and not subs],
     }
     try:

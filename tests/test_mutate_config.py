@@ -9,10 +9,9 @@ import random
 from pathlib import Path
 
 
-from kicraft.autoplacer.config import CONFIG_SEARCH_SPACE, DEFAULT_CONFIG
+from kicraft.autoplacer.config import CONFIG_SEARCH_SPACE, DEFAULT_CONFIG, jsonable_config_value
 from kicraft.cli.autoexperiment import (
     _config_overlay_from_defaults,
-    _jsonable_config_value,
     _mutate_config,
 )
 
@@ -267,23 +266,23 @@ class TestMutateConfigCustomBase:
 
 
 class TestJsonableConfigValue:
-    """_jsonable_config_value handles various types."""
+    """Configuration retains JSON-compatible values at process boundaries."""
 
     def test_set_to_sorted_list(self):
-        assert _jsonable_config_value({"b", "a", "c"}) == ["a", "b", "c"]
+        assert jsonable_config_value({"b", "a", "c"}) == ["a", "b", "c"]
 
     def test_dict_recursive(self):
-        result = _jsonable_config_value({"x": {1, 2}})
+        result = jsonable_config_value({"x": {1, 2}})
         assert result == {"x": [1, 2]}
 
     def test_list_recursive(self):
-        result = _jsonable_config_value([{3, 1, 2}])
+        result = jsonable_config_value([{3, 1, 2}])
         assert result == [[1, 2, 3]]
 
     def test_scalar_passthrough(self):
-        assert _jsonable_config_value(42) == 42
-        assert _jsonable_config_value(3.14) == 3.14
-        assert _jsonable_config_value("hello") == "hello"
+        assert jsonable_config_value(42) == 42
+        assert jsonable_config_value(3.14) == 3.14
+        assert jsonable_config_value("hello") == "hello"
 
 
 class TestConfigOverlayFromDefaults:

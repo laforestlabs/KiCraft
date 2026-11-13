@@ -7,8 +7,10 @@ net name alone do not establish permission.
 
 from __future__ import annotations
 
+import hashlib
 import math
 import re
+from pathlib import Path
 from typing import Any
 
 from kicraft.autoplacer.fab_profile import fab_floors
@@ -56,19 +58,21 @@ def _smd_copper_layer(pad: Any) -> str | None:
 
 
 
+def _smd_via_clearance_iu(pad: Any) -> int:
+    """Return the mask-opening clearance used for SMD and connector lands."""
+    return max(
+        pcbnew.FromMM(0.1),
+        pad.GetSolderMaskExpansion(pcbnew.F_Mask),
+        pad.GetSolderMaskExpansion(pcbnew.B_Mask),
+    )
+
+
 def _via_hits_smd_pad(
     board: Any, point: Any, radius_iu: int, *, authorized_net: int | None = None
 ) -> bool:
     """Keep via copper clear of SMD mask openings on either board face."""
     return any(
-        p.HitTest(
-            point,
-            radius_iu + max(
-                pcbnew.FromMM(0.1),
-                p.GetSolderMaskExpansion(pcbnew.F_Mask),
-                p.GetSolderMaskExpansion(pcbnew.B_Mask),
-            ),
-        )
+        p.HitTest(point, radius_iu + _smd_via_clearance_iu(p))
         for fp in board.GetFootprints()
         for p in fp.Pads()
         if p.GetAttribute() in (pcbnew.PAD_ATTRIB_SMD, pcbnew.PAD_ATTRIB_CONN)
@@ -195,6 +199,19 @@ def _apply_gnd_pad_connection(zone: Any, cfg: dict[str, Any]) -> None:
     else:
         zone.SetPadConnection(pcbnew.ZONE_CONNECTION_FULL)
 
+def _gnd_zone_clearance_mm(cfg: dict[str, Any]) -> float:
+    """Keep ground pours at the fab floor unless explicitly wider.
+
+    A fixed 0.30 mm zone clearance can exclude solid GND fill from a
+    fine-pitch thermal ground pad even when the board's 2 oz rules permit the
+    connection. KiCad still applies the board and netclass clearances to each
+    copper pair; this only selects the zone's additional local clearance.
+    """
+    floor = fab_floors(cfg)["clearance_mm"]
+    configured = cfg.get("zone_clearance_mm")
+    return max(floor, float(configured) if configured is not None else floor)
+
+
 
 def _copper_layer_ids(board: Any) -> dict[str, int]:
     """Every enabled copper layer of this board, name -> layer id.
@@ -213,6 +230,148 @@ def _plane_layers(layer_ids: dict[str, int], layers: tuple[str, ...]) -> tuple[s
     """
     inner = [name for name in layer_ids if re.fullmatch(r"In\d+\.Cu", name)]
     return tuple(dict.fromkeys([*layers, *inner]))
+
+
+_THERMAL_ZONE_PREFIX = "kicraft-thermal-ground:"
+
+
+def finish_local_thermal_ground(pcb_path: str, cfg: dict[str, Any]) -> int:
+    """Reclaim local power-pour area for deficient, already-routed thermal pads.
+
+    These are actual post-route copper zones, not router keepouts. KiCad's
+    filler still clears every foreign track, pad, drill, edge and rule area.
+    The normal thermal, connectivity and DRC gates remain authoritative.
+    """
+    requirements = cfg.get("thermal_requirements") or []
+    from pathlib import Path
+
+    def save_filled(board):
+        sidecars = [Path(pcb_path).with_suffix(s) for s in (".kicad_pro", ".kicad_dru")]
+        rules = [(p, p.read_bytes() if p.is_file() else None) for p in sidecars]
+        try:
+            pcbnew.ZONE_FILLER(board).Fill(board.Zones())
+            board.Save(pcb_path)
+        finally:
+            for path, content in rules:
+                if content is None:
+                    path.unlink(missing_ok=True)
+                else:
+                    path.write_bytes(content)
+
+    board = pcbnew.LoadBoard(pcb_path)
+    net_name = cfg.get("gnd_zone_net", "GND")
+    net = board.GetNetInfo().GetNetItem(net_name)
+    if not net or not net.GetNetCode():
+        return 0
+    power_nets = set(_detect_power_nets(board, cfg))
+    power_priority = int(cfg.get("power_plane_priority", 1))
+
+    def zone_name(fp, pad, layer, radius):
+        pos = pad.GetPosition()
+        return (f"{_THERMAL_ZONE_PREFIX}{fp.GetReferenceAsString()}:{pad.GetNumber()}:"
+                f"{pos.x}:{pos.y}:{layer}:{radius}")
+
+    expected = {}
+    for requirement in requirements:
+        fp = board.FindFootprintByReference(requirement["owner_ref"])
+        radius = float(requirement.get("local_radius_mm", 3.0))
+        if fp is None or not math.isfinite(radius) or radius <= 0:
+            continue
+        r = pcbnew.FromMM(radius)
+        for pad in fp.Pads():
+            if pad.GetNetCode() != net.GetNetCode():
+                continue
+            pos = pad.GetPosition()
+            for layer in (pcbnew.F_Cu, pcbnew.B_Cu):
+                if pad.IsOnLayer(layer) and any(
+                    not z.GetIsRuleArea() and z.GetLayer() == layer
+                    and z.GetNetname() in power_nets
+                    and z.GetAssignedPriority() == power_priority
+                    for z in board.Zones()
+                ):
+                    expected[zone_name(fp, pad, layer, r)] = (layer, pos.x, pos.y, r)
+
+    # Distinct priorities prevent overlapping same-net local zones from
+    # triggering KiCad's zones_intersect rule. Rank all current pad windows,
+    # not just deficient ones, so their priority is stable across refills.
+    top_priority = max((z.GetAssignedPriority() for z in board.Zones()
+                        if not z.GetIsRuleArea()
+                        and not z.GetZoneName().startswith(_THERMAL_ZONE_PREFIX)),
+                       default=power_priority)
+    priorities = {name: top_priority + index + 1
+                  for index, name in enumerate(sorted(expected))}
+
+    removed = False
+    for zone in list(board.Zones()):
+        name = zone.GetZoneName()
+        if zone.GetIsRuleArea() or zone.GetNetname() != net_name or not name.startswith(_THERMAL_ZONE_PREFIX):
+            continue
+        spec = expected.get(name)
+        outline = zone.Outline()
+        bounds = outline.Outline(0).BBox() if outline.OutlineCount() == 1 else None
+        if (spec is None or bounds is None or zone.GetLayer() != spec[0]
+                or zone.GetAssignedPriority() != priorities[name]
+                or (bounds.GetX(), bounds.GetY(), bounds.GetWidth(), bounds.GetHeight())
+                != (spec[1] - spec[3], spec[2] - spec[3], 2 * spec[3], 2 * spec[3])):
+            board.Remove(zone)
+            removed = True
+    if removed:
+        save_filled(board)
+        board = pcbnew.LoadBoard(pcb_path)
+        net = board.GetNetInfo().GetNetItem(net_name)
+
+    deficient = []
+    for requirement in requirements:
+        fp = board.FindFootprintByReference(requirement["owner_ref"])
+        if fp is None:
+            continue
+        try:
+            audit_thermal_ground(pcb_path, [requirement], net_name)
+        except ValueError:
+            deficient.append((requirement, fp))
+    # Reuse the validated owned zones when the geometry still matches.
+    existing = {z.GetZoneName() for z in board.Zones() if not z.GetIsRuleArea()}
+    added = 0
+    for requirement, fp in deficient:
+        radius = float(requirement.get("local_radius_mm", 3.0))
+        if not math.isfinite(radius) or radius <= 0:
+            continue
+        for pad in fp.Pads():
+            if pad.GetNetCode() != net.GetNetCode():
+                continue
+            for layer in (pcbnew.F_Cu, pcbnew.B_Cu):
+                if not pad.IsOnLayer(layer):
+                    continue
+                competing = [z for z in board.Zones()
+                             if not z.GetIsRuleArea() and z.GetLayer() == layer
+                             and z.GetNetname() in power_nets
+                             and z.GetAssignedPriority() == power_priority]
+                if not competing:
+                    continue
+                pos = pad.GetPosition()
+                name = zone_name(fp, pad, layer, pcbnew.FromMM(radius))
+                if name in existing:
+                    continue
+                zone = pcbnew.ZONE(board)
+                zone.SetZoneName(name)
+                zone.SetNet(net)
+                zone.SetLayer(layer)
+                zone.SetAssignedPriority(priorities[name])
+                zone.SetLocalClearance(pcbnew.FromMM(_gnd_zone_clearance_mm(cfg)))
+                zone.SetMinThickness(pcbnew.FromMM(float(cfg.get("zone_min_thickness_mm", 0.25))))
+                _apply_gnd_pad_connection(zone, cfg)
+                zone.SetIslandRemovalMode(pcbnew.ISLAND_REMOVAL_MODE_ALWAYS)
+                outline = zone.Outline()
+                outline.NewOutline()
+                r = pcbnew.FromMM(radius)
+                for dx, dy in ((-r, -r), (r, -r), (r, r), (-r, r)):
+                    outline.Append(int(pos.x + dx), int(pos.y + dy))
+                board.Add(zone)
+                existing.add(name)
+                added += 1
+    if added:
+        save_filled(board)
+    return added
 
 
 def pour_gnd_planes(
@@ -258,6 +417,7 @@ def pour_gnd_planes(
                 z.GetLayer() == target_layer
                 and z.GetNetname() == gnd_name
                 and not z.GetIsRuleArea()
+                and not z.GetZoneName().startswith(_THERMAL_ZONE_PREFIX)
             ):
                 zone = z
                 break
@@ -266,7 +426,6 @@ def pour_gnd_planes(
             zone.SetNet(gnd_net)
             zone.SetLayer(target_layer)
             zone.SetIsRuleArea(False)
-            zone.SetLocalClearance(pcbnew.FromMM(float(cfg.get("zone_clearance_mm", 0.3))))
             zone.SetMinThickness(pcbnew.FromMM(float(cfg.get("zone_min_thickness_mm", 0.25))))
             _apply_gnd_pad_connection(zone, cfg)
             zone.SetAssignedPriority(0)
@@ -278,6 +437,9 @@ def pour_gnd_planes(
                     zone.SetIslandRemovalMode(0)
                 except Exception:
                     pass
+        # Reused zones can carry an older default from a stamped input board.
+        # Reapply current policy on every fill, not only when creating a zone.
+        zone.SetLocalClearance(pcbnew.FromMM(_gnd_zone_clearance_mm(cfg)))
         outline = zone.Outline()
         outline.RemoveAllContours()
         outline.NewOutline()
@@ -318,7 +480,71 @@ def _detect_power_nets(board: Any, cfg: dict[str, Any]) -> list[str]:
     return ranked[:max_nets]
 
 
-def pour_power_planes(
+def _parent_ground_reservations(plan: Any) -> tuple[Any, list[Any]]:
+    """Load exactly the staged, tagged router witnesses, or fail closed."""
+    if not isinstance(plan, dict) or set(plan) != {"board_path", "zone_name", "sha256"}:
+        raise ValueError("invalid parent ground reservation plan")
+    path, name, digest = plan["board_path"], plan["zone_name"], plan["sha256"]
+    if not all(isinstance(value, str) and value for value in (path, name, digest)):
+        raise ValueError("invalid parent ground reservation plan fields")
+    data = Path(path).read_bytes()
+    if hashlib.sha256(data).hexdigest() != digest:
+        raise ValueError("parent ground reservation plan hash mismatch")
+    staged = pcbnew.LoadBoard(path)
+    zones = [z for z in staged.Zones() if z.GetZoneName() == name]
+    if not zones or any(not z.GetIsRuleArea() or not z.GetDoNotAllowTracks()
+                        or not z.GetDoNotAllowVias() or z.GetDoNotAllowCopperPour()
+                        for z in zones):
+        raise ValueError("parent ground reservation plan has missing or invalid tagged areas")
+    # Keep the owning board alive while its SWIG zone objects are in use.
+    return staged, zones
+
+
+def _power_outline_with_ground_reservations(board: Any, zone: Any, bounds: tuple,
+                                            reservations: list[Any], cfg: dict) -> None:
+    """Subtract clearance-expanded native reservation polygons from a power zone."""
+    from kicraft.autoplacer.brain.breakout_stubs import _own_clearance_mm
+
+    layer = zone.GetLayer()
+    ground_names = {cfg.get("gnd_zone_net", "GND")}
+    ground_names.update(spec["ground_return"]["net"] for spec in cfg.get("local_bypasses", [])
+                        if isinstance(spec.get("ground_return"), dict)
+                        and spec["ground_return"].get("net"))
+    floor = fab_floors(cfg)["clearance_mm"]
+    clearance = max(floor, pcbnew.ToMM(zone.GetLocalClearance()),
+                    _own_clearance_mm(zone, layer, floor))
+    for other in board.Zones():
+        if not other.GetIsRuleArea() and other.GetNetname() in ground_names and other.IsOnLayer(layer):
+            clearance = max(clearance, pcbnew.ToMM(other.GetLocalClearance()),
+                            _own_clearance_mm(other, layer, floor))
+    for fp in board.GetFootprints():
+        for pad in fp.Pads():
+            if pad.GetNetname() in ground_names | {zone.GetNetname()} and pad.IsOnLayer(layer):
+                clearance = max(clearance, _own_clearance_mm(pad, layer, floor))
+    error = max(1, int(board.GetDesignSettings().m_MaxError), pcbnew.FromMM(0.001))
+    cut = pcbnew.SHAPE_POLY_SET()
+    for area in reservations:
+        if area.IsOnLayer(layer):
+            expanded = pcbnew.SHAPE_POLY_SET(area.Outline())
+            expanded.Inflate(pcbnew.FromMM(clearance) + error,
+                             pcbnew.CORNER_STRATEGY_ROUND_ALL_CORNERS, error)
+            cut.BooleanAdd(expanded)
+    shape = pcbnew.SHAPE_POLY_SET()
+    shape.NewOutline()
+    x1, y1, x2, y2 = bounds
+    for x, y in ((x1, y1), (x2, y1), (x2, y2), (x1, y2)):
+        shape.Append(int(x), int(y))
+    if cut.OutlineCount():
+        shape.BooleanSubtract(cut)
+    outline = zone.Outline()
+    outline.RemoveAllContours()
+    for index in range(shape.OutlineCount()):
+        outline.AddOutline(shape.Outline(index))
+        for hole in range(shape.HoleCount(index)):
+            outline.AddHole(shape.Hole(index, hole), index)
+
+
+def _pour_power_planes(
     pcb_path: str,
     cfg: dict[str, Any] | None = None,
     layers: tuple[str, ...] = ("F.Cu",),
@@ -335,6 +561,10 @@ def pour_power_planes(
     vias. Returns ``{nets, zones}``.
     """
     cfg = cfg or {}
+    staged, reservations = (
+        _parent_ground_reservations(cfg["_parent_ground_reservation_plan"])
+        if "_parent_ground_reservation_plan" in cfg else (None, [])
+    )
     summary: dict[str, Any] = {"nets": [], "zones": 0}
     if not cfg.get("power_plane_enabled", True):
         return summary
@@ -374,7 +604,10 @@ def pour_power_planes(
                 zone.SetNet(net)
                 zone.SetLayer(target_layer)
                 zone.SetIsRuleArea(False)
-                zone.SetLocalClearance(pcbnew.FromMM(float(cfg.get("zone_clearance_mm", 0.3))))
+                clearance = cfg.get("zone_clearance_mm")
+                zone.SetLocalClearance(pcbnew.FromMM(
+                    float(clearance) if clearance is not None else 0.3
+                ))
                 zone.SetMinThickness(pcbnew.FromMM(float(cfg.get("zone_min_thickness_mm", 0.25))))
                 # Solid pad connection (not thermal): thermal-relief spokes need
                 # a gap wider than a dense connector's pad pitch, so they never
@@ -401,11 +634,9 @@ def pour_power_planes(
                     zone.SetIslandRemovalMode(0)
                 except Exception:
                     pass
-            outline = zone.Outline()
-            outline.RemoveAllContours()
-            outline.NewOutline()
-            for px, py in ((x1, y1), (x2, y1), (x2, y2), (x1, y2)):
-                outline.Append(int(px), int(py))
+            _power_outline_with_ground_reservations(
+                board, zone, (x1, y1, x2, y2), reservations, cfg
+            )
             summary["zones"] += 1
         summary["nets"].append(net_name)
 
@@ -413,6 +644,24 @@ def pour_power_planes(
     pcbnew.ZONE_FILLER(board).Fill(board.Zones())
     board.Save(pcb_path)
     return summary
+
+
+def pour_power_planes(
+    pcb_path: str,
+    cfg: dict[str, Any] | None = None,
+    layers: tuple[str, ...] = ("F.Cu",),
+) -> dict[str, Any]:
+    """Pour power while preserving the authoritative project/rule sidecars."""
+    sidecars = [Path(pcb_path).with_suffix(suffix) for suffix in (".kicad_pro", ".kicad_dru")]
+    original = [(p, p.read_bytes() if p.is_file() else None) for p in sidecars]
+    try:
+        return _pour_power_planes(pcb_path, cfg, layers)
+    finally:
+        for path, content in original:
+            if content is None:
+                path.unlink(missing_ok=True)
+            else:
+                path.write_bytes(content)
 
 
 def _collect_net_clusters(
@@ -469,7 +718,10 @@ def _collect_net_clusters(
         if t.GetClass() == "PCB_VIA":
             pos = t.GetPosition()
             x, y = pcbnew.ToMM(pos.x), pcbnew.ToMM(pos.y)
-            r = pcbnew.ToMM(t.GetWidth()) / 2.0
+            try:
+                r = pcbnew.ToMM(t.GetWidth(F)) / 2.0
+            except TypeError:
+                r = pcbnew.ToMM(t.GetWidth()) / 2.0
             nodes.append(
                 {"kind": "via", "layers": {F, B}, "pts": _pts_around(x, y, r), "xy": (x, y), "r": r}
             )
@@ -557,6 +809,130 @@ def _collect_net_clusters(
     for i in range(len(all_nodes)):
         clusters.setdefault(find(i), []).append(i)
     return clusters, all_nodes
+
+
+def _thermal_direct_islands(pad: dict, islands: list[dict]) -> list[dict]:
+    return [
+        island for island in islands if island["layers"] & pad["layers"]
+        and any(island["fill"].Contains(
+            pcbnew.VECTOR2I(pcbnew.FromMM(px), pcbnew.FromMM(py)), island["idx"]
+        ) for px, py in pad["pts"])
+    ]
+
+
+def _thermal_via_islands(
+    pad: dict, islands: list[dict], direct: list[dict], vias: list[dict],
+    radius: float,
+) -> list[tuple[dict, list[dict]]]:
+    result = []
+    for via in vias:
+        x, y = via["xy"]
+        if math.hypot(x - pad["xy"][0], y - pad["xy"][1]) > radius:
+            continue
+        point = pcbnew.VECTOR2I(pcbnew.FromMM(x), pcbnew.FromMM(y))
+        connected_islands = [
+            island for island in islands
+            if island["fill"].Contains(point, island["idx"])
+        ]
+        if not any(island in direct for island in connected_islands):
+            continue
+        via_layers = {layer for island in connected_islands for layer in island["layers"]}
+        if {pcbnew.F_Cu, pcbnew.B_Cu} <= via_layers:
+            result.append((via, connected_islands))
+    return result
+
+
+def _local_island_area(island: dict, x: float, y: float, radius: float) -> float:
+    """Filled area, including holes, clipped to a square around a ground pad."""
+    window = pcbnew.SHAPE_POLY_SET()
+    window.NewOutline()
+    for px, py in ((x - radius, y - radius), (x + radius, y - radius),
+                   (x + radius, y + radius), (x - radius, y + radius)):
+        window.Append(pcbnew.FromMM(px), pcbnew.FromMM(py))
+    clipped = island["fill"].UnitSet(island["idx"])
+    clipped.BooleanIntersection(window)
+    return abs(clipped.Area()) / float(pcbnew.FromMM(1)) ** 2
+
+
+def audit_thermal_ground(pcb_path: str, requirements: list[dict[str, Any]],
+                         gnd_name: str = "GND") -> dict[str, Any]:
+    """Require each designated IC ground to reach filled copper on both faces.
+
+    A via counts only when it belongs to the same connected cluster as the IC
+    pad and filled islands on both layers. This is a connectivity gate, not a
+    claim that the resulting copper area establishes a particular theta-JA.
+    """
+    board = pcbnew.LoadBoard(pcb_path)
+    clusters, nodes = _collect_net_clusters(board, gnd_name)
+    for zone in board.Zones():
+        if (zone.GetNetname() == gnd_name and not zone.GetIsRuleArea()
+                and zone.GetPadConnection() != pcbnew.ZONE_CONNECTION_FULL):
+            raise ValueError("thermal ground requires solid pad-to-plane connection")
+    rows = []
+    for requirement in requirements:
+        ref = requirement["owner_ref"]
+        pads = [i for i, n in enumerate(nodes)
+                if n["kind"] == "pad" and n["ref"] == ref]
+        required_pins = {str(pin) for pin in requirement.get("ground_pins", [])}
+        present_pins = {str(nodes[i]["num"]) for i in pads}
+        if not required_pins or not required_pins <= present_pins:
+            raise ValueError(
+                f"{ref}: required {gnd_name} pads missing: "
+                f"{sorted(required_pins - present_pins)}"
+            )
+        for pad_index in pads:
+            members = next((indices for indices in clusters.values()
+                            if pad_index in indices), [])
+            islands = [nodes[i] for i in members if nodes[i]["kind"] == "island"]
+            pad = nodes[pad_index]
+            direct = _thermal_direct_islands(pad, islands)
+            if not direct:
+                raise ValueError(f"{ref}.{pad['num']}: no direct ground plane bond")
+            radius = float(requirement.get("local_radius_mm", 3.0))
+            minimum_area = float(requirement.get("minimum_local_ground_area_mm2", 4.0))
+            if radius <= 0 or minimum_area <= 0:
+                raise ValueError(f"{ref}: invalid local thermal spreading contract")
+            layers = {layer for island in islands for layer in island["layers"]}
+            via_islands = _thermal_via_islands(
+                pad, islands, direct,
+                [nodes[i] for i in members if nodes[i]["kind"] == "via"],
+                radius,
+            )
+            vias = [via for via, _ in via_islands]
+            local_islands = []
+            for _, connected_islands in via_islands:
+                for island in connected_islands:
+                    if not any(island is prior for prior in local_islands):
+                        local_islands.append(island)
+            if not {pcbnew.F_Cu, pcbnew.B_Cu} <= layers or not vias:
+                raise ValueError(
+                    f"{ref}.{nodes[pad_index]['num']}: ground does not reach "
+                    "filled planes on both faces through a connected via"
+                )
+            scale = float(pcbnew.FromMM(1)) ** 2
+            areas = {
+                name: sum(abs(island["fill"].UnitSet(island["idx"]).Area()) / scale
+                          for island in islands if layer in island["layers"])
+                for name, layer in (("F.Cu", pcbnew.F_Cu), ("B.Cu", pcbnew.B_Cu))
+            }
+            x, y = nodes[pad_index]["xy"]
+            nearest = min(math.hypot(v["xy"][0] - x, v["xy"][1] - y) for v in vias)
+            local_areas = {
+                name: sum(_local_island_area(island, x, y, radius)
+                          for island in local_islands if layer in island["layers"])
+                for name, layer in (("F.Cu", pcbnew.F_Cu), ("B.Cu", pcbnew.B_Cu))
+            }
+            if any(area < minimum_area for area in local_areas.values()):
+                raise ValueError(
+                    f"{ref}.{pad['num']}: insufficient local ground copper "
+                    f"within {radius:g} mm: {local_areas}, minimum {minimum_area:g} mm²/layer"
+                )
+            rows.append({"ref": ref, "pad": pad["num"],
+                         "connected_vias": len(vias), "filled_area_mm2": areas,
+                         "local_filled_area_mm2": local_areas,
+                         "local_square_half_width_mm": radius,
+                         "nearest_connected_via_mm": nearest})
+    return {"pads": rows}
 
 
 def repair_stranded_net(
@@ -710,6 +1086,69 @@ def repair_stranded_gnd(
     return repair_stranded_net(pcb_path, gnd_name, cfg)
 
 
+def _repair_ground_anchor_detours(pcb_path: str, cfg: dict[str, Any]) -> int:
+    """Join stranded pad/via clusters using guarded same-layer detours."""
+    from kicraft.autoplacer.brain.breakout_stubs import BreakoutSpec, add_breakout_stubs
+    from kicraft.autoplacer.brain.unconnected_repair import (
+        _DEFAULT_MAX_ATTEMPTS, _candidate_paths, _copper_obstacles, _path_clear,
+    )
+
+    net_name = cfg.get("gnd_zone_net", "GND")
+    board = pcbnew.LoadBoard(pcb_path)
+    clusters, nodes = _collect_net_clusters(board, net_name)
+    if len(clusters) <= 1:
+        return 0
+    main = max(clusters, key=lambda root: len(clusters[root]))
+    targets = [nodes[i] for i in clusters[main] if nodes[i]["kind"] in ("pad", "via")]
+    obstacles = _copper_obstacles(board)
+    floors = fab_floors(cfg)
+    margin = floors["clearance_mm"] + floors["track_mm"] / 2
+    max_distance = float(cfg.get("gnd_strand_repair_max_mm", 30.0))
+    max_targets = int(cfg.get("gnd_strand_repair_max_targets", 5))
+    max_attempts = int(cfg.get("signal_repair_max_attempts", _DEFAULT_MAX_ATTEMPTS))
+    for root, members in clusters.items():
+        if root == main or not any(nodes[i]["kind"] == "pad" for i in members):
+            continue
+        sources = [nodes[i] for i in members if nodes[i]["kind"] in ("pad", "via")]
+        pairs = []
+        for src in sources:
+            nearest = sorted(targets, key=lambda tgt: math.dist(src["xy"], tgt["xy"]))
+            for tgt in nearest[:max_targets]:
+                distance = math.dist(src["xy"], tgt["xy"])
+                if distance <= max_distance:
+                    pairs.append((distance, src, tgt))
+        pairs.sort(key=lambda item: item[0])
+        attempts = 0
+        for _, src, tgt in pairs:
+            for layer, layer_name in ((pcbnew.B_Cu, "B.Cu"), (pcbnew.F_Cu, "F.Cu")):
+                if layer not in src["layers"] or layer not in tgt["layers"]:
+                    continue
+                for path in _candidate_paths(src["xy"], tgt["xy"], None):
+                    if attempts >= max_attempts:
+                        break
+                    if not _path_clear(obstacles, [src["xy"], *path], layer=layer_name,
+                                       net=net_name, margin_mm=margin,
+                                       src=src["xy"], tgt=tgt["xy"]):
+                        continue
+                    attempts += 1
+                    result = add_breakout_stubs(
+                        pcb_path, [BreakoutSpec(
+                            ref="ground", pad="anchor", start_xy=src["xy"],
+                            net=net_name, waypoints=path, layer=layer_name,
+                        )], cfg=cfg,
+                    )
+                    if result.get("stubs", 0):
+                        updated = pcbnew.LoadBoard(pcb_path)
+                        pcbnew.ZONE_FILLER(updated).Fill(updated.Zones())
+                        updated.Save(pcb_path)
+                        return 1
+                if attempts >= max_attempts:
+                    break
+            if attempts >= max_attempts:
+                break
+    return 0
+
+
 def repair_stranded_power(
     pcb_path: str,
     nets: list[str] | None = None,
@@ -804,16 +1243,17 @@ def add_gnd_pour_and_thermal_vias(
     pcb_path: str,
     cfg: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Stitch GND/thermal pads to a B.Cu GND pour with thermal vias, fill, save.
+    """Finish ground copper, restoring both faces for owned thermal contracts.
 
-    Returns {gnd_pads_stitched, thermal_vias_added, zone_filled}. Idempotent
-    w.r.t. the pour (reuses an existing B.Cu GND zone); call once per board.
+    Returns counts for thermal arrays, off-pad plane stitches and escapes.
+    Existing filled planes are used for canonical local thermal witnesses.
     """
     cfg = cfg or {}
     gnd_name = cfg.get("gnd_zone_net", "GND")
     summary: dict[str, Any] = {
         "gnd_pads_stitched": 0,
         "thermal_vias_added": 0,
+        "plane_stitches_added": 0,
         "zone_filled": False,
         "net": gnd_name,
     }
@@ -821,6 +1261,23 @@ def add_gnd_pour_and_thermal_vias(
         return summary
 
     board = pcbnew.LoadBoard(pcb_path)
+    if any(board.FindFootprintByReference(r["owner_ref"]) is not None
+           for r in cfg.get("thermal_requirements", [])):
+        from pathlib import Path
+
+        # Outline/silk restamping intentionally clears zones. Rebuild the
+        # declared two-face copper here as well as in pre-route preparation.
+        sidecars = [Path(pcb_path).with_suffix(s) for s in (".kicad_pro", ".kicad_dru")]
+        rules = [(p, p.read_bytes() if p.is_file() else None) for p in sidecars]
+        try:
+            pour_gnd_planes(pcb_path, cfg, layers=("F.Cu", "B.Cu"))
+        finally:
+            for path, content in rules:
+                if content is None:
+                    path.unlink(missing_ok=True)
+                else:
+                    path.write_bytes(content)
+        board = pcbnew.LoadBoard(pcb_path)
     gnd_net = board.GetNetInfo().GetNetItem(gnd_name)
     if not gnd_net or gnd_net.GetNetCode() == 0:
         summary["error"] = f"net {gnd_name!r} not found"
@@ -845,7 +1302,7 @@ def add_gnd_pour_and_thermal_vias(
     summary["thermal_vias_blocked"] = 0
     summary["escape_stitched"] = 0
 
-    from kicraft.autoplacer.brain.breakout_stubs import _own_clearance_mm
+    from kicraft.autoplacer.brain.breakout_stubs import _own_clearance_mm, _pad_hole_overhang_mm
 
     # GND-side clearance: KiCad resolves a pair as the LARGER of the two
     # items' netclass clearances, and GND rides the Power class (0.30 mm) on
@@ -866,6 +1323,7 @@ def add_gnd_pour_and_thermal_vias(
     via_radius_iu = int(via_size) // 2
     via_drill_r_mm = pcbnew.ToMM(via_drill) / 2.0
     via_edge_geometry = _board_edge_geometry(board)
+    hole_clearance_mm = float(cfg.get("hole_clearance_min_mm", 0.25))
     copper_obstacles: list[tuple[Any, int]] = []  # (item, HitTest margin)
     for t in board.GetTracks():
         if t.GetNetCode() == gnd_code:
@@ -875,10 +1333,15 @@ def add_gnd_pour_and_thermal_vias(
         copper_obstacles.append((t, int(pcbnew.FromMM(via_r_mm + max(gnd_cl_mm, item_cl)))))
     for ofp in board.GetFootprints():
         for op in ofp.Pads():
-            if op.GetNetCode() == gnd_code:
+            if (op.GetNetCode() == gnd_code
+                    and op.GetAttribute() != pcbnew.PAD_ATTRIB_NPTH):
                 continue
             item_cl = _own_clearance_mm(op, pcbnew.B_Cu, floor_mm)
-            copper_obstacles.append((op, int(pcbnew.FromMM(via_r_mm + max(gnd_cl_mm, item_cl)))))
+            clearance = max(gnd_cl_mm, item_cl)
+            overhang = _pad_hole_overhang_mm(op)
+            if overhang is not None:
+                clearance = max(clearance, hole_clearance_mm + overhang)
+            copper_obstacles.append((op, int(pcbnew.FromMM(via_r_mm + clearance))))
 
     # Drilled holes: a new via's hole wall must keep the board's hole-to-hole
     # minimum from EVERY existing hole (vias and PTH pads) -- nothing checked
@@ -948,6 +1411,124 @@ def add_gnd_pour_and_thermal_vias(
         holes.append((pcbnew.ToMM(int(x)), pcbnew.ToMM(int(y)), via_drill_r_mm))
         return True
 
+    # Work on the current board and the same via guards as the array producer:
+    # after the escape pass saves and reloads it, these obstacle references
+    # would no longer describe the board being modified.
+    thermal_pads = set()
+    requirements = cfg.get("thermal_requirements", [])
+    if requirements:
+        from shapely.geometry import Point
+        from shapely import constrained_delaunay_triangles
+        from kicraft.autoplacer.hardware.ground_reservations import _native_polygon
+
+        owners = {fp.GetReferenceAsString() for fp in board.GetFootprints()}
+        for requirement in requirements:
+            ref = requirement["owner_ref"]
+            if ref not in owners:
+                continue
+            radius = float(requirement.get("local_radius_mm", 3.0))
+            minimum = float(requirement.get("minimum_local_ground_area_mm2", 4.0))
+            if not math.isfinite(radius) or radius <= 0 or not math.isfinite(minimum) or minimum <= 0:
+                raise ValueError(f"{ref}: invalid local thermal spreading contract")
+
+            # The native thermal audit checks every ground pad of the owner,
+            # including repeated pad numbers and ground pins beyond the list.
+            clusters, nodes = _collect_net_clusters(board, gnd_name)
+            pads = [node for node in nodes if node["kind"] == "pad" and node["ref"] == ref]
+            for original in pads:
+                clusters, nodes = _collect_net_clusters(board, gnd_name)
+                pad_index = next(i for i, node in enumerate(nodes)
+                                 if node["kind"] == "pad" and node["ref"] == ref
+                                 and node["num"] == original["num"] and node["xy"] == original["xy"])
+                pad = nodes[pad_index]
+                members = next(indices for indices in clusters.values() if pad_index in indices)
+                islands = [nodes[i] for i in members if nodes[i]["kind"] == "island"]
+                direct = _thermal_direct_islands(pad, islands)
+                all_islands = [node for node in nodes if node["kind"] == "island"]
+                witnesses = _thermal_via_islands(
+                    pad, islands, direct,
+                    [nodes[i] for i in members if nodes[i]["kind"] == "via"], radius,
+                )
+
+                area_cache = {}
+
+                def _enough_area(connected):
+                    for island in connected:
+                        if id(island) not in area_cache:
+                            area_cache[id(island)] = _local_island_area(
+                                island, *pad["xy"], radius)
+                    return all(sum(area_cache[id(island)] for island in connected
+                                   if layer in island["layers"]) >= minimum
+                               for layer in (pcbnew.F_Cu, pcbnew.B_Cu))
+
+                connected = []
+                for _, witness_islands in witnesses:
+                    for island in witness_islands:
+                        if not any(island is prior for prior in connected):
+                            connected.append(island)
+                key = (ref, str(pad["num"]), pad["xy"])
+                if witnesses and _enough_area(connected):
+                    thermal_pads.add(key)
+                    continue
+                if not direct:
+                    continue
+
+                # Intersect actual filled islands, not zone outlines. Native
+                # erosion gives interior points a small margin from fill edges.
+                # Triangles and component representatives cover off-grid and
+                # narrow components; the local grid explores around obstacles.
+                candidates = set()
+                center = tuple(pcbnew.FromMM(v) for v in pad["xy"])
+                disk = Point(*center).buffer(pcbnew.FromMM(radius), quad_segs=64)
+                for near in direct:
+                    for far in all_islands:
+                        if near["layers"] == far["layers"]:
+                            continue
+                        overlap = near["fill"].UnitSet(near["idx"])
+                        overlap.BooleanIntersection(far["fill"].UnitSet(far["idx"]))
+                        overlap.Deflate(pcbnew.FromMM(0.01), pcbnew.CORNER_STRATEGY_ROUND_ALL_CORNERS,
+                                        max(1, pcbnew.FromMM(0.001)))
+                        for index in range(overlap.OutlineCount()):
+                            region = _native_polygon(overlap, index).intersection(disk)
+                            parts = getattr(region, "geoms", (region,))
+                            for part in parts:
+                                if part.is_empty or part.geom_type != "Polygon":
+                                    continue
+                                points = [part.representative_point()]
+                                points.extend(t.representative_point()
+                                              for t in constrained_delaunay_triangles(part).geoms)
+                                step = pcbnew.FromMM(0.1)
+                                x1, y1, x2, y2 = part.bounds
+                                for x in range(math.ceil(x1 / step) * step, math.floor(x2) + 1, step):
+                                    for y in range(math.ceil(y1 / step) * step, math.floor(y2) + 1, step):
+                                        point = Point(x, y)
+                                        if part.contains(point):
+                                            candidates.add((x, y))
+                                candidates.update((round(point.x), round(point.y)) for point in points)
+
+                for x, y in sorted(candidates, key=lambda p: ((p[0] - center[0]) ** 2
+                                                               + (p[1] - center[1]) ** 2, p)):
+                    if math.hypot(x - center[0], y - center[1]) > pcbnew.FromMM(radius):
+                        continue
+                    point = pcbnew.VECTOR2I(x, y)
+                    touching = [island for island in all_islands
+                                if island["fill"].Contains(point, island["idx"])]
+                    if not any(any(island is item for item in direct) for island in touching):
+                        continue
+                    # Plane stitches are always off every SMD land, including
+                    # reviewed lands that the array producer may drill in-pad.
+                    if (_via_hits_smd_pad(board, point, via_radius_iu)
+                            or _via_blocked(x, y)):
+                        continue
+                    combined = connected + [island for island in touching
+                                            if not any(island is item for item in connected)]
+                    if not _enough_area(combined):
+                        continue
+                    if _add_via(x, y):
+                        summary["plane_stitches_added"] += 1
+                        thermal_pads.add(key)
+                        break
+
     # GND pads that need stitching but cannot host an in-pad via: escape them
     # with a short guarded stub + end via instead (see below).
     escape_pads: list[tuple[str, str, tuple[float, float], str]] = []
@@ -960,8 +1541,28 @@ def add_gnd_pour_and_thermal_vias(
         for t in board.GetTracks()
         if t.GetClass() == "PCB_VIA" and t.GetNetCode() == gnd_code
     }
+    local_ground_limits: dict[tuple[str, str], float] = {}
+    for spec in cfg.get("local_bypasses", []):
+        if "ground_return" not in spec:
+            continue
+        ground = spec["ground_return"]
+        if not isinstance(ground, dict) or any(
+            not isinstance(ground.get(key), str) or not ground[key].strip()
+            for key in ("owner_ref", "owner_pin", "member_pin", "net")
+        ):
+            raise ValueError("local ground return requires explicit owner ref, pins and net")
+        if ground["net"] != gnd_name:
+            continue
+        limit = float(ground["max_via_distance_mm"])
+        if not math.isfinite(limit) or limit <= 0:
+            raise ValueError("invalid ground return via distance")
+        for ref, pin in ((ground["owner_ref"], ground["owner_pin"]),
+                         (spec["bypass_ref"], ground["member_pin"])):
+            key = (ref, str(pin))
+            local_ground_limits[key] = min(limit, local_ground_limits.get(key, limit))
 
-    def _already_bonded(pad) -> bool:
+
+    def _already_bonded(pad, limit=None) -> bool:
         for track in board.GetTracks():
             if (
                 track.GetClass() == "PCB_VIA"
@@ -970,9 +1571,16 @@ def add_gnd_pour_and_thermal_vias(
             ):
                 continue
             a, b = track.GetStart(), track.GetEnd()
-            if (pad.HitTest(a) and (b.x, b.y) in gnd_via_pts) or (
-                pad.HitTest(b) and (a.x, a.y) in gnd_via_pts
-            ):
+            endpoints = ((a, b), (b, a))
+            for pad_end, via_end in endpoints:
+                if not pad.HitTest(pad_end) or (via_end.x, via_end.y) not in gnd_via_pts:
+                    continue
+                if limit is not None:
+                    pos = pad.GetPosition()
+                    if (pcbnew.ToMM(round(math.hypot(via_end.x - pos.x, via_end.y - pos.y))) > limit
+                            or pcbnew.ToMM(round(math.hypot(via_end.x - pad_end.x,
+                                                           via_end.y - pad_end.y))) > limit):
+                        continue
                 return True
         return False
 
@@ -997,12 +1605,16 @@ def add_gnd_pour_and_thermal_vias(
             size = pad.GetSize()
             large = pcbnew.ToMM(size.x) * pcbnew.ToMM(size.y) >= area_threshold
             pos = pad.GetPosition()
+            if (fp.GetReferenceAsString(), str(pad.GetNumber()),
+                    (pcbnew.ToMM(pos.x), pcbnew.ToMM(pos.y))) in thermal_pads:
+                continue
             # Net any stray (number-shared) EP sub-pad to GND so it joins the plane.
             if pad.GetNetCode() != gnd_code:
                 pad.SetNetCode(gnd_code)
             if not authorized:
                 layer = _smd_copper_layer(pad)
-                if layer is not None and not _already_bonded(pad):
+                limit = local_ground_limits.get((fp.GetReferenceAsString(), str(pad.GetNumber())))
+                if layer is not None and not _already_bonded(pad, limit):
                     escape_pads.append((
                         fp.GetReferenceAsString(), pad.GetNumber(),
                         (pcbnew.ToMM(pos.x), pcbnew.ToMM(pos.y)),
@@ -1037,11 +1649,14 @@ def add_gnd_pour_and_thermal_vias(
                 add_breakout_stubs,
             )
 
+            escape_pads.sort(key=lambda item: (item[0], str(item[1])) not in local_ground_limits)
+
             specs = [
                 BreakoutSpec(
                     ref=ref,
                     pad=num,
-                    length_mm=float(cfg.get("gnd_escape_length_mm", 1.5)),
+                    length_mm=min(float(cfg.get("gnd_escape_length_mm", 1.5)),
+                                  local_ground_limits.get((ref, str(num)), float("inf"))),
                     layer=layer,
                     via_at_end=True,
                     via_outside_smd_pads=True,
@@ -1071,6 +1686,8 @@ def add_gnd_pour_and_thermal_vias(
     zone = None
     for z in board.Zones():
         if z.GetLayer() == target_layer and z.GetNetname() == gnd_name and not z.GetIsRuleArea():
+            if z.GetZoneName().startswith(_THERMAL_ZONE_PREFIX):
+                continue
             zone = z
             break
     if zone is None:
@@ -1078,11 +1695,11 @@ def add_gnd_pour_and_thermal_vias(
         zone.SetNet(gnd_net)
         zone.SetLayer(target_layer)
         zone.SetIsRuleArea(False)
-        zone.SetLocalClearance(pcbnew.FromMM(float(cfg.get("zone_clearance_mm", 0.3))))
         zone.SetMinThickness(pcbnew.FromMM(float(cfg.get("zone_min_thickness_mm", 0.25))))
         _apply_gnd_pad_connection(zone, cfg)
         zone.SetAssignedPriority(0)
         board.Add(zone)
+    zone.SetLocalClearance(pcbnew.FromMM(_gnd_zone_clearance_mm(cfg)))
     # Drop pour islands that aren't tied to GND (avoids isolated-copper DRC).
     try:
         zone.SetIslandRemovalMode(pcbnew.ISLAND_REMOVAL_MODE_ALWAYS)
@@ -1350,6 +1967,18 @@ def repair_parent_gnd_islands(
     if not gnd_name:
         return summary
 
+    summary["thermal_zones_added"] = finish_local_thermal_ground(pcb_path, cfg)
+    # The higher-priority thermal zones and the power pour may have changed
+    # the filled islands since the earlier thermal stitch pass. Reconstruct
+    # witnesses from that final fill, rather than assuming the leaf's old via
+    # still bonds both faces.
+    if cfg.get("thermal_requirements"):
+        thermal = add_gnd_pour_and_thermal_vias(pcb_path, cfg)
+        summary["thermal_stitch"] = thermal
+        if not thermal.get("zone_filled") or thermal.get("error") or thermal.get("escape_error"):
+            raise RuntimeError(f"required thermal ground stitching failed: {thermal}")
+
+
     # Edge-spine pre-pass: connectors banked along one edge strand exactly
     # there (each header's GND pad on its own pour strip between the
     # neighbours' signal fans -- KC-YXQ4EC: 13 islands along a 16-header
@@ -1456,6 +2085,7 @@ def repair_parent_gnd_islands(
         return True
 
     for iteration in range(1, max_iter + 1):
+        vias_before = summary["vias"]
         board = pcbnew.LoadBoard(pcb_path)
         clusters, all_nodes = _collect_net_clusters(board, gnd_name)
         n_clusters = len(clusters)
@@ -1478,37 +2108,60 @@ def repair_parent_gnd_islands(
         for root, members in clusters.items():
             if root == main_root:
                 continue
-            # Find islands in this stranded cluster
             stranded_islands = [all_nodes[i] for i in members if all_nodes[i]["kind"] == "island"]
+            placed = False
             for si in stranded_islands:
-                si_layer = next(iter(si["layers"]))
-                si_pts = si["fill"].Outline(si["idx"])
-                # Check against main-cluster islands on the OPPOSITE layer
                 for mi in main_islands:
-                    mi_layer = next(iter(mi["layers"]))
-                    if mi_layer == si_layer:
-                        continue  # same-layer overlap irrelevant for vias
-                    # Test whether any point from si's outline falls inside mi's fill
-                    for k in range(si_pts.PointCount()):
-                        p = si_pts.CPoint(k)
-                        px_iu, py_iu = p.x, p.y
-                        if mi["fill"].Contains(pcbnew.VECTOR2I(px_iu, py_iu), mi["idx"]):
-                            if _add_via(board, px_iu, py_iu):
+                    if si["layers"] == mi["layers"]:
+                        continue
+                    # Work in KiCad's native polygon representation. Some
+                    # valid filled outlines cannot be converted to a valid
+                    # GEOS polygon (e.g. touching contours), but remain
+                    # usable by the native boolean and containment operations.
+                    overlap = si["fill"].UnitSet(si["idx"])
+                    overlap.BooleanIntersection(mi["fill"].UnitSet(mi["idx"]))
+                    for index in range(overlap.OutlineCount()):
+                        contour = overlap.Outline(index)
+                        bounds = contour.BBox()
+                        center = bounds.Centre()
+                        step = pcbnew.FromMM(0.2)
+
+                        def candidate_points():
+                            yield center.x, center.y
+                            for k in range(contour.PointCount()):
+                                point = contour.CPoint(k)
+                                yield point.x, point.y
+                            for x in range(
+                                math.ceil(bounds.GetX() / step) * step,
+                                bounds.GetX() + bounds.GetWidth() + 1, step,
+                            ):
+                                for y in range(
+                                    math.ceil(bounds.GetY() / step) * step,
+                                    bounds.GetY() + bounds.GetHeight() + 1, step,
+                                ):
+                                    yield x, y
+
+                        for x, y in candidate_points():
+                            pt = pcbnew.VECTOR2I(x, y)
+                            if (overlap.Contains(pt, index)
+                                    and si["fill"].Contains(pt, si["idx"])
+                                    and mi["fill"].Contains(pt, mi["idx"])
+                                    and _add_via(board, x, y)):
                                 summary["vias"] += 1
+                                placed = True
+                                break
+                        if placed:
                             break
-                    else:
-                        # Also test the island centre
-                        bb = si_pts.BBox()
-                        cx, cy = bb.GetCenter().x, bb.GetCenter().y
-                        if mi["fill"].Contains(pcbnew.VECTOR2I(cx, cy), mi["idx"]):
-                            if _add_via(board, cx, cy):
-                                summary["vias"] += 1
+                    if placed:
+                        break
+                if placed:
+                    break
 
         # Save vias, then run the track-based repair
         board.Save(pcb_path)
         del board
 
-        if summary["vias"] > 0:
+        if summary["vias"] > vias_before:
             # Refill so the new vias merge clusters before track repair
             board = pcbnew.LoadBoard(pcb_path)
             pcbnew.ZONE_FILLER(board).Fill(board.Zones())
@@ -1518,6 +2171,8 @@ def repair_parent_gnd_islands(
         # Run track-based repair
         track_res = repair_stranded_net(pcb_path, gnd_name, cfg)
         summary["tied_pads"] += track_res.get("tied", 0)
+        detours = _repair_ground_anchor_detours(pcb_path, cfg)
+        summary["tied_pads"] += detours
 
         # Check convergence after track repair + refill
         board = pcbnew.LoadBoard(pcb_path)
@@ -1530,17 +2185,25 @@ def repair_parent_gnd_islands(
             del board
             break
         del board
+        # Repeating the same searches on unchanged copper cannot make progress
+        # and repeatedly loading boards can exhaust the native process.
+        if summary["vias"] == vias_before and not track_res.get("tied", 0) and not detours:
+            break
 
     # --- Final refill ---
     board = pcbnew.LoadBoard(pcb_path)
     pcbnew.ZONE_FILLER(board).Fill(board.Zones())
     board.Save(pcb_path)
+    clusters, _ = _collect_net_clusters(board, gnd_name)
+    summary["clusters"] = len(clusters)
+    summary["unresolved"] = max(0, len(clusters) - 1)
+    summary["converged"] = summary["unresolved"] == 0
     del board
 
     if not summary.get("converged"):
         print(
             f"  WARNING: parent GND island repair did not converge "
-            f"after {max_iter} iterations; "
+            f"after {summary['iterations']} iterations; "
             f"{summary.get('clusters', '?')} clusters remain."
         )
 

@@ -36,7 +36,8 @@ curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | sudo gpg --d
 curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | sudo tee /etc/apt/sources.list.d/caddy-stable.list
 sudo apt-get update && sudo apt-get install -y caddy
 # Place/route also requires KiCad 9 plus the pinned KiCadRoutingTools checkout:
-# source 0.20.2, commit 3ceb773722bea67aa3685e7ee430c0c0d17ef38d, native 0.20.1.
+# source 0.20.2, commit 8eeee55fd4ba4ed600b11bd8214de9994e8f5396, native 0.20.1.
+# Provision the bundled repair as described in docs/kicad-routing-tools-experiment.md.
 ```
 
 ## 3. Deploy the app (as the `kicraft` user)

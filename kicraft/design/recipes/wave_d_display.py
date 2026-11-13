@@ -63,7 +63,41 @@ WS2812_EXTERNAL_STRIP = _recipe(
     source=Source(url="https://datasheet.lcsc.com/datasheet/pdf/bc8264a6d62c958a89e25ec8cc82b690.pdf?productCode=C2761795", title="Worldsemi WS2812B V5", revision="V5", reviewed_date="2026-10-11", sections=("Typical Application Circuit", "Cascade Method", "Electrical Characteristics")),
     assertions=(Assertion(code="ws2812_external_strip_output", message="J1 pin 2 is the only level-controlled DIN output; J1 pin 1 is a 5 V strip supply and pin 3 is its return. Supply current, cable EMI, and strip-side injection remain unmeasured."),),
     default=True,
-).model_copy(update={"external_interface_protocols": ("ws2812",)})
+).model_copy(update={
+    "external_interface_protocols": ("ws2812", "addressable-led-string-unspecified"),
+    "placement_constraints": (
+        Placement(kind="owned_pin_local", role="bulk", parameters={
+            "anchor_role": "level_shifter", "owner_pin": "20", "member_pin": "1",
+            "max_mm": 3.0, "max_route_length_mm": 6.0, "min_route_width_mm": 0.2,
+            "plane_owner_pin": "10", "plane_member_pin": "2", "plane_net": "gnd",
+            "max_plane_via_mm": 3.0,
+        }),
+    ),
+    # Buffer allocation only; account separately for the external strip load.
+    "supply_current_reservations_a": {"vdd_5v": 0.02},
+})
+
+# The original screw-terminal construction remains available for existing designs.
+# This distinct reviewed variant exposes the same buffered path on a purchased
+# three-position 2.54 mm header, rated 3 A per contact by its reviewed catalog.
+WS2812_EXTERNAL_STRIP_HEADER = WS2812_EXTERNAL_STRIP.model_copy(update={
+    "recipe": "ws2812-external-strip-header-interface@1",
+    "family": "ws2812-external-strip-header",
+    "exact_part": "WS2812-EXTERNAL-STRIP-HEADER",
+    "default_for_family": True,
+    "protected_aliases": ("ws2812-external-strip-header", "WS2812-EXTERNAL-STRIP-HEADER"),
+    "identity_aliases": ("WS2812-EXTERNAL-STRIP-HEADER",),
+    "parts": (
+        _part("connector", "J", "2.54-1*3p针", "Connector_Generic:Conn_01x03",
+              "Connector_PinHeader_2.54mm:PinHeader_1x03_P2.54mm_Vertical",
+              mpn="2.54-1*3p针"),
+        *WS2812_EXTERNAL_STRIP.parts[1:],
+    ),
+    "electrical_assertions": (
+        Assertion(code="ws2812_external_strip_output",
+                  message="J1 pin 2 is the level-controlled DIN output; pin 1 is 5 V and pin 3 is return. The header is rated 3 A per contact; available strip current is also limited by the supply, copper and thermal design and remains unmeasured."),
+    ),
+})
 
 
 # AL8860 typical buck loop: VIN -> 0.100 ohm sense resistor -> LED anode ->
@@ -165,4 +199,7 @@ def expand_max7219_four_digit(resolved):
     return expand_static_definition(definition, resolved)
 
 
-WAVE_D_DISPLAY_RECIPES = (WS2812_EXTERNAL_STRIP, POWER_LED_AL8860, MAX7219_FOUR_DIGIT, LED_MATRIX_HUB75)
+WAVE_D_DISPLAY_RECIPES = (
+    WS2812_EXTERNAL_STRIP, WS2812_EXTERNAL_STRIP_HEADER,
+    POWER_LED_AL8860, MAX7219_FOUR_DIGIT, LED_MATRIX_HUB75,
+)

@@ -65,14 +65,15 @@ surcharges any via under 0.45 mm diameter, which is a price line rather than a
 capability limit, and it applies only to the handful of fanout vias a trapped
 pad needs.
 
-**Scope guard.** Only the *floors* and the deterministically stamped escape
-copper move to capability values. The Default/Power netclasses stay at
-0.2 mm track / 0.153 mm clearance / 0.6 mm via, so KiCad Routing Tools's own routing
-behaviour is unchanged and this cannot regress general routing.
+For the default 1 oz process, Default/Power netclasses retain their existing
+0.153 mm clearance and the 0.36/0.15 mm fanout via. Recipe-required 2 oz boards
+instead enforce at least 0.17 mm track and clearance in all project netclasses
+and fabrication floors. The via dimensions do not change.
 """
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -90,6 +91,19 @@ __all__ = [
 # planning copper has to hold. Deliberately unchanged by the capability work
 # (scope guard): only the floors and the stamped escape copper moved.
 NETCLASS_CLEARANCE_MM = 0.153
+
+# JLCPCB's published 2 oz FR4 minimum is 0.16 mm; 0.17 mm leaves 10 µm
+# process margin and is exact in whole-micron router exchange files.
+# https://jlcpcb.com/help/article/jlcpcb-copper-weight (2026-09-09).
+TWO_OUNCE_FEATURE_MM = 0.17
+TWO_OUNCE_PTH_ANNULUS_MM = 0.254
+TWO_OUNCE_HOLE_GAP_MM = 0.2
+
+
+def requires_two_ounce(cfg: dict[str, Any] | None) -> bool:
+    """Whether the selected, recipe-owned thermal contract requires 2 oz."""
+    return any(float(row.get("outer_copper_oz", 0)) >= 2.0
+               for row in ((cfg or {}).get("thermal_requirements") or []))
 
 
 # JLCPCB 2-layer, 1 oz, standard process. See the module docstring for the
@@ -117,10 +131,14 @@ def fab_floors(cfg: dict[str, Any] | None = None) -> dict[str, float]:
         override = cfg.get("fab_capability") or {}
         if isinstance(override, dict):
             block.update({k: float(v) for k, v in override.items() if v is not None})
-    return {
-        "track_mm": float(block["min_track_mm"]),
-        "clearance_mm": float(block["min_clearance_mm"]),
-    }
+    track = float(block["min_track_mm"])
+    clearance = float(block["min_clearance_mm"])
+    if requires_two_ounce(cfg):
+        if not math.isfinite(track) or not math.isfinite(clearance):
+            raise ValueError("invalid 2 oz fabrication floor")
+        track = max(track, TWO_OUNCE_FEATURE_MM)
+        clearance = max(clearance, TWO_OUNCE_FEATURE_MM)
+    return {"track_mm": track, "clearance_mm": clearance}
 
 
 def fanout_via(cfg: dict[str, Any] | None = None) -> tuple[float, float]:
@@ -144,7 +162,7 @@ def fanout_via(cfg: dict[str, Any] | None = None) -> tuple[float, float]:
 
 
 def stamp_fab_floors_into_pro(pro_path: str | Path, cfg: dict[str, Any] | None = None) -> bool:
-    """Lower a ``.kicad_pro``'s DRC floors to the fab capability. Best-effort.
+    """Stamp the project's fabrication rules; enforce 2 oz floors fail-closed.
 
     The floors that gate a fine-pitch escape live in the *project* file, not the
     board, so a board copied forward from a project synthesised before this
@@ -153,12 +171,13 @@ def stamp_fab_floors_into_pro(pro_path: str | Path, cfg: dict[str, Any] | None =
     means ``kicraft replay`` (which re-uses a frozen seed project) exercises the
     capability change instead of silently testing the old floors.
 
-    Only ever *lowers* a floor, and only the four the escape path needs, so a
-    project that deliberately declares a coarser process keeps it everywhere
-    else. The netclasses are untouched (scope guard).
+    For 2 oz, trace and clearance floors and netclasses can only increase.
+    Existing 1 oz replay behavior and the independently sized via class remain.
     """
     p = Path(pro_path)
     if not p.is_file():
+        if requires_two_ounce(cfg):
+            raise ValueError(f"missing required 2 oz project rules: {p}")
         return False
     floors = fab_floors(cfg)
     via_d, via_dr = fanout_via(cfg)
@@ -173,13 +192,29 @@ def stamp_fab_floors_into_pro(pro_path: str | Path, cfg: dict[str, Any] | None =
         # validate-part/add-part (check 6), which does not go through here.
         "min_through_hole_diameter": via_dr,
     }
+    if requires_two_ounce(cfg):
+        wanted["min_hole_to_hole"] = TWO_OUNCE_HOLE_GAP_MM
     try:
         body = json.loads(p.read_text())
-    except Exception:  # noqa: BLE001 -- a malformed sidecar must not fail a build
+    except Exception:  # noqa: BLE001
+        if requires_two_ounce(cfg):
+            raise ValueError(f"cannot enforce required 2 oz rules in {p}")
         return False
     settings = body.setdefault("board", {}).setdefault("design_settings", {})
     rules = settings.setdefault("rules", {})
     changed = False
+    heavy_copper = requires_two_ounce(cfg)
+    if heavy_copper:
+        classes = body.get("net_settings", {}).get("classes", [])
+        if not classes or not any(c.get("name") == "Default" for c in classes):
+            raise ValueError(f"cannot enforce required 2 oz netclasses in {p}")
+        for netclass in classes:
+            if float(netclass.get("clearance") or 0) < floors["clearance_mm"]:
+                netclass["clearance"] = floors["clearance_mm"]
+                changed = True
+            if float(netclass.get("track_width") or 0) < floors["track_mm"]:
+                netclass["track_width"] = floors["track_mm"]
+                changed = True
     # Make the fanout class a first-class via of the project. KiCad's Specctra
     # export emits one padstack per entry here and lists them all in the router exchange input's
     # (structure (via ...)) rule, so a stamped dog-bone round-trips through the
@@ -195,21 +230,51 @@ def stamp_fab_floors_into_pro(pro_path: str | Path, cfg: dict[str, Any] | None =
         changed = True
     for key, value in wanted.items():
         current = rules.get(key)
-        if current is None or float(current) > value + 1e-9:
+        if (current is None or
+                (heavy_copper and key in ("min_track_width", "min_clearance", "min_hole_to_hole")
+                 and float(current) < value - 1e-9) or
+                (not (heavy_copper and key in ("min_track_width", "min_clearance", "min_hole_to_hole"))
+                 and float(current) > value + 1e-9)):
             rules[key] = value
             changed = True
     if changed:
         try:
             p.write_text(json.dumps(body, indent=2) + "\n")
         except OSError:
+            if heavy_copper:
+                raise
             return False
     return changed
+
+
+def require_two_ounce_project_rules(pro_path: str | Path, cfg: dict[str, Any]) -> None:
+    """Reject a 2 oz project whose actual native DRC/netclass rules are weaker."""
+    if not requires_two_ounce(cfg):
+        return
+    body = json.loads(Path(pro_path).read_text())
+    rules = body["board"]["design_settings"]["rules"]
+    classes = body["net_settings"]["classes"]
+    floors = fab_floors(cfg)
+    if not any(c.get("name") == "Default" for c in classes):
+        raise ValueError("2 oz project has no Default netclass")
+    for key, floor in (("min_track_width", floors["track_mm"]),
+                       ("min_clearance", floors["clearance_mm"]),
+                       ("min_hole_to_hole", TWO_OUNCE_HOLE_GAP_MM)):
+        value = float(rules[key])
+        if not math.isfinite(value) or value < floor:
+            raise ValueError(f"2 oz project rule {key} is below {floor:g} mm")
+    for netclass in classes:
+        for key, floor in (("clearance", floors["clearance_mm"]),
+                           ("track_width", floors["track_mm"])):
+            value = float(netclass.get(key) or 0)
+            if not math.isfinite(value) or value < floor:
+                raise ValueError(f"2 oz netclass {netclass.get('name')} {key} is below {floor:g} mm")
 
 
 def stamp_fab_floors_for_project(
     project_dir: str | Path, cfg: dict[str, Any] | None = None
 ) -> int:
-    """Lower every ``.kicad_pro`` in *project_dir* to the fab capability.
+    """Stamp every ``.kicad_pro`` in *project_dir* with the applicable floors.
 
     Call once, before anything loads a board: the leaf and parent boards written
     from here on copy the project file forward, so this is the single place the
@@ -221,7 +286,7 @@ def stamp_fab_floors_for_project(
         if stamp_fab_floors_into_pro(pro, cfg):
             changed += 1
             print(
-                f"  fab floors: lowered the DRC minimums in {pro.name} to the "
+                f"  fab floors: updated the DRC minimums in {pro.name} for the "
                 "fab capability (autoplacer/fab_profile.py)"
             )
     return changed

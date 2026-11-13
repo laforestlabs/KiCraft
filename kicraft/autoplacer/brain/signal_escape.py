@@ -1,9 +1,7 @@
-"""Pre-route escape reservations for dense fine-pitch signal pads.
+"""Pre-route escape reservations for dense and cross-leaf signal pads.
 
-KiCad Routing Tools cannot create an initial route when a fine-pitch pad is
-already boxed in by locked plane/tie copper.  This module emits only guarded
-``BreakoutSpec`` dog-bones; the shared stamper remains the authority for actual
-pad, copper, hole and keepout clearance before any copper is written.
+The shared stamper remains the authority for pad, copper, hole, mask, edge
+and keepout clearance before any of these dog-bones is written.
 """
 from __future__ import annotations
 
@@ -20,8 +18,6 @@ from kicraft.autoplacer.brain.breakout_stubs import (
 from kicraft.autoplacer.fab_profile import fab_floors, fanout_via
 from kicraft.design.models import is_power_or_ground_name
 
-_MAX_PITCH_MM = 0.6
-_MAX_NARROW_PAD_MM = 0.3
 _MIN_PAD_FIELD_SIZE = 8
 _ESCAPE_LENGTH_MM = 1.0
 
@@ -140,45 +136,12 @@ def _pad_number_key(pad: Any) -> tuple[int, int | str]:
     return (0, int(number)) if number.isdigit() else (1, number)
 
 
-def _is_fine_pitch_signal_pad(footprint: Any, pad: Any) -> bool:
-    """Whether *pad* needs a pre-router dog-bone reservation.
-
-    This deliberately describes copper geometry rather than a package or
-    reference designator: a multipad SMD footprint with a narrow pad beside
-    another SMD pad is the class that loses its exit corridor to earlier locked
-    copper.  Actual corridor legality is checked by ``add_breakout_stubs``.
-    """
-    if pad.GetAttribute() not in (pcbnew.PAD_ATTRIB_SMD, pcbnew.PAD_ATTRIB_CONN):
-        return False
-    if not pad.GetNetname() or is_power_or_ground_name(pad.GetNetname()):
-        return False
-
-    pads = [
-        other
-        for other in footprint.Pads()
-        if other.GetAttribute() in (pcbnew.PAD_ATTRIB_SMD, pcbnew.PAD_ATTRIB_CONN)
-    ]
-    if len(pads) < _MIN_PAD_FIELD_SIZE:
-        return False
-    size = pad.GetSize()
-    if min(pcbnew.ToMM(size.x), pcbnew.ToMM(size.y)) > _MAX_NARROW_PAD_MM:
-        return False
-
-    pos = pad.GetPosition()
-    identity = _pad_identity(pad)
-    return any(
-        _pad_identity(other) != identity
-        and (pcbnew.ToMM(other.GetPosition().x - pos.x) ** 2
-             + pcbnew.ToMM(other.GetPosition().y - pos.y) ** 2) ** 0.5 <= _MAX_PITCH_MM
-        for other in pads
-    )
-
-
-def fine_pitch_signal_escape_specs(
+def signal_escape_specs(
     board: Any,
     cfg: dict[str, Any] | None = None,
+    external_net_names: set[str] | None = None,
 ) -> list[BreakoutSpec]:
-    """Return guarded, passably spaced dog-bones for dense SMD pad fields.
+    """Return guarded dog-bones for SMD signal fields and cross-leaf signals.
 
     The specs use the fabrication-profile fanout via, not the router's normal
     netclass via.  The latter is intentionally 0.6/0.3 mm and does not fit the
@@ -192,12 +155,29 @@ def fine_pitch_signal_escape_specs(
     via_size_mm, via_drill_mm = fanout_via(cfg)
     floors = fab_floors(cfg)
     width_mm = floors["track_mm"]
+    power_nets = set(cfg.get("power_nets", ()))
     specs: list[BreakoutSpec] = []
     for footprint in sorted(board.GetFootprints(), key=lambda fp: fp.GetReferenceAsString()):
+        # Wider local output pads can be caged by the same earlier power
+        # copper as fine-pitch inputs. Reserve the whole signal pad field,
+        # not just external nets or an arbitrary pitch/width subset.
+        is_pad_field = sum(
+            pad.GetAttribute() in (pcbnew.PAD_ATTRIB_SMD, pcbnew.PAD_ATTRIB_CONN)
+            for pad in footprint.Pads()
+        ) >= _MIN_PAD_FIELD_SIZE
         candidates = []
         pad_layers = {}
         for pad in footprint.Pads():
-            if not _is_fine_pitch_signal_pad(footprint, pad):
+            if pad.GetNetname() in power_nets:
+                continue
+            is_signal = (
+                pad.GetAttribute() in (pcbnew.PAD_ATTRIB_SMD, pcbnew.PAD_ATTRIB_CONN)
+                and bool(pad.GetNetname())
+                and not is_power_or_ground_name(pad.GetNetname())
+            )
+            if not is_signal or (
+                not is_pad_field and pad.GetNetname() not in (external_net_names or ())
+            ):
                 continue
             if pad.IsOnLayer(pcbnew.F_Cu):
                 layer, layer_name = pcbnew.F_Cu, "F.Cu"
@@ -229,6 +209,49 @@ def fine_pitch_signal_escape_specs(
                     strict_same_footprint=True,
                     via_size_mm=via_size_mm,
                     via_drill_mm=via_drill_mm,
+                    short_fanout_fallback=True,
                 )
             )
     return specs
+
+
+def unlanded_interface_components(board: Any, net_names: set[str]) -> list[dict[str, Any]]:
+    """Find physically separate interface-pad components without a via or PTH.
+
+    KiCad's native connectivity accounts for finite copper shapes, including
+    contacts away from pad centres. A via elsewhere on the same net is not a
+    landing for a disconnected component.
+    """
+    nets = {name for name in net_names if name and not is_power_or_ground_name(name)}
+    pads = [pad for fp in board.GetFootprints() for pad in fp.Pads()
+            if pad.GetNetname() in nets]
+    board.BuildConnectivity()
+    connectivity = board.GetConnectivity()
+    visited: set[str] = set()
+    missing = []
+    for pad in pads:
+        uid = pad.m_Uuid.AsString()
+        if uid in visited:
+            continue
+        pending = [pad]
+        members = []
+        landed = False
+        while pending:
+            item = pending.pop()
+            item_id = item.m_Uuid.AsString()
+            if item_id in visited or item.GetNetname() != pad.GetNetname():
+                continue
+            visited.add(item_id)
+            if item.Type() == pcbnew.PCB_VIA_T:
+                landed = True
+            if isinstance(item, pcbnew.PAD):
+                members.append(f"{item.GetParentFootprint().GetReferenceAsString()}.{item.GetNumber()}")
+                if item.GetAttribute() == pcbnew.PAD_ATTRIB_PTH:
+                    landed = True
+            pending.extend(connectivity.GetConnectedTracks(item))
+            pending.extend(connectivity.GetConnectedPads(item))
+        if not landed:
+            missing.append({"net": pad.GetNetname(), "pads": sorted(members)})
+    return missing
+
+

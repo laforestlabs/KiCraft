@@ -61,8 +61,9 @@ Slot shape:
     values: `mcu_core`, `power_input`, `regulator`, `programming`, `bus_interface`, `sensor`,
     `driver`, `analog_block`, `user_io`, `connector`).
   - `family` and `exact_part`: the recipe/lowerer family from `extras.circuit_recipes` /
-    `extras.circuit_lowerers`, and the exact ordering code when the user named one. Preserve the
-    user's part identity; do not substitute a different family.
+    `extras.circuit_lowerers`, and the exact ordering code when the user named one or the
+    identity of a deliberately selected reviewed construction. Preserve user-required part
+    identity; do not substitute a different ordering code or family.
   - `parameters`: the family's own bounded keys (`rows`, `gender`, `output_voltage`,
     `supply_voltage`, …). Use only keys the reference data advertises.
   - `supply`: the rail this part is powered from (a declared `power.rails` name). The compiler binds
@@ -113,24 +114,25 @@ Slot shape:
 - `assumptions`: defaults you applied, each ending `(defaulted)`.
 
 **Port keys.** A signal reference names a port of the part it connects. Valid keys are:
-- every `ports` name the selected recipe advertises in `extras.circuit_recipes` (its reviewed
-  interface), including supply/ground and conditional ports;
+- every `external_ports[].name` the selected recipe advertises in `extras.circuit_recipes`
+  (its reviewed interface), including supply/ground and conditional ports;
 - the advertized keys of the recipe's `interfaces` you declared, for bus members (`sda`/`scl`,
   `sclk`/`mosi`/`miso`/`cs`, `tx`/`rx`, `can_tx`/`can_rx`, `pwm_*`, `adc_*`, `parallel_<i>`);
 - MCU application pins, by capability: `output_<id>`, `input_<id>`, `touch_<id>` (and `gpio<n>`
-  when you mean a specific numbered pin). The pin allocator owns the assignment;
+  when you mean a specific numbered pin). Each independent signal needs a different `<id>`;
+  `output_hub75_r0` and `output_hub75_g0` are different channels, not two uses of `output_0`.
+  The pin allocator assigns each channel its own physical GPIO;
 - the lowerer's keyed ports for a lowerer family (`pin1` … `pinN` for `pin-header`, in physical
   pin order — the pins are ordered by the order you bind them, so bind each connector pin once).
 
 **How the compiler binds ports.** A port key may be bound exactly once, and the compiler is the one
 that binds it:
 
-- A signal binds its source port to its own net and each peer port to the same net. Two signals that
-  name the same **peer** port are refused, naming the ports that were available: that really is two
-  nets on one pin.
-- Two signals that leave the **same** source port are one physical net under two names — the first
-  name owns it, the second signal's peers join it, and the join is recorded as a derived assumption.
-  That is legal, not a habit: prefer one signal per net.
+- A signal binds its source port to its own net and each peer port to the same net. Two
+  differently named signals sharing either a source or peer port are refused: independent
+  signals cannot share one physical pin.
+- To fan out one net, use one signal entry and list all its destinations in `to`. Do not give
+  the same source pin different signal names; the compiler will not merge them silently.
 - A port a rail or ground already owns keeps that net; a signal out of it joins the peers to the
   rail instead of naming a second net.
 
@@ -150,6 +152,13 @@ same edge), otherwise a one-row pin header on its own sheet, carrying your signa
 ground, then the rails you listed in `rails`. So `LED_DATA` → `edge:LED_STRING` with
 `"rails": ["+5V"]` gives a three-pin output: data, ground, 5 V.
 
+An owned `external_interface` obligation additionally requires a reviewed construction whose
+`external_interface_protocols` contains the retained protocol. Select its published `family`
+and, when choosing that construction explicitly, `exact_part`. A sheet title, topology prose,
+protocol label or generic edge header is not an implementation. Connect the construction's
+application inputs with `signals` and power it with `supply`/`power.rails`; port bindings remain
+compiler-derived. Do not add a second connector when the construction already owns it.
+
 **Design obligations that remain yours** (each has a check behind it):
 - **One sheet per IC domain.** Each distinct non-trivial IC gets its own sheet — the MCU, every
   separate sensor, a display, each standalone regulator — even when they share a bus; the bus is
@@ -166,10 +175,53 @@ ground, then the rails you listed in `rails`. So `LED_DATA` → `edge:LED_STRING
 - **Input contract.** Choose the smallest common source contract that covers the named output
   budget, the onboard load, conversion loss and transient margin; never the largest a PD source
   offers. A contract ≥ 2× the downstream converter with ≥ 30 W unused is gross overprovision.
-- **External-load budget.** When the board powers a display, LED string, motor or heater, give the
-  maximum output current and an input-source budget with headroom (and ask one `blocking: true`
-  question first if the brief does not supply the current). The regulated converter's rating must
-  exceed the load current so onboard circuits keep headroom.
+- **External-load budget.** When the board powers a display, LED string, motor or heater, disclose
+  the maximum supported output current and a numerical input-source allocation with headroom.
+  With automatic questions enabled, choose a safe supported allocation instead of parking: an
+  unspecified powered addressable string defaults to 0.25 A maximum, not measured consumption.
+  Preserve explicit current demands, including typed obligations. Sum external loads and the
+  recipes' `supply_current_reservations_a` on their actual bound rails; reserve downstream
+  converter input current as well. A regulator's capacity is not an external load budget.
+- **PD block interfaces.** The fixed 9 V `usb-pd-fixed-trigger` construction includes its
+  receptacle and internal CC wiring; use only its `vbus` and `gnd` ports. Declare its rail
+  from `vbus` and feed the AP converters from it: the compiler adds the controlled path,
+  raw/protected split and PGOOD enables. Do not add a second PD socket or CC signals to
+  this fixed block or to `tps26631-pd-power-path`. A selectable trigger instead exports
+  `cc1`/`cc2` to a separate PD-only receptacle; retain that distinct interface.
+- **Authored PD paths.** Normally let the compiler add the controlled path. If you declare
+  one explicitly, supply the downstream AP converters from its output rail, not raw PD.
+  A protection part with the converters wired around it is refused; authored power
+  wiring is never silently changed. Power-good controls the protected converters' enables.
+  If a retained power-to-power conversion obligation requires an owner, explicitly declare
+  its physical implementation: the controlled path for unchanged voltage, or the actual
+  regulator for a voltage change. Assign that conversion's `obligation_ids` to that
+  implementation, not the PD trigger or source connector, which lacks distinct power
+  input/output ports. Preserve the trigger's identity, PD function and functional blocks.
+- **PD operating envelope.** State the required source voltage/current and adequate pre-negotiation
+  5 V availability. Keep raw VBUS distinct from the controlled protected rail. The supported
+  `tps26631-pd-inrush-power-path@1` holds downstream bulk and AP6320x enables off until negotiated
+  voltage and PGOOD permit startup; its continuous path allocation is 1.8 A, not a fault-current
+  ceiling. Keep raw capacitance below 10 µF with tolerance and downstream input-equivalent bulk
+  within 250 µF. Never backfeed its output: this construction has no reverse-current blocking.
+  A 5 V buck fed by negotiated 9 V does not establish regulated 5 V at fallback.
+  Check every selectable position and its reviewed transient envelope, not only nominal voltage.
+  Sum bounded downstream allocations only with complete consumer coverage; otherwise reserve
+  full converter output, conversion loss and input-voltage allowance.
+- **External interfaces.** A generic addressable LED string remains protocol-unspecified,
+  canonically `addressable-led-string-unspecified`; this is not an assertion that the user
+  selected WS2812. Architecture may select the reviewed WS2812 default and must disclose it.
+  Preserve explicitly named protocols; an unsupported protocol is not permission to substitute.
+  An explicit pin-header output selects the reviewed header construction, not a screw terminal.
+  A board-driven passive speaker uses `passive-speaker-power-output`; select the reviewed
+  amplifier construction, including its owned speaker connector, rather than a bare GPIO header.
+  HUB75 panel LEDs default to external 5 V power unless board power was requested; the
+  interface's logic reserve does not include the panel.
+- **Display reset and speaker drive.** `hub75-sn74hct245-interface@2` includes a default-disabled
+  buffer enable. Bind it to a reset-compatible MCU output; configure the display channels before
+  enabling it. An unspecified passive speaker uses `pam8302a-pwm-speaker@1`, an 8 ohm speaker
+  rated at least 2 W and a 0.6 A, 5 V planning reserve. The header is bridge driven: neither contact
+  is ground. A bare GPIO is not a passive-speaker drive circuit; retain explicitly line-level or
+  externally amplified interpretations.
 
 **Programming.** Decide it here, from the part you chose:
 - **Native USB (ESP32-S3 MINI/WROOM, ESP32-C3 MINI, RP2040):** set `"programming": "native_usb"`,
@@ -185,6 +237,9 @@ ground, then the rails you listed in `rails`. So `LED_DATA` → `edge:LED_STRING
   the host's, and the design assumptions record it). Naming an undeclared requirement here is
   refused (`unknown_signal_requirement`), and a USB data edge with no such rail is refused
   (`usb_connector_supply_unknown`). Never tie this rail to the board's battery or 3.3 V rail.
+  On an independently PD- or battery-powered board, host VBUS stays a separate 5 V domain;
+  the programming socket does not backfeed the board supply. A power-only PD receptacle cannot
+  implement USB data. A claim of external programming without a supported physical path is refused.
 - **Classic ESP32 (ESP32-WROOM-32):** add the vendored `ch340c` bridge as its own requirement with
   `"programming": "usb_uart_bridge"`, `supply` on the same 3.3 V rail as the MCU, and typed UART
   ports crossed device-relative: bridge `tx` → MCU `uart_rx`, bridge `rx` → MCU `uart_tx`, with
@@ -217,11 +272,12 @@ ground, then the rails you listed in `rails`. So `LED_DATA` → `edge:LED_STRING
   symbol, footprint and orderable part; never invent a library prefix or package name.
 
 **Reference data (from stage-prep `extras`).**
-- `extras.circuit_recipes`: the curated exact recipes — `family`, `exact_part`, `ports`,
-  `interfaces`, `owned_parts`, `parameter_defaults`, `allocatable_capabilities`. Naming a listed
-  family and part is what selects it; do not duplicate it in a selection field. Each recipe's
-  `owned_parts` are already implemented inside it — do not add a second crystal or pull network for
-  an owned role, and do not invent external ports for its internal nets.
+- `extras.circuit_recipes`: the curated exact recipes — `family`, `exact_part`, `external_ports`,
+  `external_interface_protocols`, `interfaces`, `owned_parts`, `parameter_defaults`,
+  `allocatable_capabilities`. Match external-interface obligations to the advertised protocols.
+  Naming a listed family and part selects it; do not duplicate it in a selection field.
+  Each recipe's `owned_parts` are already implemented inside it — do not add a second crystal
+  or pull network for an owned role, and do not invent external ports for its internal nets.
 - `extras.circuit_lowerers`: generic connectors, passive networks and repeated simple channels.
   Prefer one when it fits; emit its `parameter_keys` and its advertised port keys, including every
   `required_port_keys`. For `pin-header`, `rows` is 1 or 2 parallel contact rows, not the total pin

@@ -71,12 +71,16 @@ def _kicad_subprocess_env() -> dict[str, str]:
 _PCBNEW_OK_SENTINEL = "__KICRAFT_PCBNEW_OK__"
 
 
-def run_pcbnew_script(script: str) -> None:
+def run_pcbnew_script(script: str, *, deadline: float | None = None) -> None:
     """Run a pcbnew script string in a fresh subprocess.
 
     Inline strings are not lintable -- prefer ``run_pcbnew_script_file``
     for any nontrivial workload so import-time errors fire when the
     file is parsed instead of being concealed inside a runtime blob.
+
+    ``deadline`` is an optional absolute ``time.monotonic()`` limit shared
+    across launches and existing load retries. Expiry kills the owned process
+    group and raises ``TimeoutExpired``, even after a success sentinel.
     """
     # Emit the success sentinel as the script's last act so a teardown SIGSEGV
     # after a successful Save is not mistaken for a failed operation.
@@ -86,7 +90,7 @@ def run_pcbnew_script(script: str) -> None:
         + f"print({_PCBNEW_OK_SENTINEL!r})\n"
         + "_kicraft_sys.stdout.flush()\n"
     )
-    return _retry_pcbnew_run([sys.executable, "-c", script])
+    return _retry_pcbnew_run([sys.executable, "-c", script], deadline=deadline)
 
 
 def run_pcbnew_script_file(script_path: str, *args: str) -> None:
@@ -99,24 +103,50 @@ def run_pcbnew_script_file(script_path: str, *args: str) -> None:
     return _retry_pcbnew_run([sys.executable, str(script_path), *map(str, args)])
 
 
-def _retry_pcbnew_run(cmd: list[str]) -> None:
+def _retry_pcbnew_run(cmd: list[str], *, deadline: float | None = None) -> None:
     """Shared retry loop for pcbnew subprocess launches.
 
     The "Failed to load board:" race is real: pcbnew occasionally
     fails to LoadBoard() a file that was just written by another
     pcbnew subprocess if the OS hasn't fully flushed the directory
     entry yet. Up to 6 retries with widening backoff.
+    A supplied monotonic deadline covers all launches and backoff.
     """
     attempts = 6
     delays_s = (0.0, 0.05, 0.1, 0.25, 0.5, 1.0)
     last_result: subprocess.CompletedProcess[str] | None = None
     for attempt in range(attempts):
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            env=_kicad_subprocess_env(),
-        )
+        if deadline is None:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                env=_kicad_subprocess_env(),
+            )
+        else:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(
+                    cmd, 0,
+                    output=last_result.stdout if last_result is not None else None,
+                    stderr=last_result.stderr if last_result is not None else None,
+                )
+            proc = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, env=_kicad_subprocess_env(), start_new_session=True,
+            )
+            try:
+                stdout, stderr = proc.communicate(timeout=max(0, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired as exc:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                stdout, stderr = proc.communicate()
+                raise subprocess.TimeoutExpired(cmd, exc.timeout, output=stdout, stderr=stderr) from exc
+            if time.monotonic() >= deadline:
+                raise subprocess.TimeoutExpired(cmd, remaining, output=stdout, stderr=stderr)
+            result = subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
         last_result = result
         if result.returncode == 0:
             return
@@ -139,7 +169,14 @@ def _retry_pcbnew_run(cmd: list[str]) -> None:
         stderr = result.stderr or ""
         if "Failed to load board:" not in stderr or attempt == attempts - 1:
             break
-        time.sleep(delays_s[min(attempt + 1, len(delays_s) - 1)])
+        delay = delays_s[min(attempt + 1, len(delays_s) - 1)]
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(cmd, 0, output=result.stdout, stderr=result.stderr)
+            time.sleep(min(delay, remaining))
+        else:
+            time.sleep(delay)
 
     assert last_result is not None
     stdout = getattr(last_result, "stdout", "") or ""
@@ -492,6 +529,126 @@ def import_routed_copper(kicad_pcb_path: str) -> dict[str, Any]:
     }
 
 
+def require_copper_min_width(kicad_pcb_path: str | Path, minimum_mm: float) -> None:
+    """Measure every native routed track/arc; fail closed on undersized copper."""
+    copper = import_routed_copper(str(kicad_pcb_path))
+    for trace in copper["traces"]:
+        if not math.isfinite(trace.width_mm) or trace.width_mm + 1e-9 < minimum_mm:
+            raise ValueError(
+                f"routed copper width {trace.width_mm:g} mm on {trace.net!r} "
+                f"at ({trace.start.x:g}, {trace.start.y:g}) is below {minimum_mm:g} mm"
+            )
+
+def require_two_ounce_holes(kicad_pcb_path: str | Path) -> None:
+    """Check native component PTH lands and all drilled-hole edge gaps.
+
+    A round or slotted drill is a capsule.  Expanding it by the required
+    annulus must fit inside the actual pad, not merely its bounding box.
+    """
+    from kicraft.autoplacer.fab_profile import TWO_OUNCE_HOLE_GAP_MM, TWO_OUNCE_PTH_ANNULUS_MM
+
+    script = """
+import json, pcbnew, sys
+b = pcbnew.LoadBoard(sys.argv[1])
+if b is None:
+    raise RuntimeError("cannot load board")
+def xy(v):
+    return [pcbnew.ToMM(v.x), pcbnew.ToMM(v.y)]
+rows = []
+for fp in b.GetFootprints():
+    for p in fp.Pads():
+        if p.GetAttribute() not in (pcbnew.PAD_ATTRIB_PTH, pcbnew.PAD_ATTRIB_NPTH):
+            continue
+        d = xy(p.GetDrillSize())
+        if min(d) <= 0:
+            raise ValueError("invalid pad drill: " + fp.GetReference() + "." + p.GetNumber())
+        offset = xy(p.GetOffset())
+        if offset != [0.0, 0.0]:
+            raise ValueError("unsupported offset drilled pad: " + fp.GetReference() + "." + p.GetNumber())
+        shape = p.GetShape()
+        names = {pcbnew.PAD_SHAPE_CIRCLE: "circle", pcbnew.PAD_SHAPE_OVAL: "oval",
+                 pcbnew.PAD_SHAPE_RECT: "rect", pcbnew.PAD_SHAPE_ROUNDRECT: "roundrect"}
+        rows.append(dict(ref=fp.GetReference() + "." + p.GetNumber(), pos=xy(p.GetPosition()),
+                         angle=p.GetOrientationDegrees(), drill=d,
+                         pth=p.GetAttribute() == pcbnew.PAD_ATTRIB_PTH,
+                         size=xy(p.GetSize()), offset=xy(p.GetOffset()),
+                         shape=names.get(shape, "unsupported"),
+                         corner=pcbnew.ToMM(p.GetRoundRectCornerRadius()) if shape == pcbnew.PAD_SHAPE_ROUNDRECT else 0,
+                         copper=p.IsOnLayer(pcbnew.F_Cu) and p.IsOnLayer(pcbnew.B_Cu)))
+for t in b.GetTracks():
+    if isinstance(t, pcbnew.PCB_VIA):
+        d = pcbnew.ToMM(t.GetDrill())
+        if d <= 0:
+            raise ValueError("invalid via drill")
+        rows.append(dict(ref="via", pos=xy(t.GetPosition()), angle=0, drill=[d, d], pth=False))
+print(json.dumps(rows))
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(kicad_pcb_path)],
+        capture_output=True, text=True, env=_kicad_subprocess_env(),
+    )
+    if result.returncode:
+        raise RuntimeError(f"cannot inspect native drilled holes: {result.stderr}")
+    rows = json.loads(result.stdout)
+
+    def point_segment(p, a, b):
+        dx, dy = b[0] - a[0], b[1] - a[1]
+        denom = dx * dx + dy * dy
+        t = max(0.0, min(1.0, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / denom)) if denom else 0.0
+        return math.hypot(p[0] - a[0] - t * dx, p[1] - a[1] - t * dy)
+
+    def segment_distance(a, b, c, d):
+        def cross(p, q, r):
+            return (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0])
+        if (cross(a, b, c) * cross(a, b, d) < 0 and
+                cross(c, d, a) * cross(c, d, b) < 0):
+            return 0.0
+        return min(point_segment(a, c, d), point_segment(b, c, d),
+                   point_segment(c, a, b), point_segment(d, a, b))
+
+    holes = []
+    for row in rows:
+        dx, dy = row["drill"]
+        radius = min(dx, dy) / 2
+        half = abs(dx - dy) / 2
+        local = [(s * half if dx >= dy else 0.0, s * half if dy > dx else 0.0) for s in (-1, 1)]
+        if row["pth"]:
+            shape, (sx, sy) = row["shape"], row["size"]
+            if not row["copper"] or shape not in ("circle", "oval", "rect", "roundrect"):
+                raise ValueError(f"unsupported component PTH geometry at {row['ref']}")
+            if shape == "circle" and abs(sx - sy) > 1e-9:
+                raise ValueError(f"invalid circular PTH geometry at {row['ref']}")
+            ox, oy = row["offset"]
+            required = radius + TWO_OUNCE_PTH_ANNULUS_MM
+            for x, y in local:
+                x, y = x - ox, y - oy
+                if shape in ("circle", "oval"):
+                    pr = min(sx, sy) / 2
+                    ph = abs(sx - sy) / 2
+                    a = (-ph, 0) if sx >= sy else (0, -ph)
+                    b = (ph, 0) if sx >= sy else (0, ph)
+                    fits = point_segment((x, y), a, b) + required <= pr + 1e-9
+                else:
+                    corner = row["corner"] if shape == "roundrect" else 0.0
+                    # Distance to the rounded-rectangle boundary after erosion.
+                    ex, ey = sx / 2 - required, sy / 2 - required
+                    er = max(0.0, corner - required)
+                    fits = (ex >= 0 and ey >= 0 and abs(x) <= ex + 1e-9 and abs(y) <= ey + 1e-9
+                            and math.hypot(max(abs(x) - (ex - er), 0),
+                                           max(abs(y) - (ey - er), 0)) <= er + 1e-9)
+                if not fits:
+                    raise ValueError(f"component PTH annulus below {TWO_OUNCE_PTH_ANNULUS_MM:g} mm at {row['ref']}")
+        angle = math.radians(-row["angle"])
+        co, si = math.cos(angle), math.sin(angle)
+        px, py = row["pos"]
+        ends = [(px + co*x - si*y, py + si*x + co*y) for x, y in local]
+        for other, other_ends, other_radius in holes:
+            gap = segment_distance(*ends, *other_ends) - radius - other_radius
+            if gap + 1e-9 < TWO_OUNCE_HOLE_GAP_MM:
+                raise ValueError(f"hole-to-hole gap {gap:g} mm below {TWO_OUNCE_HOLE_GAP_MM:g} mm: {row['ref']} and {other}")
+        holes.append((row["ref"], ends, radius))
+
+
 def parse_unconnected_nets(report_text: str) -> list[str]:
     """Net names with at least one unconnected (ratsnest) item.
 
@@ -550,6 +707,7 @@ def run_kicad_cli_drc(kicad_pcb_path: str, timeout_s: int = 30) -> dict[str, Any
         "courtyard": 0,
         "tracks_crossing": 0,
         "solder_mask_bridge": 0,
+        "track_width": 0,
         "annular_width": 0,
         "padstack": 0,
         "items_not_allowed": 0,
@@ -671,6 +829,8 @@ def run_kicad_cli_drc(kicad_pcb_path: str, timeout_s: int = 30) -> dict[str, Any
                 counts["courtyard"] += 1
             elif vtype == "solder_mask_bridge":
                 counts["solder_mask_bridge"] += 1
+            elif vtype == "track_width":
+                counts["track_width"] += 1
             elif vtype == "annular_width":
                 counts["annular_width"] += 1
             elif vtype == "padstack":
@@ -771,6 +931,12 @@ def validate_routed_board(
 
     drc = run_kicad_cli_drc(str(board_path), timeout_s=timeout_s)
     validation["drc"] = drc
+    from kicraft.autoplacer.fab_profile import requires_two_ounce
+    from kicraft.pcb_layers import has_two_ounce_outer_stackup
+    heavy_copper = requires_two_ounce(cfg) or has_two_ounce_outer_stackup(board_path)
+    if heavy_copper and drc.get("track_width", 0):
+        validation["obviously_illegal_routed_geometry"] = True
+        validation["rejection_reasons"].append("track_width")
 
     if drc.get("shorts", 0) > 0:
         validation["obviously_illegal_routed_geometry"] = True
@@ -793,6 +959,8 @@ def validate_routed_board(
         )
         ignorable_refs = set(cfg.get("ignorable_footprint_refs", [])) if cfg else set()
         verdict = _classify_clearance_violations(report_text, ignorable_refs)
+        if heavy_copper and clearance_count:
+            verdict = {"waived": 0, "genuine": int(clearance_count)}
         if verdict["waived"]:
             validation["footprint_internal_clearance_count"] = verdict["waived"]
         if verdict["genuine"]:

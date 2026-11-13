@@ -29,7 +29,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from kicraft.pcb_layers import declared_copper_layers
+from kicraft.pcb_layers import declared_copper_layers, has_two_ounce_outer_stackup
 from .models3d import collect_step_coverage
 
 _KICAD_CLI = "kicad-cli"
@@ -171,6 +171,27 @@ def _export_fab(
     out = Path(out_dir)
     fab = out / "fab"
     fab.mkdir(parents=True, exist_ok=True)
+    heavy_copper = has_two_ounce_outer_stackup(pcb_path)
+    if heavy_copper:
+        from kicraft.autoplacer.fab_profile import fab_floors, require_two_ounce_project_rules
+        from kicraft.autoplacer.routing_board import (
+            require_copper_min_width, require_two_ounce_holes, run_kicad_cli_drc,
+        )
+
+        cfg = {"thermal_requirements": [{"outer_copper_oz": 2.0}]}
+        require_two_ounce_project_rules(Path(pcb_path).with_suffix(".kicad_pro"), cfg)
+        require_copper_min_width(pcb_path, fab_floors(cfg)["track_mm"])
+        require_two_ounce_holes(pcb_path)
+        drc = run_kicad_cli_drc(pcb_path)
+        if (not drc.get("ran") or drc.get("timed_out") or drc.get("missing_cli")
+                or drc.get("returncode") != 0 or not drc.get("report_text", "").strip()
+                or drc.get("track_width", 0) or drc.get("clearance", 0)):
+            raise RuntimeError(
+                "2 oz fabrication requires fresh native width and clearance DRC: "
+                f"track_width={drc.get('track_width')}, clearance={drc.get('clearance')}, "
+                f"ran={drc.get('ran')}, returncode={drc.get('returncode')}"
+            )
+
 
     # Gerbers (X2) for the standard fab stack.
     _run(
@@ -186,6 +207,30 @@ def _export_fab(
             pcb_path,
         ]
     )
+    if heavy_copper:
+        jobs = list(fab.glob("*.gbrjob"))
+        if len(jobs) != 1:
+            raise RuntimeError("2 oz board requires exactly one Gerber job manifest")
+        job = json.loads(jobs[0].read_text(encoding="utf-8"))
+        copper = {
+            row.get("Name"): row.get("Thickness")
+            for row in job.get("MaterialStackup", [])
+            if row.get("Type") == "Copper"
+        }
+        if any(abs(float(copper.get(layer, 0)) - 0.07) > 1e-6
+               for layer in ("F.Cu", "B.Cu")):
+            raise RuntimeError(f"Gerber job does not declare 0.070 mm outer copper: {copper}")
+        (fab / "fabrication_instructions.txt").write_text(
+            "Fabricate with 2 oz (0.070 mm finished) copper on both outer layers.\n"
+            "Minimum finished copper trace width and clearance: 0.170 mm.\n"
+            "Minimum component plated-through-hole annular ring: 0.254 mm.\n"
+            "Minimum hole-to-hole edge gap: 0.200 mm.\n"
+            "Follow the supplied Gerber job stackup and drill files.\n"
+            "Any via in an SMD land requires resin fill, copper capping and planarization; "
+            "confirm the via-in-pad process with the fabricator and assembler.\n"
+            "Copper spreading is a CAD design assumption, not a measured thermal rating.\n",
+            encoding="utf-8",
+        )
     # Excellon drill + map, PTH/NPTH separated.
     _run(
         [

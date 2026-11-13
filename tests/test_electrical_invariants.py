@@ -682,7 +682,8 @@ def test_a_recipe_regulator_transfer_requires_the_real_owned_graph():
         requirement_ids=["reg"],
     ))
     requirement = SimpleNamespace(
-        id="reg", ports={"input": "VIN_PROTECTED", "output": "+3V3", "gnd": "GND"}
+        id="reg", sheet="POWER",
+        ports={"input": "VIN_PROTECTED", "output": "+3V3", "gnd": "GND"}
     )
 
     def candidate(parts=None, connections=None, no_connects=(), ownership=None):
@@ -1223,6 +1224,107 @@ def test_frozen_pd_and_placeholder_converter_fail_without_new_conversion_obligat
     assert not result.ok
     assert any("E_POWER_TRANSFER 'pd'" in offender for offender in result.offenders)
     assert any("E_POWER_TRANSFER 'dual'" in offender for offender in result.offenders)
+
+
+def _pd_with_separate_usb_source():
+    from kicraft.design.models import RecipeSelection
+    from kicraft.design.recipes.registry import expand_recipe
+
+    ports = {"vbus": "VBUS5V", "gnd": "GND", "usb_dp": "DP", "usb_dm": "DM"}
+    expansion = expand_recipe(RecipeSelection(
+        recipe="usb-c-usb2-device@1", instance="programming",
+        sheets={"power": "USB"}, port_bindings=ports, requirement_ids=["programming"],
+    ))
+    pd = SimpleNamespace(
+        id="pd", family="usb-pd-fixed-trigger", role="power_input", sheet="PD",
+        obligations=[], ports={"vbus": "VBUS_PD9V", "gnd": "GND"},
+        declared_interface=None,
+    )
+    usb = SimpleNamespace(
+        id="programming", family="usb-c-usb2-device", role="user_io", sheet="USB",
+        obligations=[], ports=ports, declared_interface=None,
+    )
+    converter = SimpleNamespace(
+        id="converter", family="regulator", role="regulator", sheet="POWER",
+        obligations=[], ports={"input": "VBUS_PD9V", "output": "VOUT", "gnd": "GND"},
+        declared_interface=None,
+    )
+    architecture = SimpleNamespace(
+        requirements=[pd, usb, converter],
+        power_nets=["VBUS_PD9V", "VBUS5V", "VOUT", "GND"],
+    )
+    bom = SimpleNamespace(
+        parts=[*expansion.parts, _part("L1", "10uH")],
+        connections=[*expansion.connections, *_bom([], {
+            "VBUS_PD9V": [("L1", "1")], "VOUT": [("L1", "2")],
+        }).connections],
+        no_connect_pins=expansion.no_connect_pins,
+        recipe_ownership=[expansion.ownership],
+    )
+    return architecture, bom
+
+
+def test_pd_transfer_recognizes_only_physically_witnessed_independent_source(reviewed):
+    architecture, bom = _pd_with_separate_usb_source()
+    assert validation.check_reviewed_power_transfer(architecture, bom).ok
+
+    # A disconnected connector pin invalidates the whole source witness.
+    altered = copy.deepcopy(bom)
+    altered.connections = [
+        c.model_copy(update={"net_name": "DISCONNECTED"})
+        if c.net_name == "VBUS5V" else c
+        for c in altered.connections
+    ]
+    result = validation.check_reviewed_power_transfer(architecture, altered)
+    assert any("E_POWER_TRANSFER 'pd'" in row and "VBUS5V" in row for row in result.offenders)
+
+    # Naming a floating rail as a host supply is not physical source evidence.
+    architecture.power_nets.append("HOST_VBUS")
+    result = validation.check_reviewed_power_transfer(architecture, bom)
+    assert any("E_POWER_TRANSFER 'pd'" in row and "HOST_VBUS" in row for row in result.offenders)
+
+
+def test_separate_usb_socket_does_not_supply_a_missing_pd_output(reviewed):
+    architecture, bom = _pd_with_separate_usb_source()
+    architecture.requirements.pop()
+    architecture.power_nets.remove("VOUT")
+    result = validation.check_reviewed_power_transfer(architecture, bom)
+    assert any(
+        "E_POWER_TRANSFER 'pd'" in row and "explicit output bindings" in row
+        for row in result.offenders
+    )
+
+
+def test_pd_explicit_output_and_downstream_conversion_still_require_transfer(reviewed):
+    architecture, bom = _pd_with_separate_usb_source()
+    architecture.requirements[0].ports["output"] = "VBUS5V"
+    result = validation.check_reviewed_power_transfer(architecture, bom)
+    assert any("E_POWER_TRANSFER 'pd'" in row and "VBUS5V" in row for row in result.offenders)
+
+    del architecture.requirements[0].ports["output"]
+    bom.parts = [part for part in bom.parts if part.ref != "L1"]
+    result = validation.check_reviewed_power_transfer(architecture, bom)
+    assert any("E_POWER_TRANSFER 'converter'" in row for row in result.offenders)
+    assert any("E_POWER_TRANSFER 'pd'" in row and "VOUT" in row for row in result.offenders)
+
+
+def test_independent_source_descendants_need_their_own_reviewed_transfer(reviewed):
+    architecture, bom = _pd_with_separate_usb_source()
+    architecture.requirements.append(SimpleNamespace(
+        id="host_converter", family="regulator", role="regulator", sheet="USB",
+        obligations=[], ports={"input": "VBUS5V", "output": "VOUT_HOST", "gnd": "GND"},
+        declared_interface=None,
+    ))
+    architecture.power_nets.append("VOUT_HOST")
+    bom.parts.append(_part("L2", "10uH"))
+    bom.connections.extend(_bom([], {
+        "VBUS5V": [("L2", "1")], "VOUT_HOST": [("L2", "2")],
+    }).connections)
+    assert validation.check_reviewed_power_transfer(architecture, bom).ok
+
+    bom.parts = [part for part in bom.parts if part.ref != "L2"]
+    result = validation.check_reviewed_power_transfer(architecture, bom)
+    assert any("E_POWER_TRANSFER 'host_converter'" in row for row in result.offenders)
 
 
 def _isolated_converter_case(*, output_domain="0V_ISO"):
@@ -2254,3 +2356,212 @@ def test_external_interface_requires_complete_reviewed_recipe_graph():
     ]})
     assert not check(SimpleNamespace(requirements=[onboard]),
                      candidate(expansion.parts, expansion.connections)).ok
+
+
+@pytest.mark.parametrize("series_resistors", [False, True])
+def test_selectable_pd_with_separate_programming_host_has_two_real_sources(series_resistors):
+    from kicraft.design.models import BOM, CircuitRequirement, RecipeSelection
+    from kicraft.design.recipes.registry import expand_selections
+
+    rows = [
+        ("pd", "usb-pd-selectable-trigger", "ch224k-pd-selectable@1", "power_input",
+         {"vbus": "PD9V", "cc1": "CC1", "cc2": "CC2", "gnd": "GND"}, {}),
+        ("pd_socket", "usb-c-pd-receptacle", "usb-c-pd-receptacle@2", "connector",
+         {"vbus": "PD9V", "cc1": "CC1", "cc2": "CC2", "gnd": "GND", "shield": "GND"}, {}),
+        ("buck", "ap63205-5v", "ap63205-5v@2", "regulator",
+         {"input": "PD9V", "output": "+5V", "gnd": "GND", "enable": "PD9V"}, {}),
+        ("host", "usb-c-usb2-device", "usb-c-usb2-device@1", "connector",
+         {"vbus": "HOST_VBUS", "gnd": "GND", "usb_dp": "DP", "usb_dm": "DM"},
+         {"series_resistors": series_resistors}),
+    ]
+    requirements = [
+        CircuitRequirement(id=ident, family=family, sheet=ident.upper(), role=role,
+                           ports=ports, parameters=parameters)
+        for ident, family, recipe, role, ports, parameters in rows
+    ]
+    expansions = expand_selections([
+        RecipeSelection(recipe=recipe, instance=ident,
+                        sheets={"power": ident.upper()}, port_bindings=ports,
+                        parameters=parameters, requirement_ids=[ident])
+        for ident, family, recipe, role, ports, parameters in rows
+    ])
+    bom = BOM(parts=[p for expansion in expansions for p in expansion.parts],
+              connections=[c for expansion in expansions for c in expansion.connections],
+              no_connect_pins=[p for expansion in expansions for p in expansion.no_connect_pins],
+              recipe_ownership=[expansion.ownership for expansion in expansions])
+    requirements[-1].parameters["system_note"] = "not a recipe parameter"
+    architecture = SimpleNamespace(
+        requirements=requirements, power_nets=["PD9V", "+5V", "HOST_VBUS", "GND"]
+    )
+    assert validation.check_reviewed_power_transfer(architecture, bom).ok
+
+    # Ownership labels do not rescue a missing physical input protection part.
+    esd = next(part for part in bom.parts
+               if part.recipe_instance == "host" and part.recipe_role == "esd")
+    bom.parts = [part for part in bom.parts if part.ref != esd.ref]
+    rejected = validation.check_reviewed_power_transfer(architecture, bom)
+    assert not rejected.ok
+    assert any("HOST_VBUS" in offender for offender in rejected.offenders)
+
+
+def _qualified_converter_input(recipe="tps552892-5v-2a@1", voltage=5.0):
+    from kicraft.design.models import BOM, RecipeSelection
+    from kicraft.design.recipes import expand_recipe
+
+    requirement = CircuitRequirement(
+        id="reg", sheet="POWER", role="regulator",
+        family="tps552892-autonomous-5v-buck-boost",
+        ports={"input": "VIN", "output": "VOUT", "gnd": "GND"},
+    )
+    expansion = expand_recipe(RecipeSelection(
+        recipe=recipe, instance="reg", sheets={"power": "POWER"},
+        requirement_ids=["reg"], port_bindings=requirement.ports,
+    ))
+    bom = BOM(
+        parts=expansion.parts, connections=expansion.connections,
+        no_connect_pins=expansion.no_connect_pins, recipe_ownership=[expansion.ownership],
+    )
+    architecture = SimpleNamespace(
+        requirements=[requirement], rail_voltages={"VIN": voltage, "VOUT": 5.0, "GND": 0.0},
+    )
+    return architecture, bom
+
+
+@pytest.mark.parametrize(
+    ("voltage", "accepted"), [(4.75, True), (5.25, True), (4.749, False), (5.251, False), (9.0, False)],
+)
+def test_selected_converter_input_is_qualified_even_without_exact_part(voltage, accepted):
+    architecture, bom = _qualified_converter_input(voltage=voltage)
+    assert architecture.requirements[0].exact_part is None
+    result = validation.check_reviewed_input_operating_ranges(architecture, bom)
+    assert result.ok is accepted, result.offenders
+    if not accepted:
+        assert any("E_RECIPE_SUPPLY_RANGE" in row for row in result.offenders)
+
+
+def test_converter_cannot_hide_an_overvoltage_pin_behind_a_false_port_binding():
+    from kicraft.design.models import NetConnection, PinEndpoint
+
+    architecture, bom = _qualified_converter_input()
+    architecture.rail_voltages["RAW9"] = 9.0
+    converter = next(part for part in bom.parts if part.recipe_role == "converter")
+    for connection in bom.connections:
+        connection.endpoints = [
+            ep for ep in connection.endpoints if (ep.ref, ep.pin) != (converter.ref, "18")
+        ]
+    bom.connections.append(NetConnection(
+        sheet="POWER", net_name="RAW9", endpoints=[PinEndpoint(ref=converter.ref, pin="18")],
+    ))
+    result = validation.check_reviewed_input_operating_ranges(architecture, bom)
+    assert not result.ok
+    assert any("supply graph is unproven" in row for row in result.offenders)
+
+
+def test_selectable_pd_peak_is_shared_by_capacitor_gate_and_reselection_reader(monkeypatch):
+    from kicraft.design.models import BOM, RecipeSelection
+    from kicraft.design.recipes.registry import expand_selections
+    from kicraft.parts_library import jlcparts
+
+    rows = [
+        ("pd", "usb-pd-selectable-trigger", "ch224k-pd-selectable@1", "power_input",
+         {"vbus": "PD9V", "gnd": "GND", "cc1": "CC1", "cc2": "CC2"}),
+        ("reg", "ap63205-5v", "ap63205-5v@2", "regulator",
+         {"input": "PD9V", "output": "VOUT", "gnd": "GND", "enable": "PD9V"}),
+    ]
+    requirements = [
+        CircuitRequirement(id=identifier, sheet=identifier.upper(), role=role,
+                           family=family, ports=ports)
+        for identifier, family, recipe, role, ports in rows
+    ]
+    expansions = expand_selections([
+        RecipeSelection(recipe=recipe, instance=identifier,
+                        sheets={"power": identifier.upper()}, port_bindings=ports,
+                        requirement_ids=[identifier])
+        for identifier, family, recipe, role, ports in rows
+    ])
+    bom = BOM(
+        parts=[p for expansion in expansions for p in expansion.parts],
+        connections=[c for expansion in expansions for c in expansion.connections],
+        no_connect_pins=[p for expansion in expansions for p in expansion.no_connect_pins],
+        recipe_ownership=[expansion.ownership for expansion in expansions],
+    )
+    architecture = SimpleNamespace(
+        requirements=requirements, rail_voltages={"PD9V": 9.0, "VOUT": 5.0, "GND": 0.0},
+    )
+    assert validation.check_reviewed_input_operating_ranges(architecture, bom).ok
+    capacitor = next(p for p in bom.parts if p.recipe_instance == "reg" and p.recipe_role == "input_cap")
+    capacitor.sourcing_note = "LCSC C19702"  # A real 10 V selection contradicts the 50 V claim.
+    monkeypatch.setattr(jlcparts, "parameters", lambda cid: {
+        "attributes": {"Voltage Rating": "10V" if cid == "C19702" else "50V"},
+    })
+    under = validation.under_rated_capacitors(architecture, bom)
+    assert any(part.ref == capacitor.ref and stress == 22.0 and rating == 10.0
+               for part, cid, stress, rating in under)
+    result = validation.check_reviewed_input_operating_ranges(architecture, bom)
+    assert not result.ok
+    assert any("E_CAPACITOR_VOLTAGE" in row and "22V" in row for row in result.offenders)
+
+
+def _qualified_pd_entry(voltage=9.0):
+    from kicraft.design.models import BOM, RecipeSelection
+    from kicraft.design.recipes.registry import expand_selections
+
+    rows = [
+        ("pd", "usb-pd-selectable-trigger", "ch224k-pd-selectable@1", "power_input",
+         {"vbus": "RAW", "gnd": "GND", "cc1": "CC1", "cc2": "CC2"}),
+        ("entry", "tps26631-pd-power-path", "tps26631-pd-inrush-power-path@1", "power_input",
+         {"input": "RAW", "output": "PROTECTED", "gnd": "GND", "power_good": "PG"}),
+        ("reg", "ap63205-5v", "ap63205-5v@2", "regulator",
+         {"input": "PROTECTED", "output": "VOUT", "gnd": "GND", "enable": "PG"}),
+    ]
+    requirements = [
+        CircuitRequirement(id=identifier, sheet=identifier.upper(), role=role,
+                           family=family, ports=ports)
+        for identifier, family, recipe, role, ports in rows
+    ]
+    expansions = expand_selections([
+        RecipeSelection(recipe=recipe, instance=identifier,
+                        sheets={"power": identifier.upper()}, port_bindings=ports,
+                        requirement_ids=[identifier])
+        for identifier, family, recipe, role, ports in rows
+    ])
+    return SimpleNamespace(
+        requirements=requirements, rail_voltages={"RAW": voltage, "VOUT": 5.0, "GND": 0.0},
+    ), BOM(
+        parts=[p for expansion in expansions for p in expansion.parts],
+        connections=[c for expansion in expansions for c in expansion.connections],
+        no_connect_pins=[p for expansion in expansions for p in expansion.no_connect_pins],
+        recipe_ownership=[expansion.ownership for expansion in expansions],
+    )
+
+
+@pytest.mark.parametrize(("voltage", "accepted"), [(9.0, True), (5.0, False)])
+def test_controlled_pd_entry_qualifies_only_its_active_input_range(voltage, accepted):
+    architecture, bom = _qualified_pd_entry(voltage)
+    result = validation.check_reviewed_input_operating_ranges(architecture, bom)
+    assert result.ok is accepted, result.offenders
+
+
+def test_controlled_pd_entry_ownership_cannot_hide_missing_startup_support():
+    architecture, bom = _qualified_pd_entry()
+    slew = next(p for p in bom.parts if p.recipe_instance == "entry" and p.recipe_role == "slew_cap")
+    bom.parts = [p for p in bom.parts if p.ref != slew.ref]
+    result = validation.check_reviewed_input_operating_ranges(architecture, bom)
+    assert not result.ok
+    assert any("E_POWER_PATH_UNPROVEN" in row for row in result.offenders)
+
+
+def test_pd_peak_crosses_qualified_entry_for_capacitor_gate_and_reselection(monkeypatch):
+    from kicraft.parts_library import jlcparts
+
+    architecture, bom = _qualified_pd_entry()
+    cap = next(p for p in bom.parts if p.recipe_instance == "reg" and p.recipe_role == "input_cap")
+    cap.sourcing_note = "LCSC C19702"
+    monkeypatch.setattr(jlcparts, "parameters", lambda cid: {
+        "attributes": {"Voltage Rating": "10V" if cid == "C19702" else "50V"},
+    })
+    assert any(part.ref == cap.ref and stress == 22.0 and rating == 10.0
+               for part, cid, stress, rating in validation.under_rated_capacitors(architecture, bom))
+    result = validation.check_reviewed_input_operating_ranges(architecture, bom)
+    assert not result.ok
+    assert any("E_CAPACITOR_VOLTAGE" in row and cap.ref in row for row in result.offenders)

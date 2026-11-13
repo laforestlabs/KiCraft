@@ -128,6 +128,8 @@ def _build_leaf_silkscreen(
     bbox: dict[str, float],
     extraction: ExtractedSubcircuitBoard,
     config: dict,
+    *,
+    outline: tuple[Point, Point] | None = None,
 ) -> list[SilkscreenElement]:
     """Build silkscreen elements (rounded-rect outline + text label) for a leaf.
 
@@ -160,6 +162,9 @@ def _build_leaf_silkscreen(
     y0 = bbox["min_y"] - margin
     x1 = bbox["max_x"] + margin
     y1 = bbox["max_y"] + margin
+    if outline is not None:
+        x0, y0 = outline[0].x, outline[0].y
+        x1, y1 = outline[1].x, outline[1].y
 
     points = leaf_outline_polyline(x0, y0, x1, y1, radius)
     # Recover r for text positioning below.

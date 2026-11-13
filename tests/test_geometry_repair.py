@@ -183,3 +183,5 @@ def test_geometry_wrapper_restores_board_when_redrc_times_out(tmp_path, monkeypa
     assert board.read_text() == "original"
     assert result["illegal_geometry_repair"]["reverted"]
     assert not result["illegal_geometry_repair"]["kept"]
+
+

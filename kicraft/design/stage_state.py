@@ -33,7 +33,10 @@ def legacy_recipe_resume_stage(state: Mapping[str, Any]) -> str | None:
     Inspect raw state before model parsing: an ambiguous saved selection cannot
     pass the architecture validator until that architecture has been replaced.
     """
-    from .recipe_versions import is_legacy_recipe_id
+    from .recipe_versions import (
+        is_legacy_recipe_id,
+        legacy_recipe_requires_new_architecture,
+    )
 
     architecture = state.get("architecture")
     selections = architecture.get("recipe_selections") or [] if isinstance(architecture, Mapping) else []
@@ -52,6 +55,15 @@ def legacy_recipe_resume_stage(state: Mapping[str, Any]) -> str | None:
     bom = state.get("bom")
     if not isinstance(bom, Mapping):
         return None
+    owned_ids = [
+        row.get("recipe") for row in bom.get("recipe_ownership") or []
+        if isinstance(row, Mapping)
+    ] + [
+        row.get("recipe_id") for row in bom.get("parts") or []
+        if isinstance(row, Mapping)
+    ]
+    if any(legacy_recipe_requires_new_architecture(value) for value in owned_ids):
+        return "architecture"
     if legacy_selections or any(
         isinstance(manifest, Mapping) and is_legacy_recipe_id(manifest.get("recipe"))
         for manifest in bom.get("recipe_ownership") or []

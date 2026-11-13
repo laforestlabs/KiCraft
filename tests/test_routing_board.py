@@ -464,6 +464,62 @@ def testrun_pcbnew_script_gives_up_after_six_failed_load_board(
     assert len(calls) == 6
 
 
+def test_ground_preparation_timeout_uses_remaining_route_budget_and_restores_rules(
+    monkeypatch, tmp_path,
+):
+    import subprocess
+    import time
+
+    from kicraft.autoplacer import kicad_routing_tools as krt
+
+    source = tmp_path / "input.kicad_pcb"
+    source.write_text("input board")
+    output = tmp_path / "output.kicad_pcb"
+    staged = tmp_path / "output.krt-width-input.kicad_pcb"
+    monkeypatch.setattr(krt, "preflight_kicad_routing_tools", lambda _cfg: object())
+    monkeypatch.setattr(krt, "_routing_project", lambda _board, _cfg: source.with_suffix(".kicad_pro"))
+    monkeypatch.setattr(krt, "_project_routing_floors", lambda *_args: {
+        "track_width": 0.17, "clearance": 0.17,
+    })
+
+    def propagate(_source, target):
+        from pathlib import Path
+        Path(target).with_suffix(".kicad_pro").write_text("authoritative project")
+        Path(target).with_suffix(".kicad_dru").write_text("authoritative rules")
+
+    def width_groups(*_args):
+        time.sleep(0.15)
+        return [(0.2, ["signal"])]
+
+    monkeypatch.setattr(krt, "_propagate_sibling_project_rules", propagate)
+    monkeypatch.setattr(krt, "_width_groups", width_groups)
+    original_runner = routing_board.run_pcbnew_script
+
+    def slow_native(_script, *, deadline=None):
+        original_runner(
+            "from pathlib import Path\n"
+            f"Path({str(staged.with_suffix('.kicad_pro'))!r}).write_text('temporary')\n"
+            f"Path({str(staged.with_suffix('.kicad_dru'))!r}).write_text('temporary')\n"
+            "import time; time.sleep(10)\n",
+            deadline=deadline,
+        )
+
+    monkeypatch.setattr(routing_board, "run_pcbnew_script", slow_native)
+    started = time.monotonic()
+    with pytest.raises(krt.KicadRoutingToolsTimeoutError, match="ground preparation") as caught:
+        krt.route_with_kicad_routing_tools(str(source), str(output), {
+            "kicad_routing_tools_timeout_s": 0.5,
+            "routing_local_ground_reservations": True,
+        })
+    assert isinstance(caught.value.__cause__, subprocess.TimeoutExpired)
+    assert str(staged) in str(caught.value)
+    assert time.monotonic() - started < 1.5
+    assert staged.read_text() == "input board"
+    assert staged.with_suffix(".kicad_pro").read_text() == "authoritative project"
+    assert staged.with_suffix(".kicad_dru").read_text() == "authoritative rules"
+    assert not output.exists()
+
+
 def test_validate_routed_board_rejects_on_drc_tool_failure(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
@@ -699,3 +755,40 @@ def test_ignored_pad_edge_violation_does_not_waive_track_edge(tmp_path, monkeypa
     assert not validation["accepted"]
     assert validation["footprint_internal_copper_edge_count"] == 1
     assert validation["obviously_illegal_routed_geometry"]
+
+
+def test_two_ounce_width_and_footprint_clearance_are_not_waived(tmp_path, monkeypatch):
+    report = (
+        "[clearance]: Clearance violation\n"
+        "    @(1 mm, 1 mm): Pad 1 [A] of U1\n"
+        "    @(2 mm, 1 mm): Pad 2 [B] of U1\n"
+        "[track_width]: Track width too small\n"
+    )
+    monkeypatch.setattr(routing_board, "count_board_tracks", lambda _: {"footprints": 1})
+    monkeypatch.setattr(routing_board, "run_kicad_cli_drc", lambda *a, **k: {
+        "clearance": 1, "track_width": 1, "report_text": report,
+    })
+    board = tmp_path / "board.kicad_pcb"
+    board.write_text("board")
+    validation = routing_board.validate_routed_board(
+        str(board), cfg={"outline_containment_check": False,
+                         "thermal_requirements": [{"outer_copper_oz": 2}]},
+    )
+    assert not validation["accepted"]
+    assert "track_width" in validation["rejection_reasons"]
+    assert validation["obviously_illegal_routed_geometry"]
+    assert not validation.get("footprint_internal_clearance_count", 0)
+
+
+def test_drc_counts_track_width_headers(tmp_path, monkeypatch):
+    class Result:
+        returncode = 0
+        stdout = stderr = ""
+
+    def run(cmd, **kwargs):
+        from pathlib import Path
+        Path(cmd[cmd.index("-o") + 1]).write_text("[track_width]: Track width too small\n")
+        return Result()
+
+    monkeypatch.setattr(routing_board.subprocess, "run", run)
+    assert routing_board.run_kicad_cli_drc(str(tmp_path / "board.kicad_pcb"))["track_width"] == 1

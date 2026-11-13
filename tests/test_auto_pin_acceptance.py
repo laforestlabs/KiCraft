@@ -19,10 +19,6 @@ from pathlib import Path
 import pytest
 
 from kicraft.autoplacer.brain import pins
-from kicraft.autoplacer.brain.leaf_size_reduction import (
-    _preserve_round_boards,
-    _restore_round_boards,
-)
 from kicraft.cli.autoexperiment import _auto_pin_best_leaves
 from kicraft.cli.triage import collect_leaves
 
@@ -225,25 +221,3 @@ def test_selected_raw_drc_does_not_manufacture_acceptance(tmp_path, raw_count):
         }
 
 
-def test_squeeze_preserve_restore_round_trips(tmp_path):
-    routed = tmp_path / "leaf_routed.kicad_pcb"
-    snapshot = tmp_path / "round_0035_leaf_routed.kicad_pcb"
-    routed.write_bytes(b"winner canonical")
-    snapshot.write_bytes(b"winner snapshot")
-    routing = {
-        "routed_board_path": str(routed),
-        "round_board_routed": str(snapshot),
-        "leaf_placed_board": str(tmp_path / "missing.kicad_pcb"),  # tolerated
-    }
-
-    saved = _preserve_round_boards(routing)
-    assert set(saved) == {str(routed), str(snapshot)}
-
-    # A rejected candidate's reroute clobbers both files...
-    routed.write_bytes(b"rejected candidate canonical")
-    snapshot.write_bytes(b"rejected candidate snapshot")
-
-    # ...and the restore puts the validated winner back byte-for-byte.
-    _restore_round_boards(saved)
-    assert routed.read_bytes() == b"winner canonical"
-    assert snapshot.read_bytes() == b"winner snapshot"

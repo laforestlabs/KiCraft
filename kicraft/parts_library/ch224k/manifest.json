@@ -1,5 +1,5 @@
 {
-  "content_hash": "sha256:7f7091147d333075eaa9511ff872428afb8a6f651fc1de19ef1cf07be2438953",
+  "content_hash": "sha256:e383d4611fce82a1c6c8d856891c27ecb7cead124f1d6862e4e10b9f173f4ff0",
   "datasheet_url": "https://www.lcsc.com/datasheet/C970725.pdf",
   "description": "WCH CH224K \u2014 USB PD 3.0 sink controller, negotiates 5V/9V/12V/15V/20V from USB-C PD source. ESSOP-10 package. Single-resistor voltage selection. Ideal for replacing barrel jacks.",
   "footprint_name": "ESSOP-10_L4.9-W3.9-P1.0-LS6.0-TL-EP",

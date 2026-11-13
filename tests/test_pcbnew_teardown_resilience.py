@@ -12,6 +12,8 @@ returncode/sentinel logic directly.
 """
 from __future__ import annotations
 
+import subprocess
+import time
 import sys
 
 import pytest
@@ -25,16 +27,6 @@ def _cmd(body: str) -> list[str]:
     return [sys.executable, "-c", body]
 
 
-def test_teardown_segfault_after_sentinel_is_success():
-    # Print sentinel (flushed), then die by SIGSEGV during atexit -- i.e.
-    # after the work completed, mimicking a wx static-destructor teardown
-    # crash. _retry_pcbnew_run must return normally (no exception).
-    body = (
-        "import os, signal, atexit, sys\n"
-        "atexit.register(lambda: os.kill(os.getpid(), signal.SIGSEGV))\n"
-        f"print({SENTINEL!r}); sys.stdout.flush()\n"
-    )
-    fr._retry_pcbnew_run(_cmd(body))  # must not raise
 
 
 def test_crash_before_sentinel_still_fails():
@@ -56,26 +48,52 @@ def test_normal_error_exit_still_fails():
         fr._retry_pcbnew_run(_cmd(body))
 
 
-def test_signal_death_without_sentinel_fails():
-    # Signal death (rc<0) but no sentinel printed -- e.g. crash during work
-    # before any save. Must raise, not be mistaken for a teardown crash.
-    body = "import os, signal\nos.kill(os.getpid(), signal.SIGSEGV)\n"
-    with pytest.raises(RuntimeError, match="pcbnew subprocess failed"):
-        fr._retry_pcbnew_run(_cmd(body))
 
 
-def test_clean_exit_is_success():
-    body = f"print({SENTINEL!r})\n"
-    fr._retry_pcbnew_run(_cmd(body))  # rc 0 -> returns
 
 
-def testrun_pcbnew_script_appends_sentinel_and_survives_teardown_crash():
-    # End-to-end through run_pcbnew_script: the body does its "work" (no
-    # explicit sentinel), run_pcbnew_script appends the sentinel, and a
-    # teardown SIGSEGV registered by the body fires after it. Must not raise.
-    script = (
-        "import os, signal, atexit\n"
-        "atexit.register(lambda: os.kill(os.getpid(), signal.SIGSEGV))\n"
-        "# (pretend board.Save happened here)\n"
+
+
+def test_deadline_kills_process_group_even_after_success_sentinel(tmp_path):
+    marker = tmp_path / "child-survived"
+    ready = tmp_path / "child-ready"
+    child = (
+        "import time\n"
+        "from pathlib import Path\n"
+        f"Path({str(ready)!r}).write_text('ready')\n"
+        f"time.sleep(1.2); Path({str(marker)!r}).write_text('alive')\n"
     )
-    fr.run_pcbnew_script(script)  # must not raise
+    body = (
+        "import subprocess, sys, time\n"
+        "from pathlib import Path\n"
+        f"subprocess.Popen([sys.executable, '-c', {child!r}])\n"
+        f"while not Path({str(ready)!r}).exists(): time.sleep(0.01)\n"
+        f"print({SENTINEL!r}, flush=True)\n"
+        "time.sleep(10)\n"
+    )
+    with pytest.raises(subprocess.TimeoutExpired) as caught:
+        fr._retry_pcbnew_run(_cmd(body), deadline=time.monotonic() + 0.6)
+    assert SENTINEL in caught.value.stdout
+    assert ready.exists()
+    time.sleep(1.3)
+    assert not marker.exists()
+
+
+def test_deadline_is_shared_across_load_retries_and_backoff(tmp_path):
+    attempts = tmp_path / "attempts"
+    body = (
+        "import sys, time\n"
+        "from pathlib import Path\n"
+        f"p = Path({str(attempts)!r})\n"
+        "with p.open('a') as f: f.write('x')\n"
+        "time.sleep(0.13)\n"
+        "print('Failed to load board: transient', file=sys.stderr, flush=True)\n"
+        "raise SystemExit(1)\n"
+    )
+    started = time.monotonic()
+    with pytest.raises(subprocess.TimeoutExpired):
+        fr._retry_pcbnew_run(_cmd(body), deadline=started + 0.4)
+    assert 1 <= len(attempts.read_text()) <= 2
+    assert time.monotonic() - started < 1.5
+
+

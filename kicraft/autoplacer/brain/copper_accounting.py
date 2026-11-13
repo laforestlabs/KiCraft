@@ -270,27 +270,27 @@ def _solve_translation(
     with a deterministic tie-break.  Returns (0.0, 0.0) when no child copper
     exists to constrain the translation.
     """
-    candidates: set[tuple[float, float]] = set()
+    candidate_votes: Counter[tuple[float, float]] = Counter()
 
     post_trace_index: dict[tuple[Any, ...], list[tuple[float, float, float, float, str, float]]] = {}
     for coords in post_traces:
         post_trace_index.setdefault(_trace_shape(coords), []).append(coords)
     for coords in expected_traces:
         for post_coords in post_trace_index.get(_trace_shape(coords), []):
-            candidates.add(
+            candidate_votes[
                 (round(post_coords[0] - coords[0], 6), round(post_coords[1] - coords[1], 6))
-            )
+            ] += 1
 
     post_via_index: dict[tuple[float, float], list[tuple[float, float, float, float]]] = {}
     for coords in post_vias:
         post_via_index.setdefault(_via_shape(coords), []).append(coords)
     for coords in expected_vias:
         for post_coords in post_via_index.get(_via_shape(coords), []):
-            candidates.add(
+            candidate_votes[
                 (round(post_coords[0] - coords[0], 6), round(post_coords[1] - coords[1], 6))
-            )
+            ] += 1
 
-    if not candidates:
+    if not candidate_votes:
         return (0.0, 0.0)
 
     post_trace_fps = Counter(
@@ -300,22 +300,52 @@ def _solve_translation(
         _fingerprint_via_coords(coords) for coords in post_vias
     )
 
+    # Votes only order the search: fingerprint rounding can make a less-voted
+    # translation the best match. No candidate is discarded on vote count.
+    groups = (
+        (
+            sorted(expected_traces, key=lambda c: len(post_trace_index.get(_trace_shape(c), []))),
+            post_trace_fps,
+            _fingerprint_trace_coords,
+        ),
+        (
+            sorted(expected_vias, key=lambda c: len(post_via_index.get(_via_shape(c), []))),
+            post_via_fps,
+            _fingerprint_via_coords,
+        ),
+    )
+    expected_count = len(expected_traces) + len(expected_vias)
     best: tuple[float, float] | None = None
     best_matches = -1
-    for tx, ty in candidates:
-        shifted_trace_fps = Counter(
-            _fingerprint_trace_coords(coords, shift=(tx, ty))
-            for coords in expected_traces
-        )
-        shifted_via_fps = Counter(
-            _fingerprint_via_coords(coords, shift=(tx, ty))
-            for coords in expected_vias
-        )
-        matches = sum((shifted_trace_fps & post_trace_fps).values())
-        matches += sum((shifted_via_fps & post_via_fps).values())
-        if matches > best_matches or (matches == best_matches and (tx, ty) < best):
+    for shift in sorted(candidate_votes, key=lambda c: (-candidate_votes[c], c)):
+        if best_matches == expected_count and best is not None and shift >= best:
+            continue
+        matches = 0
+        remaining = expected_count
+        cannot_win = False
+        for expected, post_fps, fingerprint in groups:
+            consumed: Counter = Counter()
+            for coords in expected:
+                fp = fingerprint(coords, shift=shift)
+                if consumed[fp] < post_fps[fp]:
+                    consumed[fp] += 1
+                    matches += 1
+                remaining -= 1
+                # Every unvisited item can add at most one match. Stop only
+                # when even that bound cannot improve the score or its tie.
+                upper_bound = matches + remaining
+                if upper_bound < best_matches or (
+                    upper_bound == best_matches and best is not None and shift >= best
+                ):
+                    cannot_win = True
+                    break
+            if cannot_win:
+                break
+        if not cannot_win and (
+            matches > best_matches or (matches == best_matches and shift < best)
+        ):
             best_matches = matches
-            best = (tx, ty)
+            best = shift
 
     return best if best is not None else (0.0, 0.0)
 

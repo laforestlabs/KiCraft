@@ -151,6 +151,34 @@ def test_noroute_promote_accepts_fresh_placed_board(tmp_path, monkeypatch):
     assert prov["source_board"].endswith(ap.PARENT_PLACED)
 
 
+def test_failed_parent_search_cannot_promote_fresh_rejected_route(tmp_path, monkeypatch):
+    """A failed route may leave a fresh file; it is not a successful parent."""
+    t0 = time.time()
+    _set_run("NOW", t0)
+    stem = "BOARD"
+    pcb = _touch(tmp_path / f"{stem}.kicad_pcb", "seed")
+    sub = _sub(tmp_path)
+    _touch(sub / ap.PARENT_ROUTED, "rejected routed copper")
+    _touch(sub / ap.PARENT_PLACED, "placed parent")
+    monkeypatch.setattr(cli_app, "_run_layout", lambda *a, **k: 6)
+    monkeypatch.setattr(
+        cli_app, "_verify_routed_board",
+        lambda *a, **k: pytest.fail("rejected router output must not be verified as selected"),
+    )
+    state, artifacts = _build_context(tmp_path, stem)
+    args = SimpleNamespace(
+        quality="good", seed=0, route=True, no_fab=True,
+        done_label="DONE", no_archive=True,
+    )
+    rc = cli_app._layout_route_fab(
+        args, state, tmp_path / "state.json", artifacts, None,
+        stem, tmp_path, tmp_path / "root.kicad_sch", pcb,
+    )
+    assert rc == 6
+    assert pcb.read_text() == "placed parent"
+    assert ap.read_provenance(pcb)["source_kind"] == "partial"
+
+
 # --- site 1: routed fab promote -----------------------------------------------
 
 def test_fab_promote_ignores_stale_routed_and_falls_through(tmp_path):
@@ -303,3 +331,175 @@ def test_rc6_preview_marks_fresh_partial_fresh(tmp_path):
     assert prov is not None
     assert prov["source_kind"] == "partial"
     assert prov["fresh"] is True
+
+
+def _thermal_recipe_state():
+    from kicraft.design.models import BOM, RecipeSelection
+    from kicraft.design.recipes.registry import expand_selections
+
+    selections = [
+        RecipeSelection(
+            recipe="ap63203-3v3@1", instance="buck", sheets={"power": "POWER"},
+            port_bindings={"input": "VIN", "output": "VOUT", "gnd": "GND"},
+        ),
+        RecipeSelection(
+            recipe="tps26631-pd-inrush-power-path@1", instance="entry",
+            sheets={"power": "POWER"},
+            port_bindings={"input": "RAW", "output": "VIN", "gnd": "GND"},
+        ),
+    ]
+    expansions = expand_selections(selections)
+    bom = BOM(parts=[p for e in expansions for p in e.parts],
+              connections=[c for e in expansions for c in e.connections],
+              recipe_ownership=[e.ownership for e in expansions])
+    return SimpleNamespace(
+        architecture=SimpleNamespace(recipe_selections=selections), bom=bom,
+        intent=None, stage_status={},
+    )
+
+
+@pytest.mark.parametrize("mutation", ["missing", "empty", "owner", "radius", "area"])
+def test_promoted_fab_refuses_missing_or_weakened_recipe_thermal_contract(
+    tmp_path, monkeypatch, mutation
+):
+    import subprocess
+    from kicraft.autoplacer.hardware import silk_legend
+    from kicraft.design.synthesis import fab_export
+    from kicraft.design.synthesis.autoplacer import (
+        _recipe_local_bypasses, canonical_recipe_thermal_requirements,
+    )
+
+    state = _thermal_recipe_state()
+    thermal = canonical_recipe_thermal_requirements(state.architecture, state.bom)
+    assert len(thermal) == 2
+    config = {"local_bypasses": _recipe_local_bypasses(state.architecture, state.bom),
+              "thermal_requirements": thermal}
+    if mutation == "missing":
+        config.pop("thermal_requirements")
+    elif mutation == "empty":
+        config["thermal_requirements"] = []
+    elif mutation == "owner":
+        config["thermal_requirements"] = thermal[:1]
+    elif mutation == "radius":
+        thermal[0]["local_radius_mm"] = 300.0
+    else:
+        thermal[0]["minimum_local_ground_area_mm2"] = 0.01
+    (tmp_path / "BOARD_autoplacer.json").write_text(json.dumps(config))
+
+    now = time.time()
+    _set_run("NOW", now)
+    routed = _touch(_sub(tmp_path) / ap.PARENT_ROUTED)
+    _set_mtime(routed, now + 10)
+    _write_meta(routed.parent, "NOW")
+    pcb = tmp_path / "BOARD.kicad_pcb"
+    _, artifacts = _build_context(tmp_path, "BOARD")
+    monkeypatch.setattr(silk_legend, "apply_silk_legend", lambda *a: {})
+    monkeypatch.setattr(cli_app, "_verify_routed_board", lambda *a, **k: {
+        "ok": True, "fab_acceptable": True, "shorts": 0, "unconnected": 0,
+        "tracks": {"footprint_refs": [p.ref for p in state.bom.parts]}, "reasons": [],
+    })
+    monkeypatch.setattr(cli_app, "_shipped_advisory_codes", lambda state: [])
+    monkeypatch.setattr(cli_app, "_castellation_geometry_violations", lambda *a: [])
+    monkeypatch.setattr(cli_app, "_check_form_factor_conformance", lambda *a: None)
+    monkeypatch.setattr(cli_app, "_check_outline_shape_conformance", lambda *a: None)
+    monkeypatch.setattr(cli_app, "_connector_misoriented", lambda *a: ([], []))
+    monkeypatch.setattr(cli_app, "_antenna_edge_contract_violations", lambda *a: [])
+    monkeypatch.setattr(cli_app, "_persist_pcb_diagnostics", lambda *a, **k: None)
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: None)
+    monkeypatch.setattr(fab_export, "export_fab",
+                        lambda *a, **k: pytest.fail("invalid thermal contract exported fab"))
+    summary = {}
+    rc = cli_app._promote_verify_fab(
+        state, tmp_path / "state.json", artifacts, "BOARD", tmp_path, pcb,
+        verify_summary_out=summary,
+    )
+    assert rc == 7
+    assert any("thermal requirements differ" in reason for reason in summary["reasons"])
+
+
+def test_canonical_thermal_contract_rejects_unproven_ground_pin():
+    from kicraft.design.synthesis.autoplacer import canonical_recipe_thermal_requirements
+
+    state = _thermal_recipe_state()
+    rows = canonical_recipe_thermal_requirements(state.architecture, state.bom)
+    assert {tuple(row["ground_pins"]) for row in rows} == {("4",), ("8", "11", "25")}
+    owner = next(row["owner_ref"] for row in rows if row["ground_pins"] == ["4"])
+    ground = next(c for c in state.bom.connections if any(
+        p.ref == owner and p.pin == "4" for p in c.endpoints
+    ))
+    ground.endpoints = [p for p in ground.endpoints if not (p.ref == owner and p.pin == "4")]
+    with pytest.raises(ValueError, match="unproven thermal ground pin"):
+        canonical_recipe_thermal_requirements(state.architecture, state.bom)
+
+
+def test_fab_requires_state_before_starting_layout(tmp_path, monkeypatch):
+    monkeypatch.setattr(cli_app, "_run_layout",
+                        lambda *a, **k: pytest.fail("missing state must not start fab layout"))
+    _, artifacts = _build_context(tmp_path, "BOARD")
+    args = SimpleNamespace(quality="draft", route=True, no_fab=False)
+    assert cli_app._layout_route_fab(
+        args, None, tmp_path / "state.json", artifacts, None, "BOARD", tmp_path,
+        tmp_path / "root.kicad_sch", tmp_path / "BOARD.kicad_pcb",
+    ) == 7
+    assert cli_app._canonical_thermal_for_config(None, {}, do_fab=False) == []
+
+
+def test_promoted_two_ounce_board_rejects_actual_narrow_trace_without_metadata(
+    tmp_path, monkeypatch
+):
+    import subprocess
+    from kicraft.autoplacer.hardware import silk_legend
+    from kicraft.design.synthesis.kicad_pro import write_kicad_pro
+    from kicraft.pcb_layers import set_two_ounce_outer_stackup
+
+    pcbnew = pytest.importorskip("pcbnew")
+    now = time.time()
+    _set_run("NOW", now)
+    routed = _sub(tmp_path) / ap.PARENT_ROUTED
+    routed.parent.mkdir(parents=True)
+    board = pcbnew.NewBoard(str(routed))
+    net = pcbnew.NETINFO_ITEM(board, "SIG")
+    board.Add(net)
+    track = pcbnew.PCB_TRACK(board)
+    track.SetStart(pcbnew.VECTOR2I(pcbnew.FromMM(5), pcbnew.FromMM(5)))
+    track.SetEnd(pcbnew.VECTOR2I(pcbnew.FromMM(10), pcbnew.FromMM(5)))
+    track.SetWidth(pcbnew.FromMM(0.127))
+    track.SetLayer(pcbnew.F_Cu)
+    track.SetNet(net)
+    board.Add(track)
+    board.Save(str(routed))
+    set_two_ounce_outer_stackup(routed)
+    _set_mtime(routed, now + 10)
+    _write_meta(routed.parent, "NOW")
+    write_kicad_pro(
+        tmp_path, "BOARD", SimpleNamespace(power_nets=[]),
+        fab_config={"thermal_requirements": [{"outer_copper_oz": 2.0}]},
+    )
+    state, artifacts = _build_context(tmp_path, "BOARD")
+    monkeypatch.setattr(silk_legend, "apply_silk_legend", lambda *a: {})
+    monkeypatch.setattr(cli_app, "_verify_routed_board", lambda *a, **k: {
+        "ok": True, "fab_acceptable": True, "shorts": 0, "unconnected": 0,
+        "tracks": {"footprint_refs": []}, "reasons": [],
+    })
+    monkeypatch.setattr(cli_app, "_shipped_advisory_codes", lambda state: [])
+    monkeypatch.setattr(cli_app, "_castellation_geometry_violations", lambda *a: [])
+    monkeypatch.setattr(cli_app, "_check_form_factor_conformance", lambda *a: None)
+    monkeypatch.setattr(cli_app, "_check_outline_shape_conformance", lambda *a: None)
+    monkeypatch.setattr(cli_app, "_connector_misoriented", lambda *a: ([], []))
+    monkeypatch.setattr(cli_app, "_antenna_edge_contract_violations", lambda *a: [])
+    monkeypatch.setattr(cli_app, "_persist_pcb_diagnostics", lambda *a, **k: None)
+    # Native copper extraction must remain real. Suppress only the later failure render.
+    monkeypatch.setattr(cli_app, "_persist_artifacts", lambda *a, **k: None)
+    real_run = subprocess.run
+    def run_without_render(cmd, *args, **kwargs):
+        if cmd[:3] == ["kicad-cli", "pcb", "render"]:
+            return SimpleNamespace(returncode=0)
+        return real_run(cmd, *args, **kwargs)
+    monkeypatch.setattr(subprocess, "run", run_without_render)
+    summary = {}
+    rc = cli_app._promote_verify_fab(
+        state, tmp_path / "state.json", artifacts, "BOARD", tmp_path,
+        tmp_path / "BOARD.kicad_pcb", do_fab=False, verify_summary_out=summary,
+    )
+    assert rc == 7
+    assert any("routed copper width 0.127" in reason for reason in summary["reasons"])

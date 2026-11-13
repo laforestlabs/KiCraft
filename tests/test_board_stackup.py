@@ -199,3 +199,24 @@ def test_the_gnd_plane_grows_to_the_inner_layers() -> None:
     assert _plane_layers(four, ("B.Cu",)) == ("B.Cu", "In1.Cu", "In2.Cu")
     assert _plane_layers(four, ("B.Cu", "F.Cu")) == ("B.Cu", "F.Cu", "In1.Cu", "In2.Cu")
     assert _plane_layers({"F.Cu": 0, "B.Cu": 2}, ("B.Cu", "F.Cu")) == ("B.Cu", "F.Cu")
+
+
+def test_two_ounce_stackup_roundtrips_through_pcbnew(tmp_path):
+    pcbnew = pytest.importorskip("pcbnew")
+    from kicraft.pcb_layers import has_two_ounce_outer_stackup, set_two_ounce_outer_stackup
+
+    path = _board(tmp_path, "two-ounce.kicad_pcb", 2)
+    set_two_ounce_outer_stackup(path)
+    assert has_two_ounce_outer_stackup(path)
+    pcbnew.LoadBoard(str(path)).Save(str(path))
+    assert has_two_ounce_outer_stackup(path)
+    set_two_ounce_outer_stackup(path)
+    assert path.read_text().count("(stackup") == 1
+
+
+def test_two_ounce_stackup_refuses_unsupported_multilayer_board(tmp_path):
+    from kicraft.pcb_layers import set_two_ounce_outer_stackup
+
+    path = _board(tmp_path, "four-ounce.kicad_pcb", 4)
+    with pytest.raises(ValueError, match="two-layer"):
+        set_two_ounce_outer_stackup(path)

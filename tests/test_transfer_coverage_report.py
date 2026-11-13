@@ -45,7 +45,7 @@ def test_report_classifies_records_and_recipe_parts():
     # a transfer, while the LDO chargers still have no reviewed record at all.
     recipe = {(row["recipe"], row["part"]): row for row in summary["recipes"]}
     assert recipe[("ap63203-3v3@1", "AP63203WU-7")]["transfer"] is True
-    assert recipe[("ap63205-5v@1", "AP63205WU-7")]["transfer"] is True
+    assert recipe[("ap63205-5v@2", "AP63205WU-7")]["transfer"] is True
     assert recipe[("ams1117-3v3@2", "AMS1117-3.3")]["reviewed"] is False
     assert {row["part"] for row in summary["unwitnessed_recipe_parts"]} >= {
         "CH224K",

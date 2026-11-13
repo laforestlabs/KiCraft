@@ -1,0 +1,27 @@
+{
+  "content_hash": "sha256:96d72049b3f2e8c8ce1fa0d762dfa1f51ad33d95ec8304a54785565488131f52",
+  "datasheet_url": "https://www.ti.com/lit/ds/symlink/tps2663.pdf",
+  "description": "TI TPS26631RGER VQFN-24 exposed-pad eFuse",
+  "footprint_name": "VQFN-24_L4.0-W4.0-P0.50-BL-EP2.5",
+  "kicad_version_min": "9.0.0",
+  "maturity": "prototype",
+  "mpn": "TPS26631RGER",
+  "name": "tps26631rger",
+  "provenance": {
+    "added_at": "2026-11-06T06:23:37Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C1850273"
+  },
+  "symbol_name": "TPS26631RGER",
+  "tags": [
+    "power"
+  ],
+  "three_d_model": null,
+  "version": "0.1.0",
+  "watch_out_for": null
+}

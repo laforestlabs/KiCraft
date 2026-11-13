@@ -549,8 +549,7 @@ def test_external_current_question_obeys_explicit_noninteractive_policy():
         instruction=None,
         auto_default_questions=True,
     )
-    # This policy gate is intentionally pure: a missing user-owned physical fact
-    # parks an interactive run before another provider call can invent a rating.
+    # Interactive policy still asks rather than selecting an output rating.
     assert _questions_need_input(
         questions,
         "architecture",
@@ -559,6 +558,65 @@ def test_external_current_question_obeys_explicit_noninteractive_policy():
         instruction=None,
         auto_default_questions=False,
     )
+
+@pytest.mark.parametrize("automatic", [True, False])
+def test_external_led_allocation_repair_or_question_through_stage_runtime(tmp_path, automatic):
+    # A reviewed 2 A converter feeds a real external LED-header recipe. Its
+    # output allocation is absent in the first provider response.
+    candidate = {
+        "topologies": {"INPUT": "9 V input", "CONVERTER": "5 V buck", "LED": "LED output"},
+        "comms_protocols": [],
+        "mcu_present": False,
+        "power": {"rails": {
+            "VIN": {"voltage": 9.0, "from": "input.pin1"},
+            "+5V": {"voltage": 5.0, "from": "converter.output"},
+        }},
+        "sheets": [
+            {"name": "INPUT", "stem": "INPUT", "role": "connector", "function": "Input header"},
+            {"name": "CONVERTER", "stem": "CONVERTER", "role": "power", "function": "5 V conversion"},
+            {"name": "LED", "stem": "LED", "role": "analog_block", "function": "LED output"},
+        ],
+        "requirements": [
+            {"id": "input", "sheet": "INPUT", "role": "connector", "family": "pin-header",
+             "parameters": {"rows": 1, "gender": "male"},
+             "ties": {"pin1": "VIN", "pin2": "GND"}, "functional_blocks": []},
+            {"id": "converter", "sheet": "CONVERTER", "role": "regulator",
+             "family": "ap63205-5v", "supply": "VIN",
+             "functional_blocks": []},
+            {"id": "strip", "sheet": "LED", "role": "driver",
+             "family": "ws2812-external-strip-header", "supply": "+5V",
+             "functional_blocks": []},
+        ],
+        "signals": [{"name": "DATA", "from": "input.pin3", "to": "strip.data_in"}],
+        "assumptions": [],
+    }
+    repaired = {
+        **candidate,
+        "assumptions": ["External addressable LED strip output is budgeted to 0.25 A maximum (defaulted)"],
+    }
+
+    def reply(payload):
+        return {"text": json.dumps(payload), "reasoning": "", "finish_reason": "stop", "cost_usd": 0.0}
+
+    client = _ScriptedClient([reply(candidate), reply(repaired)] if automatic else [reply(candidate)])
+    client.s = Settings(api_key="test", stage_semantics="enforce")
+    state_path = tmp_path / ".kicraft" / "state.json"
+    result = stage_driver_mod.drive_stage(
+        client, "architecture", "A 9 V input and addressable LED string header",
+        state_path, tmp_path, auto_default_questions=automatic,
+    )
+
+    if automatic:
+        assert result["commit_ok"] is True, result
+        assert not result.get("needs_input", False)
+        state = json.loads(state_path.read_text())
+        assert not state.get("open_questions")
+    else:
+        assert result["commit_ok"] is False
+        assert result["needs_input"] is True
+        assert json.loads(state_path.read_text())["open_questions"]
+
+
 
 
 

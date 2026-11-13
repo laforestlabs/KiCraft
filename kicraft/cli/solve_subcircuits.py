@@ -1234,10 +1234,6 @@ def _solve_leaf_subcircuit(
                 # No routing requested -- placement-only round is always accepted
                 accepted = True
                 round_acceptance = None
-            elif routing.get("reason") == "no_internal_nets":
-                # Trivial pass -- nothing to route for this leaf
-                accepted = True
-                round_acceptance = None
             elif routing.get("failed", False):
                 # Clear routing infrastructure failure -- reject without gate eval
                 accepted = False
@@ -1413,12 +1409,31 @@ def _solve_leaf_subcircuit(
     # the canvas the winning round was actually solved against.
     extraction = best_extraction if best_extraction is not None else extraction
 
+    # Later rounds overwrite the shared boards. Materialize the selected
+    # round before reduction measures/preserves them or metadata points at
+    # them, including when the selected result is an honest rejected preview.
+    for snapshot_key, canonical_key in (
+        ("round_board_routed", "routed_board_path"),
+        ("round_board_pre_route", "leaf_placed_board"),
+    ):
+        snapshot = best.routing.get(snapshot_key)
+        canonical = best.routing.get(canonical_key)
+        if snapshot and canonical and Path(snapshot).is_file():
+            shutil.copy2(snapshot, canonical)
+
     size_reduction_start = time.monotonic()
     reduced_extraction, reduced_best, size_reduction = _attempt_leaf_size_reduction(
         extraction,
         best,
         cfg,
     )
+    # Reduction reroutes overwrite the winning round's PCB snapshot. Keep its
+    # per-round layout and verdict paired with those exact reduced bytes.
+    if reduced_best is not best:
+        for index, round_result in enumerate(round_results):
+            if round_result is best:
+                round_results[index] = reduced_best
+                break
     size_reduction_elapsed_s = round(
         max(0.0, time.monotonic() - size_reduction_start), 3
     )
@@ -1861,10 +1876,30 @@ def _persist_solution(
                 isinstance(round_acceptance, dict)
                 and isinstance(round_acceptance.get("accepted"), bool)
             ):
-                round_validation["leaf_acceptance_result"] = copy.deepcopy(
-                    round_acceptance
+                # Per-round search omits the winner-level anchor check.
+                # A pinnable snapshot must carry both verdicts, not promote
+                # a round accepted only by the reduced search-time gate.
+                snapshot_acceptance = evaluate_leaf_acceptance(
+                    validation=round_validation,
+                    anchor_validation=build_anchor_validation(
+                        layout.ports, layout.interface_anchors
+                    ),
+                    config=persist_acceptance_cfg,
                 )
-                round_validation["accepted"] = round_acceptance["accepted"]
+                snapshot_verdict = copy.deepcopy(round_acceptance)
+                if not snapshot_acceptance.accepted:
+                    snapshot_verdict["accepted"] = False
+                    snapshot_verdict["rejection_reasons"] = list(
+                        snapshot_acceptance.rejection_reasons
+                    )
+                    snapshot_verdict["gate_results"] = dict(
+                        snapshot_acceptance.gate_results
+                    )
+                    snapshot_verdict["anchor_summary"] = dict(
+                        snapshot_acceptance.anchor_summary
+                    )
+                round_validation["leaf_acceptance_result"] = snapshot_verdict
+                round_validation["accepted"] = snapshot_verdict["accepted"]
             else:
                 # A snapshot without its contemporaneous gate verdict is not
                 # eligible to claim acceptance when manually pinned.

@@ -229,7 +229,7 @@ def test_recipe_covered_bom_records_the_curated_identity():
     """
     from kicraft.design.recipes.registry import get_recipe
 
-    definition = get_recipe("hub75-sn74hct245-interface@1")
+    definition = get_recipe("hub75-sn74hct245-interface@2")
     bindings = {
         port.name: (
             "+5V"
@@ -262,7 +262,7 @@ def test_recipe_covered_bom_records_the_curated_identity():
         ],
         "recipe_selections": [
             {
-                "recipe": "hub75-sn74hct245-interface@1",
+                "recipe": "hub75-sn74hct245-interface@2",
                 "instance": "hub75",
                 "sheets": {"interface": "HUB75"},
                 "requirement_ids": ["hub75"],

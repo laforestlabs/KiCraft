@@ -327,6 +327,75 @@ def test_waypoint_spec_crossing_foreign_pad_is_dropped(tmp_path):
     assert segs == []
 
 
+@pytest.mark.parametrize(
+    "pad_face,track_face,drilled,tip_via,allowed",
+    [
+        ("F.Cu", "B.Cu", None, False, True),
+        ("B.Cu", "F.Cu", None, False, True),
+        ("F.Cu", "F.Cu", None, False, False),
+        ("B.Cu", "B.Cu", None, False, False),
+        ("F.Cu", "B.Cu", pcbnew.PAD_ATTRIB_PTH, False, False),
+        ("F.Cu", "B.Cu", pcbnew.PAD_ATTRIB_NPTH, False, False),
+        ("F.Cu", "B.Cu", None, True, False),
+        ("B.Cu", "F.Cu", None, True, False),
+    ],
+)
+def test_waypoint_pad_guards_distinguish_copper_faces_and_drills(
+    tmp_path, pad_face, track_face, drilled, tip_via, allowed,
+):
+    path = str(tmp_path / "faces.kicad_pcb")
+    _board(path, (5, 10), {
+        "1": ("SIGNAL", 6, 10), "2": ("SIGNAL", 14, 10),
+        "BLK": ("GND", 9, 10),
+    })
+    board = pcbnew.LoadBoard(path)
+    pads = {pad.GetNumber(): pad for fp in board.GetFootprints() for pad in fp.Pads()}
+    blocker = pads["BLK"]
+    layer = pcbnew.F_Cu if pad_face == "F.Cu" else pcbnew.B_Cu
+    layers = pcbnew.LSET()
+    layers.AddLayer(layer)
+    blocker.SetLayerSet(layers)
+    if drilled is not None:
+        blocker.SetAttribute(drilled)
+        blocker.SetSize(pcbnew.VECTOR2I(_mm(.8), _mm(.8)))
+        blocker.SetDrillSize(pcbnew.VECTOR2I(_mm(.6), _mm(.6)))
+    net = pads["1"].GetNet()
+    for x, pad_x in ((4, 6), (12, 14)):
+        via = pcbnew.PCB_VIA(board)
+        via.SetPosition(pcbnew.VECTOR2I(_mm(x), _mm(10)))
+        via.SetWidth(_mm(.6))
+        via.SetDrill(_mm(.3))
+        via.SetLayerPair(pcbnew.F_Cu, pcbnew.B_Cu)
+        via.SetNet(net)
+        board.Add(via)
+        track = pcbnew.PCB_TRACK(board)
+        track.SetStart(pcbnew.VECTOR2I(_mm(x), _mm(10)))
+        track.SetEnd(pcbnew.VECTOR2I(_mm(pad_x), _mm(10)))
+        track.SetWidth(_mm(.25))
+        track.SetLayer(pcbnew.F_Cu)
+        track.SetNet(net)
+        board.Add(track)
+    original = {item.m_Uuid.AsString() for item in board.GetTracks()}
+    board.Save(path)
+    result = add_breakout_stubs(path, [BreakoutSpec(
+        ref="track", pad="native-via", start_xy=(4, 10), net="SIGNAL",
+        waypoints=[(9 if tip_via else 12, 10)], layer=track_face,
+        width_mm=.25, via_at_end=tip_via,
+    )])
+    updated = pcbnew.LoadBoard(path)
+    if not allowed:
+        assert result["stubs"] == 0
+        assert {item.m_Uuid.AsString() for item in updated.GetTracks()} == original
+        return
+    assert result["stubs"] == 1
+    from kicraft.autoplacer.routing_board import run_kicad_cli_drc
+
+    drc = run_kicad_cli_drc(path)
+    assert {key: drc[key] for key in ("unconnected", "shorts", "clearance")} == {
+        "unconnected": 0, "shorts": 0, "clearance": 0,
+    }
+
+
 def test_perimeter_tie_direct_when_only_same_net_pads_between(tmp_path):
     # The brief-2 DIP-switch shape: three adjacent commons on one power net,
     # nothing foreign between the farthest pair. A same-net pad is a landing,
@@ -838,12 +907,13 @@ def test_near_xy_disambiguates_same_number_pads(tmp_path):
     assert ys == [pytest.approx(20.0), pytest.approx(20.0)]
 
 
-def _add_copper_rule_area(path, points, *, tracks=False, vias=False):
+def _add_copper_rule_area(path, points, *, tracks=False, vias=False, layer=pcbnew.F_Cu):
     board = pcbnew.LoadBoard(path)
     zone = pcbnew.ZONE(board)
     zone.SetIsRuleArea(True)
     zone.SetDoNotAllowTracks(tracks)
     zone.SetDoNotAllowVias(vias)
+    zone.SetLayer(layer)
     zone.Outline().NewOutline()
     for x, y in points:
         zone.Outline().Append(_mm(x), _mm(y))
@@ -851,32 +921,58 @@ def _add_copper_rule_area(path, points, *, tracks=False, vias=False):
     board.Save(path)
 
 
-def test_waypoint_track_keepout_rejects_spec_atomically(tmp_path):
+@pytest.mark.parametrize(("track_face", "blocked_face", "allowed"), [
+    ("F.Cu", pcbnew.F_Cu, False),
+    ("F.Cu", pcbnew.B_Cu, True),
+    ("B.Cu", pcbnew.F_Cu, True),
+    ("B.Cu", pcbnew.B_Cu, False),
+])
+def test_waypoint_track_keepout_respects_copper_face(
+    tmp_path, track_face, blocked_face, allowed,
+):
     path = str(tmp_path / "track_keepout.kicad_pcb")
     _board(path, (5.0, 10.0), {"B5": ("GND", 8.0, 10.0)})
+    board = pcbnew.LoadBoard(path)
+    pad = next(p for fp in board.GetFootprints() for p in fp.Pads())
+    layer = pcbnew.F_Cu if track_face == "F.Cu" else pcbnew.B_Cu
+    layers = pcbnew.LSET()
+    layers.AddLayer(layer)
+    pad.SetLayerSet(layers)
+    board.Save(path)
     _add_copper_rule_area(
         path,
         [(9.0, 9.0), (11.0, 9.0), (11.0, 11.0), (9.0, 11.0)],
-        tracks=True,
+        tracks=True, layer=blocked_face,
     )
 
     result = add_breakout_stubs(
         path,
-        [BreakoutSpec(ref="J1", pad="B5", waypoints=[(12.0, 10.0)])],
+        [BreakoutSpec(ref="J1", pad="B5", layer=track_face, waypoints=[(12.0, 10.0)])],
     )
+    board = pcbnew.LoadBoard(path)
+    if not allowed:
+        assert result["stubs"] == result["segments"] == result["vias"] == 0
+        assert list(board.GetTracks()) == []
+        return
+    board.BuildConnectivity()
+    pad = next(p for fp in board.GetFootprints() for p in fp.Pads())
+    track, = [item for item in board.GetTracks() if item.Type() == pcbnew.PCB_TRACE_T]
+    assert track.GetLayer() == layer and track.GetNetname() == "GND"
+    assert (pcbnew.ToMM(track.GetEnd().x), pcbnew.ToMM(track.GetEnd().y)) == (12.0, 10.0)
+    assert track.m_Uuid.AsString() in {
+        item.m_Uuid.AsString() for item in board.GetConnectivity().GetConnectedTracks(pad)
+    }
 
-    assert result["stubs"] == result["segments"] == result["vias"] == 0
-    assert result["skipped"] == ["J1.B5:track_keepout"]
-    assert list(pcbnew.LoadBoard(path).GetTracks()) == []
 
-
-def test_end_via_keepout_rejects_track_and_via_atomically(tmp_path):
+@pytest.mark.parametrize("blocked_face", [pcbnew.F_Cu, pcbnew.B_Cu])
+def test_end_via_keepout_rejects_track_and_via_atomically(tmp_path, blocked_face):
     path = str(tmp_path / "via_keepout.kicad_pcb")
     _board(path, (5.0, 10.0), {"B5": ("GND", 8.0, 10.0)})
     _add_copper_rule_area(
         path,
         [(11.5, 9.5), (12.5, 9.5), (12.5, 10.5), (11.5, 10.5)],
         vias=True,
+        layer=blocked_face,
     )
 
     result = add_breakout_stubs(
@@ -892,5 +988,4 @@ def test_end_via_keepout_rejects_track_and_via_atomically(tmp_path):
     )
 
     assert result["stubs"] == result["segments"] == result["vias"] == 0
-    assert result["skipped"] == ["J1.B5:via_keepout"]
     assert list(pcbnew.LoadBoard(path).GetTracks()) == []

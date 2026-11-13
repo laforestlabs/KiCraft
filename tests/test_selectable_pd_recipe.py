@@ -94,7 +94,7 @@ def test_selectable_recipe_requires_both_external_cc_connections():
 
 def test_fixed_recipe_cannot_claim_selectable_or_twelve_volt_operation():
     selection = RecipeSelection(
-        recipe="ch224k-pd-trigger@1",
+        recipe="ch224k-pd-trigger@2",
         instance="fixed",
         sheets={"power": "PD"},
         port_bindings={"vbus": "VBUS", "gnd": "GND"},

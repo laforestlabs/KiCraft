@@ -24,8 +24,9 @@ design = [
     "easyeda2kicad>=1.0",
     # Robust 2D geometry for non-rectangular board outlines: boolean union of
     # shape-program primitives (e.g. a snowman = union of circles), polygon
-    # offset, and point/rect-in-polygon containment. See kicraft/shapes/.
-    "shapely>=2.0",
+    # offset, containment, and constrained triangulation of local ground witnesses.
+    # See kicraft/shapes/ and kicraft/autoplacer/hardware/ground_reservations.py.
+    "shapely>=2.1",
 ]
 tuning = [
     "cma>=4.0",

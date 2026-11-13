@@ -47,7 +47,9 @@ from .wave_e_usb_bridge import WAVE_E_USB_BRIDGE_RECIPES, expand_cp2102n_usb_uar
 from .wave_f_sensing import WAVE_F_SENSING_RECIPES, expand_ah49entr_g1_analog_hall
 from .actuator_interfaces import WAVE_F_ACTUATOR_RECIPES
 from .data_logging_storage import DATA_LOGGING_STORAGE_RECIPES
+from .audio import PAM8302A_PWM_SPEAKER
 from .dual_source_battery_power import WAVE_G_DUAL_SOURCE_POWER_RECIPES, expand_dual_source_battery_power
+from .power_entry import TPS26631_PD_INRUSH_POWER_PATH
 
 
 
@@ -69,6 +71,7 @@ for definition in WAVE_B_POWER_RECIPES:
         definition,
         _POWER_EXPANDERS.get(definition.recipe),
     )
+register_recipe(TPS26631_PD_INRUSH_POWER_PATH)
 for definition in WAVE_C_INTERFACE_RECIPES:
     register_recipe(
         definition,
@@ -93,6 +96,7 @@ for definition in WAVE_F_ACTUATOR_RECIPES:
     register_recipe(definition)
 for definition in DATA_LOGGING_STORAGE_RECIPES:
     register_recipe(definition)
+register_recipe(PAM8302A_PWM_SPEAKER)
 for definition in WAVE_G_DUAL_SOURCE_POWER_RECIPES:
     register_recipe(definition, expand_dual_source_battery_power)
 

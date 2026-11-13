@@ -14,6 +14,7 @@ import os
 import random
 import time
 from contextlib import contextmanager
+from typing import NamedTuple
 
 try:
     import numpy as np
@@ -179,13 +180,127 @@ def _set_block_rotation(comp: Component, rotation: float) -> None:
     geom = (comp.block_rotation_geometry or {}).get(rot)
     if geom is None:
         raise ValueError(f"missing_block_rotation_geometry:{comp.ref}@{rot:g}")
+    rotate_component_in_place(comp, rot - comp.rotation)
     comp.rotation = rot
     comp.width_mm = geom.width_mm
     comp.height_mm = geom.height_mm
 
 
+class _LocalPlacementPose(NamedTuple):
+    """Retain world geometry, not a deep Component copy, for each grid pose."""
+
+    prototype: Component
+    pos: Point
+    body_center: Point | None
+    pad_positions: tuple[Point, ...]
+    bounds: tuple[float, float, float, float]
+
+    @classmethod
+    def capture(cls, prototype: Component, candidate: Component, gap: float):
+        tl, br = _effective_bbox(candidate, gap / 2)
+        # Translation replaces these Points rather than mutating them.
+        return cls(prototype, candidate.pos, candidate.body_center,
+                   tuple(p.pos for p in candidate.pads), (tl.x, tl.y, br.x, br.y))
+
+    @property
+    def rotation(self):
+        return self.prototype.rotation
+
+    @property
+    def width_mm(self):
+        return self.prototype.width_mm
+
+    @property
+    def height_mm(self):
+        return self.prototype.height_mm
+
+    def materialize(self) -> Component:
+        component = copy.deepcopy(self.prototype)
+        component.pos = Point(self.pos.x, self.pos.y)
+        component.body_center = (None if self.body_center is None else
+                                 Point(self.body_center.x, self.body_center.y))
+        for pad, position in zip(component.pads, self.pad_positions, strict=True):
+            pad.pos = Point(position.x, position.y)
+        return component
+
+
+def _ordered_local_groups(groups: dict[str, list[dict]], preferred=None):
+    """Reserve an anchor before groups whose owner it positions."""
+    priority = list(groups) if preferred is None else list(preferred)
+    rank = {ref: index for index, ref in enumerate(priority)}
+    successors = {ref: set() for ref in groups}
+    incoming = dict.fromkeys(groups, 0)
+    for owner_ref, specs in groups.items():
+        for spec in specs:
+            member_ref = spec["bypass_ref"]
+            if member_ref in groups and member_ref not in successors[owner_ref]:
+                successors[owner_ref].add(member_ref)
+                incoming[member_ref] += 1
+    ready = [ref for ref in priority if incoming[ref] == 0]
+    result = []
+    while ready:
+        ref = min(ready, key=rank.__getitem__)
+        ready.remove(ref)
+        result.append((ref, groups[ref]))
+        for child in successors[ref]:
+            incoming[child] -= 1
+            if incoming[child] == 0:
+                ready.append(child)
+    if len(result) != len(groups):
+        raise ValueError("cyclic local placement ownership")
+    return result
+
+
+def _local_ownership_families(specs):
+    """Nested owners and all their members share one hard-clearance family."""
+    parents = {}
+
+    def root(ref):
+        while parents[ref] != ref:
+            parents[ref] = parents[parents[ref]]
+            ref = parents[ref]
+        return ref
+
+    for spec in specs:
+        owner, member = spec["owner_ref"], spec["bypass_ref"]
+        parents.setdefault(owner, owner)
+        parents.setdefault(member, member)
+        parents[root(member)] = root(owner)
+    return {ref: root(ref) for ref in parents}
+
+
 class LocalBypassPlacementError(ValueError):
     """The current geometry cannot reserve the required owned capacitor group."""
+
+
+def local_contract_violations(state: BoardState, specs: list[dict]) -> list[str]:
+    """Check native-extracted pad-centre placement contracts without moving them."""
+    violations = []
+    for spec in specs:
+        owner_ref, member_ref = spec["owner_ref"], spec["bypass_ref"]
+        owner, member = state.components.get(owner_ref), state.components.get(member_ref)
+        if owner is None or member is None:
+            violations.append(f"local contract {owner_ref}/{member_ref}: missing footprint")
+            continue
+        owner_pads = {p.pad_id: p for p in owner.pads}
+        member_pads = {p.pad_id: p for p in member.pads}
+        pairs = spec.get("pin_pairs") or [spec["power_pins"], spec["ground_pins"]]
+        limit = float(spec["max_distance_mm"])
+        for owner_ids, member_id in pairs:
+            owner_ids = [owner_ids] if isinstance(owner_ids, str) else owner_ids
+            if member_id not in member_pads or not owner_ids or any(p not in owner_pads for p in owner_ids):
+                violations.append(f"local contract {owner_ref}/{member_ref}: missing pad")
+                continue
+            target = member_pads[member_id]
+            anchors = [owner_pads[p] for p in owner_ids]
+            if not target.net or any(p.net != target.net for p in anchors):
+                violations.append(f"local contract {owner_ref}/{member_ref}: net mismatch")
+                continue
+            distance = min(p.pos.dist(target.pos) for p in anchors)
+            if distance > limit + 1e-6:
+                violations.append(f"local contract {owner_ref}/{member_ref}: pad distance "
+                                  f"{distance:.3f} mm exceeds {limit:.3f} mm")
+    return violations
 
 
 class PlacementSolver:
@@ -201,11 +316,8 @@ class PlacementSolver:
         # Effective config is solver-local: inferred antenna defaults never
         # mutate the caller's project config.
         self.cfg = copy.deepcopy(config or {})
-        self._local_bypass_group_by_ref = {
-            ref: spec["owner_ref"]
-            for spec in self.cfg.get("local_bypasses", [])
-            for ref in (spec["owner_ref"], spec["bypass_ref"])
-        }
+        self._local_bypass_group_by_ref = _local_ownership_families(
+            self.cfg.get("local_bypasses", []))
         self._antenna_intents_by_ref = {
             intent.owner_ref: intent for intent in state.antenna_edge_intents
         }
@@ -332,8 +444,8 @@ class PlacementSolver:
             ic_groups = self.cfg.get("ic_groups", {})
             if ic_groups:
                 # Add extra weight to connections within IC groups
-                for ic_ref, supporting in ic_groups.items():
-                    for sup_ref in supporting:
+                for ic_ref in sorted(ic_groups):
+                    for sup_ref in sorted(ic_groups[ic_ref]):
                         if sup_ref in comps and ic_ref in comps:
                             conn_graph.add_edge(sup_ref, ic_ref, 2.0)  # Strong bond
                 clusters = find_communities(conn_graph, seed=self.seed)
@@ -349,7 +461,7 @@ class PlacementSolver:
             # similar dimensions should be placed adjacent to conserve space.
             # Detects siblings by kind+value or kind+similar area.
             sibling_pairs = []
-            comp_list = list(comps.values())
+            comp_list = [comps[ref] for ref in sorted(comps)]
             for i, a in enumerate(comp_list):
                 for b in comp_list[i + 1 :]:
                     if a.locked or b.locked:
@@ -921,7 +1033,16 @@ class PlacementSolver:
         legality/courtyard gaps, edge margin and keepouts.
         """
         groups: dict[str, list[dict]] = {}
-        for spec in self.cfg.get("local_bypasses", []):
+        for raw_spec in self.cfg.get("local_bypasses", []):
+            spec = raw_spec
+            if "pin_pairs" in raw_spec:
+                pairs = raw_spec["pin_pairs"]
+                if not 1 <= len(pairs) <= 2:
+                    raise ValueError("local pin contract requires one or two pin pairs")
+                # Reuse the joint placement engine without describing a
+                # floating node or an inductor as a ground bypass.
+                spec = dict(raw_spec, power_pins=pairs[0],
+                            ground_pins=pairs[-1])
             owner_ref, cap_ref = spec["owner_ref"], spec["bypass_ref"]
             if owner_ref not in comps and cap_ref not in comps:
                 continue
@@ -932,7 +1053,7 @@ class PlacementSolver:
                   float(self.cfg.get("courtyard_overlap_min_gap_mm", 0.15)))
 
 
-        for owner_ref, specs in groups.items():
+        for owner_ref, specs in _ordered_local_groups(groups):
             owner = comps[owner_ref]
             owner_pads = {p.pad_id: p for p in owner.pads}
             cap_refs = {s["bypass_ref"] for s in specs}
@@ -942,17 +1063,30 @@ class PlacementSolver:
                 return (not reserve or ref == owner_ref or ref in cap_refs
                         or self._locality_fixed(ref, component))
 
-            def overlaps(a, b):
+            # Components in comps do not move during a group search: selected
+            # poses are installed only after assignment, at the end of the
+            # group. Rebuild this cache for the next group (including nested
+            # ownership, where a previous group's cap may now be the owner).
+            obstacle_bounds = {}
+
+            def overlaps(a, b, candidate_bounds):
                 if _blocker_pair_compatible(a, b) and _back_courtyard(a) != _back_courtyard(b):
                     return False
                 # Ordinary locked obstacles must also survive the solver's
                 # broader separation heuristic; the owned group is already
                 # checked against its actual legality/courtyard gap.
+                family = self._local_bypass_group_by_ref.get(a.ref)
+                same_family = (family is not None
+                               and family == self._local_bypass_group_by_ref.get(b.ref))
                 pair_gap = (max(gap, self.clearance)
-                            if reserve and b.ref != owner_ref and b.ref not in cap_refs
-                            else gap)
-                at, ab = _effective_bbox(a, pair_gap / 2)
-                bt, bb = _effective_bbox(b, pair_gap / 2)
+                            if reserve and not same_family else gap)
+                if pair_gap not in candidate_bounds:
+                    candidate_bounds[pair_gap] = _effective_bbox(a, pair_gap / 2)
+                at, ab = candidate_bounds[pair_gap]
+                key = (id(b), pair_gap)
+                if key not in obstacle_bounds:
+                    obstacle_bounds[key] = _effective_bbox(b, pair_gap / 2)
+                bt, bb = obstacle_bounds[key]
                 ox, oy = _bbox_overlap_xy(at, ab, bt, bb)
                 return ox > 0 and oy > 0
             # Most calls are post-legalization rechecks of an already placed
@@ -979,7 +1113,8 @@ class PlacementSolver:
                 if (tl.x < bt.x + self.edge_margin or tl.y < bt.y + self.edge_margin
                         or br.x > bb.x - self.edge_margin or br.y > bb.y - self.edge_margin):
                     return False
-                if any(overlaps(cap, other) for ref, other in comps.items()
+                candidate_bounds = {}
+                if any(overlaps(cap, other, candidate_bounds) for ref, other in comps.items()
                        if ref != cap.ref and obstacle(ref, other)):
                     return False
                 for keepout in getattr(self.state, "keepout_rects", None) or []:
@@ -1030,7 +1165,8 @@ class PlacementSolver:
                     if (tl.x < board_tl.x + margin or tl.y < board_tl.y + margin
                             or br.x > board_br.x - margin or br.y > board_br.y - margin):
                         return False
-                    if any(overlaps(candidate, other) for ref, other in comps.items()
+                    candidate_bounds = {}
+                    if any(overlaps(candidate, other, candidate_bounds) for ref, other in comps.items()
                            if ref not in cap_refs and obstacle(ref, other)):
                         return False
                     for keepout in getattr(self.state, "keepout_rects", None) or []:
@@ -1049,34 +1185,42 @@ class PlacementSolver:
                     return True
 
                 candidates = []
-                if max(distances(cap)) <= limit and legal(cap):
-                    candidates.append(((max(distances(cap)), sum(distances(cap)), 0), copy.deepcopy(cap)))
+                initial_distances = distances(cap)
+                if max(initial_distances) <= limit and legal(cap):
+                    prototype = copy.deepcopy(cap)
+                    candidates.append(((max(initial_distances), sum(initial_distances), 0),
+                                       _LocalPlacementPose.capture(prototype, prototype, gap)))
                 fixed = self._locality_fixed(cap_ref, cap)
                 if not fixed:
                     anchor = owner_pads[power_owner].pos
-                    steps = math.ceil(limit / 0.1)
+                    # Wider bank envelopes use a coarser search grid; the
+                    # pad-distance and courtyard checks remain exact.
+                    pitch = 0.5 if limit > 5.0 else 0.1
+                    steps = math.ceil(limit / pitch)
                     for delta in (0, 90, 180, 270):
-                        candidate = copy.deepcopy(cap)
-                        rotate_component_in_place(candidate, delta)
-                        if candidate.allowed_rotations and not any(
-                            abs((candidate.rotation - angle + 180) % 360 - 180) < 1e-6
-                            for angle in candidate.allowed_rotations
+                        prototype = copy.deepcopy(cap)
+                        rotate_component_in_place(prototype, delta)
+                        if prototype.allowed_rotations and not any(
+                            abs((prototype.rotation - angle + 180) % 360 - 180) < 1e-6
+                            for angle in prototype.allowed_rotations
                         ):
                             continue
+                        candidate = copy.deepcopy(prototype)
                         cp = next(p for p in candidate.pads if p.pad_id == power_cap)
                         offset = Point(cp.pos.x - candidate.pos.x, cp.pos.y - candidate.pos.y)
                         for ix in range(-steps, steps + 1):
                             for iy in range(-steps, steps + 1):
-                                if math.hypot(ix * 0.1, iy * 0.1) > limit:
+                                if math.hypot(ix * pitch, iy * pitch) > limit:
                                     continue
                                 old = Point(candidate.pos.x, candidate.pos.y)
-                                candidate.pos = Point(anchor.x + ix * 0.1 - offset.x,
-                                                      anchor.y + iy * 0.1 - offset.y)
+                                candidate.pos = Point(anchor.x + ix * pitch - offset.x,
+                                                      anchor.y + iy * pitch - offset.y)
                                 _update_pad_positions(candidate, old, candidate.rotation)
                                 ds = distances(candidate)
                                 if max(ds) <= limit and legal(candidate):
                                     score = (max(ds), sum(ds), cap.pos.dist(candidate.pos))
-                                    candidates.append((score, copy.deepcopy(candidate)))
+                                    candidates.append((score, _LocalPlacementPose.capture(
+                                        prototype, candidate, gap)))
                 if not candidates:
                     ds = distances(cap)
 
@@ -1103,9 +1247,11 @@ class PlacementSolver:
                         }
 
                     ctl, cbr = cap.physical_bbox()
+                    candidate_bounds = {}
                     blockers = [
                         component_evidence(other) for ref, other in comps.items()
-                        if ref not in cap_refs and obstacle(ref, other) and overlaps(cap, other)
+                        if ref not in cap_refs and obstacle(ref, other)
+                        and overlaps(cap, other, candidate_bounds)
                     ]
                     keepout_blockers = []
                     for keepout in getattr(self.state, "keepout_rects", None) or []:
@@ -1142,25 +1288,77 @@ class PlacementSolver:
                 candidates.sort(key=lambda row: row[0])
                 options.append((cap_ref, candidates))
 
-            # Do not greedily take the best slot for the first capacitor: it
-            # can block every legal slot for the second on the same IC.
+            # Propagate courtyard conflicts before descending. Fixed-order
+            # permutation search over large identical capacitor banks can
+            # revisit the same impossible free-space state for hours.
             options.sort(key=lambda row: len(row[1]))
-            chosen: list[tuple[str, Component]] = []
+            chosen: list[tuple[str, _LocalPlacementPose]] = []
+            compatible_masks: dict[tuple[int, int, int], int] = {}
+            failed_states: set[tuple[tuple[int, int], ...]] = set()
+            option_bounds = [[pose.bounds for _, pose in poses] for _, poses in options]
+            posed_components: dict[tuple[int, int], Component] = {}
 
-            def assign(index):
-                if index == len(options):
+            def posed_component(index, candidate_index):
+                key = (index, candidate_index)
+                component = posed_components.get(key)
+                if component is None:
+                    component = options[index][1][candidate_index][1].materialize()
+                    posed_components[key] = component
+                return component
+
+            def compatible_mask(index, candidate_index, other_index):
+                key = (index, candidate_index, other_index)
+                cached = compatible_masks.get(key)
+                if cached is not None:
+                    return cached
+                candidate = options[index][1][candidate_index][1]
+                ax0, ay0, ax1, ay1 = option_bounds[index][candidate_index]
+                mask = 0
+                for n, (_, other) in enumerate(options[other_index][1]):
+                    if (candidate.prototype.block_blocker_set is not None
+                            and other.prototype.block_blocker_set is not None):
+                        a = posed_component(index, candidate_index)
+                        b = posed_component(other_index, n)
+                        if _blocker_pair_compatible(a, b) and _back_courtyard(a) != _back_courtyard(b):
+                            mask |= 1 << n
+                            continue
+                    bx0, by0, bx1, by1 = option_bounds[other_index][n]
+                    if ax0 >= bx1 or ax1 <= bx0 or ay0 >= by1 or ay1 <= by0:
+                        mask |= 1 << n
+                compatible_masks[key] = mask
+                return mask
+
+            def assign(remaining, available):
+                if not remaining:
                     return True
-                ref, candidates = options[index]
-                for _, candidate in candidates:
-                    if any(overlaps(candidate, other) for _, other in chosen):
-                        continue
-                    chosen.append((ref, candidate))
-                    if assign(index + 1):
-                        return True
-                    chosen.pop()
+                key = tuple((index, available[index]) for index in remaining)
+                if key in failed_states:
+                    return False
+                index = min(remaining, key=lambda n: (available[n].bit_count(), n))
+                rest = tuple(n for n in remaining if n != index)
+                candidates = available[index]
+                while candidates:
+                    bit = candidates & -candidates
+                    candidates ^= bit
+                    candidate_index = bit.bit_length() - 1
+                    next_available = list(available)
+                    for other_index in rest:
+                        next_available[other_index] &= compatible_mask(
+                            index, candidate_index, other_index
+                        )
+                        if not next_available[other_index]:
+                            break
+                    else:
+                        ref, poses = options[index]
+                        chosen.append((ref, poses[candidate_index][1]))
+                        if assign(rest, next_available):
+                            return True
+                        chosen.pop()
+                failed_states.add(key)
                 return False
 
-            if not assign(0):
+            available = [(1 << len(candidates)) - 1 for _, candidates in options]
+            if not assign(tuple(range(len(options))), available):
                 # These are the complete independently legal candidate sets,
                 # not a claim that either cap alone can represent the pair.
                 geometry = []
@@ -1186,7 +1384,7 @@ class PlacementSolver:
                     )
                 )
             for ref, component in chosen:
-                comps[ref] = component
+                comps[ref] = component.materialize()
 
     def _locality_fixed(self, ref: str, component: Component) -> bool:
         """Explicit/pinned geometry must never be moved to satisfy locality."""
@@ -1212,18 +1410,20 @@ class PlacementSolver:
             if owner not in comps or cap not in comps:
                 raise ValueError(f"local bypass {owner}/{cap} split across leaves")
             groups.setdefault(owner, []).append(spec)
-        self._local_bypass_group_by_ref = {
-            ref: owner for owner, specs in groups.items()
-            for ref in (owner, *(spec["bypass_ref"] for spec in specs))
-        }
+        self._local_bypass_group_by_ref = _local_ownership_families(
+            spec for specs in groups.values() for spec in specs)
+        single_family = len(set(self._local_bypass_group_by_ref.values())) == 1
+        family_gap = max(self.legality_clearance,
+                         float(self.cfg.get("courtyard_overlap_min_gap_mm", 0.15)))
         board_tl, board_br = self.state.board_outline
         try:
             # Reserve constrained groups before movable ones can occupy the
             # only legal space around an authored/pinned owner or capacitor.
-            ordered = sorted(groups.items(), key=lambda item: not any(
+            preferred = sorted(groups, key=lambda ref: not any(
                 self._locality_fixed(ref, comps[ref])
-                for ref in (item[0], *(spec["bypass_ref"] for spec in item[1]))
+                for ref in (ref, *(spec["bypass_ref"] for spec in groups[ref]))
             ))
+            ordered = _ordered_local_groups(groups, preferred)
             for owner_ref, specs in ordered:
                 self.cfg["local_bypasses"] = specs
                 owner = comps[owner_ref]
@@ -1262,6 +1462,12 @@ class PlacementSolver:
                             xs.append(right)
                         if ys and ys[-1] < bottom - 1e-9:
                             ys.append(bottom)
+                        # A single coupled bank needs space around its anchor;
+                        # independent groups pack edge-first to avoid splitting
+                        # the remaining canvas. Both retain every grid pose.
+                        if single_family:
+                            xs.sort(key=lambda x: abs(x - (left + right) / 2))
+                            ys.sort(key=lambda y: abs(y - (top + bottom) / 2))
                         for y in ys:
                             for x in xs:
                                 yield x - original_pos.x, y - original_pos.y
@@ -1295,7 +1501,6 @@ class PlacementSolver:
                                 or br.x > board_br.x - margin or br.y > board_br.y - margin):
                             failure_reason = "owner_board_margin"
                             continue
-                    owner_tl, owner_br = _effective_bbox(owner, self.clearance / 2)
                     blocked = False
                     for ref, other in comps.items():
                         if ref == owner_ref or not self._locality_fixed(ref, other):
@@ -1305,7 +1510,12 @@ class PlacementSolver:
                         if (_blocker_pair_compatible(owner, other)
                                 and _back_courtyard(owner) != _back_courtyard(other)):
                             continue
-                        ot, ob = _effective_bbox(other, self.clearance / 2)
+                        family = self._local_bypass_group_by_ref.get(owner_ref)
+                        same_family = (family is not None
+                                       and family == self._local_bypass_group_by_ref.get(ref))
+                        pair_gap = family_gap if same_family else self.clearance
+                        owner_tl, owner_br = _effective_bbox(owner, pair_gap / 2)
+                        ot, ob = _effective_bbox(other, pair_gap / 2)
                         ox, oy = _bbox_overlap_xy(owner_tl, owner_br, ot, ob)
                         if ox > 0 and oy > 0:
                             failure_reason = "fixed_component_overlap"
@@ -2313,9 +2523,9 @@ class PlacementSolver:
 
         # Build reverse map: component ref -> group leader
         ref_to_leader = {}
-        for leader, members in ic_groups.items():
+        for leader in sorted(ic_groups):
             ref_to_leader[leader] = leader
-            for m in members:
+            for m in sorted(ic_groups[leader]):
                 ref_to_leader[m] = leader
 
         # Build signal-flow X targets (evenly spaced across board width)
@@ -2328,14 +2538,13 @@ class PlacementSolver:
                 flow_x_targets[leader] = usable_left + frac * (usable_right - usable_left)
 
         # Find locked component positions for attraction
-        locked_positions = {ref: comp.pos for ref, comp in comps.items() if comp.locked}
+        locked_positions = {ref: comps[ref].pos for ref in sorted(comps) if comps[ref].locked}
 
         # Sort clusters by total connectivity (highest first) so the most
         # connected cluster gets placed first, improving net-topology bias.
         clusters = sorted(
-            clusters,
-            key=lambda c: sum(conn_graph.degree(r) for r in c),
-            reverse=True,
+            (tuple(sorted(cluster)) for cluster in clusters),
+            key=lambda cluster: (-sum(conn_graph.degree(ref) for ref in cluster), cluster),
         )
 
         for cluster in clusters:
@@ -2346,7 +2555,7 @@ class PlacementSolver:
             if scatter_mode == "random":
                 # --- Random scatter: uniform random positions within bounds ---
                 # Sort by area descending: large components placed first
-                unlocked.sort(key=lambda r: comps[r].area, reverse=True)
+                unlocked.sort(key=lambda ref: (-comps[ref].area, ref))
                 for ref in unlocked:
                     zone_cfg = zones_cfg.get(ref, {})
                     if "zone" in zone_cfg:
@@ -2425,7 +2634,7 @@ class PlacementSolver:
             n = len(unlocked)
             # Sort by area descending: ICs and large components placed first,
             # then passives fill in around them.
-            unlocked.sort(key=lambda r: comps[r].area, reverse=True)
+            unlocked.sort(key=lambda ref: (-comps[ref].area, ref))
             radius = math.sqrt(n) * 3.0  # spread based on count
 
             # Radius variation: wider for randomize_group_layout mode
@@ -2438,7 +2647,7 @@ class PlacementSolver:
                 # Net-topology bias: if this component has already-placed
                 # connected neighbors, bias position toward their centroid.
                 nbr_cx, nbr_cy, nbr_w = 0.0, 0.0, 0.0
-                for nbr, w in conn_graph.neighbors(ref).items():
+                for nbr, w in sorted(conn_graph.neighbors(ref).items()):
                     if nbr in comps and (comps[nbr].locked or nbr in placed_this_cluster):
                         nbr_cx += comps[nbr].pos.x * w
                         nbr_cy += comps[nbr].pos.y * w
@@ -2520,7 +2729,7 @@ class PlacementSolver:
         """
         tl, br = self.state.board_outline
         for cluster in clusters:
-            unlocked = [r for r in cluster if not comps[r].locked]
+            unlocked = [ref for ref in sorted(cluster) if not comps[ref].locked]
             if len(unlocked) < 2:
                 continue
 
@@ -2594,14 +2803,9 @@ class PlacementSolver:
 
         - IC/connector with pads: rotate pads via KiCad math, score with
           routing signal (crossings, pad accessibility, ratsnest length).
-        - Synthetic leaf block (kind="subcircuit", no pads, populated
-          ``block_rotation_geometry``): swap bbox width/height per
-          rotation, score with placement signal (opposite-side blocker
-          overlap + inverse courtyard overlap). Leaf blocks have no pads
-          to rotate, so the IC/connector path doesn't apply -- but they
-          still benefit from rotation because their footprint AABB
-          changes shape under 90°/270°, opening packing opportunities
-          with neighbours that single-rotation placement misses.
+        - Synthetic leaf block: use its measured per-rotation body geometry
+          and real interface-pad geometry with the same placement objective
+          used by refinement and annealing.
         """
         work_state.components = comps
 
@@ -2642,7 +2846,7 @@ class PlacementSolver:
 
             rotations = comp.allowed_rotations if comp.allowed_rotations else [0, 90, 180, 270]
 
-            # Branch: synthetic leaf block (no pads, but per-rotation geometry)
+            # Synthetic blocks retain their measured per-rotation geometry.
             if is_subcircuit_block:
                 self._optimize_block_rotation(comp, rotations, work_state)
                 continue
@@ -2724,11 +2928,8 @@ class PlacementSolver:
     ) -> None:
         """Choose the best rotation for a synthetic leaf block.
 
-        Leaf blocks have no pads; their geometry under rotation is captured
-        in ``block_rotation_geometry`` (width/height per rotation; the body
-        center is the rotation pivot, so it's invariant). Scoring uses a
-        placement signal (opposite-side blocker overlap + inverse courtyard
-        overlap) because pad-facing routing scores don't apply to blocks.
+        Measured body extents and rigid interface pads move together. The
+        same global objective scores packing, legality and inter-child wiring.
         """
         geo_by_rot = comp.block_rotation_geometry or {}
         if not geo_by_rot:
@@ -2756,7 +2957,7 @@ class PlacementSolver:
 
         # Apply best (revert to original geometry first if no improvement)
         if best_rot == orig_rot:
-            comp.rotation = orig_rot
+            _set_block_rotation(comp, orig_rot)
             comp.width_mm = orig_w
             comp.height_mm = orig_h
         else:
@@ -2802,24 +3003,16 @@ class PlacementSolver:
             # rejected candidate.
             for ref in group:
                 comp = comps[ref]
-                comp.rotation, comp.width_mm, comp.height_mm = saved[ref]
+                rotation, width, height = saved[ref]
+                _set_block_rotation(comp, rotation)
+                comp.width_mm, comp.height_mm = width, height
         else:
             for ref in group:
                 _set_block_rotation(comps[ref], best_rot)
 
     def _score_rotation_for_block(self, work_state: BoardState) -> float:
-        """Placement-signal score for synthetic leaf block rotation choice.
-
-        Combines opposite-side blocker overlap (rewards F.Cu/B.Cu compatible
-        leaves stacking, e.g. front-side regulators on top of a back-side
-        battery footprint) with inverse courtyard overlap (penalises
-        incompatible bbox overlap). Both come from ``PlacementScorer`` so
-        the rotation search uses the same signals as the global scorer.
-        """
-        scorer = PlacementScorer(work_state, self.cfg)
-        opposite = scorer._score_block_opposite_side()
-        inv_overlap = scorer._score_courtyard_overlap()
-        return 0.6 * opposite + 0.4 * inv_overlap
+        """Use the global placement objective, including physical port wiring."""
+        return PlacementScorer(work_state, self.cfg).score().total
 
     def _force_step(
         self, comps: dict[str, Component], conn_graph: AdjacencyGraph, damping: float
@@ -3360,7 +3553,9 @@ class PlacementSolver:
                     if group is not None:
                         for m in move_refs:
                             member = comps[m]
-                            member.rotation, member.width_mm, member.height_mm = saved[m]
+                            rotation, width, height = saved[m]
+                            _set_block_rotation(member, rotation)
+                            member.width_mm, member.height_mm = width, height
                     else:
                         rotate_component_in_place(comp, old_rot - new_rot)
                         comp.width_mm, comp.height_mm = saved[ref][1], saved[ref][2]

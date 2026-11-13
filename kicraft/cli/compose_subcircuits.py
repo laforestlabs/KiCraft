@@ -1442,6 +1442,58 @@ def _ensure_edge_blocks_extremal(
     return shifted
 
 
+def _make_antenna_edges_extremal(
+    solved: dict[str, Component],
+    block_zones: dict[str, Any],
+    antenna_refs: set[str],
+    margin_mm: float,
+) -> None:
+    """Move antenna edge banks beyond other blocks using their edge datums.
+
+    A leaf's bounding box includes the antenna's intentionally outboard
+    keepout/courtyard, so making that box extremal does not make the antenna
+    support line extremal. Keep the entire same-side bank aligned and move
+    it outward enough for other blocks' geometry and its edge clearance.
+    Copper belonging to the bank itself remains subject to outline repair.
+    """
+    from kicraft.autoplacer.brain.geometry import zone_anchor_offset
+
+    for side in ("left", "right", "top", "bottom"):
+        members = []
+        for ref, zone in block_zones.items():
+            comp = solved.get(ref)
+            if comp is None or zone.get("edge") != side:
+                continue
+            offset = zone_anchor_offset(zone, comp.rotation)
+            if offset is None:
+                continue
+            anchor = (comp.pos.x + offset.x if side in ("left", "right")
+                      else comp.pos.y + offset.y)
+            delta = float(zone.get("edge_anchor_delta_mm", 0.0))
+            datum = anchor + delta if side in ("left", "top") else anchor - delta
+            members.append((ref, datum))
+        if not any(ref in antenna_refs for ref, _ in members):
+            continue
+        member_refs = {ref for ref, _ in members}
+        others = [
+            comp.physical_bbox() for ref, comp in solved.items()
+            if ref not in member_refs
+        ]
+        datums = [datum for _, datum in members]
+        low = side in ("left", "top")
+        target = min(datums) if low else max(datums)
+        if others:
+            axis = "x" if side in ("left", "right") else "y"
+            extent = (min(getattr(box[0], axis) for box in others) - margin_mm
+                      if low else
+                      max(getattr(box[1], axis) for box in others) + margin_mm)
+            target = min(target, extent) if low else max(target, extent)
+        for ref, datum in members:
+            delta = target - datum
+            if abs(delta) > 1e-9:
+                _apply_slide(solved[ref], side in ("top", "bottom"), delta)
+
+
 def _directional_edge_candidate(comp: Component) -> bool:
     """True when an edge-pinned connector lacks required mating evidence.
 
@@ -1764,6 +1816,17 @@ def _compose_artifacts(
     interconnect_nets = infer_interconnect_nets_pre_placement(
         parent_subcircuit, loaded_artifacts, synthetic_refs
     )
+    # Bind logical parent nets to their real, rigid child-pad geometry.
+    # Port names can be canonicalized independently of leaf-local net names.
+    for net in interconnect_nets.values():
+        for ref, pad_id in net.pad_refs:
+            matched = False
+            for pad in synthetic_comps[ref].pads:
+                if pad.pad_id == pad_id:
+                    pad.net = net.name
+                    matched = True
+            if not matched:
+                raise ValueError(f"parent interface pad geometry missing: {ref}.{pad_id}")
 
     state_in = BoardState(
         components=synthetic_comps,
@@ -1997,6 +2060,21 @@ def _compose_artifacts(
                 if r in _pre_courtyard_positions
                 and (abs(c.pos.x - _pre_courtyard_positions[r][0]) > 1e-6
                      or abs(c.pos.y - _pre_courtyard_positions[r][1]) > 1e-6)
+            )
+
+        # An antenna leaf's outboard courtyard does not define its support
+        # line. Finish after courtyard separation, which can move blocks.
+        if _ff_scaffold is None:
+            _make_antenna_edges_extremal(
+                solved,
+                block_zones,
+                {
+                    synthetic_refs[index]
+                    for index, spec in derived.child_specs.items()
+                    if any(c.target == "edge" and c.anchor_kind == "antenna"
+                           for c in spec.constraints)
+                },
+                max(0.2, float(cfg.get("connector_edge_pad_clearance_mm", 0.2))),
             )
 
         if _3d_slide_changes or _3d_extremal_changes or _3d_courtyard_resolved:
@@ -2722,7 +2800,7 @@ def _compact_routed_validation(validation: dict[str, Any]) -> dict[str, Any]:
         # Repair/power-first evidence (small summaries) remains bounded.
         "power_first",
         "post_route_repairs",
-        "signal_unconnected_repair",
+        "unconnected_repair",
         "illegal_geometry_repair",
         # FR process returncode: -1 = watchdog-killed JVM.
     ):

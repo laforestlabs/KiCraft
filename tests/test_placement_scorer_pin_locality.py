@@ -134,6 +134,224 @@ def test_owned_bypasses_follow_their_own_ic_on_a_shared_rail():
         assert owner["2"].pos.dist(cap["2"].pos) <= 2.5
 
 
+@pytest.mark.parametrize("recipe", [
+    "hub75-sn74hct245-interface@2",
+    "ws2812-external-strip-header-interface@1",
+])
+def test_hct_bypass_uses_indexed_owner_and_real_ground_return(recipe):
+    from types import SimpleNamespace
+    from kicraft.autoplacer.brain.placement_solver import PlacementSolver
+    from kicraft.design.models import BOM, RecipeSelection
+    from kicraft.design.recipes.registry import expand_recipe, get_recipe
+    from kicraft.design.synthesis.autoplacer import _recipe_local_bypasses
+
+    definition = get_recipe(recipe)
+    selection = RecipeSelection(
+        recipe=recipe, instance="interface", sheets={"interface": "INTERFACE"},
+        port_bindings={port.name: ("GND" if port.name == "gnd" else port.name.upper())
+                       for port in definition.ports},
+    )
+    expansion = expand_recipe(selection)
+    bom = BOM(parts=expansion.parts, connections=expansion.connections,
+              recipe_ownership=[expansion.ownership])
+    arch = SimpleNamespace(recipe_selections=[selection])
+    specs = _recipe_local_bypasses(arch, bom)
+    owners = sorted((p.ref for p in expansion.parts if p.recipe_role == "level_shifter"))
+    caps = sorted((p.ref for p in expansion.parts
+                   if p.recipe_role == ("decoupling" if len(owners) == 2 else "bulk")))
+    assert [(s["owner_ref"], s["bypass_ref"]) for s in specs] == list(zip(owners, caps))
+    for spec in specs:
+        assert spec["pin_pairs"] == [["20", "1"]]
+        assert spec["ground_return"] == {"owner_ref": spec["owner_ref"],
+                                         "owner_pin": "10", "member_pin": "2",
+                                         "net": "GND", "max_via_distance_mm": 3.0}
+        assert (spec["max_distance_mm"], spec["max_route_length_mm"],
+                spec["min_route_width_mm"]) == (3.0, 6.0, 0.2)
+
+    components = []
+    for index, (owner, cap) in enumerate(zip(owners, caps)):
+        x = 20 + 25 * index
+        components.append(_ic(owner, x, 20, [
+            _pad(owner, "20", x + 3.2, 17.075, "VDD_5V"),
+            _pad(owner, "10", x - 3.2, 22.925, "GND"),
+        ]))
+        components.append(_cap(cap, 70 + index * 5, 30, [
+            _pad(cap, "1", 69.225 + index * 5, 30, "VDD_5V"),
+            _pad(cap, "2", 70.775 + index * 5, 30, "GND"),
+        ]))
+    state = _state(components)
+    PlacementSolver(state, {"local_bypasses": specs, "legality_clearance_mm": 0.2}
+                    )._place_local_bypasses(state.components)
+    for owner, cap in zip(owners, caps):
+        op = {p.pad_id: p for p in state.components[owner].pads}
+        cp = {p.pad_id: p for p in state.components[cap].pads}
+        assert op["20"].pos.dist(cp["1"].pos) <= 3.0
+        assert op["10"].pos.dist(cp["2"].pos) > 3.0
+
+    # The recipe manifest cannot assert a return on a different physical net.
+    rows = [row.model_copy(update={"net": "OTHER"})
+            if row.ref == caps[-1] and row.pin == "2" else row
+            for row in expansion.ownership.pins]
+    bad = bom.model_copy(update={"recipe_ownership": [
+        expansion.ownership.model_copy(update={"pins": rows})]})
+    with pytest.raises(ValueError, match="unproven local pin"):
+        _recipe_local_bypasses(arch, bad)
+
+
+@pytest.mark.parametrize("recipe", ["ch224k-pd-trigger@2", "ch224k-pd-selectable@1"])
+def test_ch224k_bypass_fits_outside_exposed_pad_package(recipe):
+    from types import SimpleNamespace
+    from kicraft.design.models import BOM, RecipeSelection
+    from kicraft.design.recipes.registry import expand_recipe, get_recipe
+    from kicraft.design.synthesis.autoplacer import _recipe_local_bypasses
+    from kicraft.autoplacer.brain.placement_solver import PlacementSolver, local_contract_violations
+
+    definition = get_recipe(recipe)
+    selection = RecipeSelection(
+        recipe=recipe, instance="pd", sheets={"power": "POWER"},
+        port_bindings={port.name: ("GND" if port.name == "gnd" else port.name.upper())
+                       for port in definition.ports},
+    )
+    expansion = expand_recipe(selection)
+    bom = BOM(parts=expansion.parts, connections=expansion.connections,
+              recipe_ownership=[expansion.ownership])
+    specs = _recipe_local_bypasses(SimpleNamespace(recipe_selections=[selection]), bom)
+    roles = {part.recipe_role: part.ref for part in expansion.parts}
+    ref, cap_ref = roles["controller"], roles["decoupling"]
+    owner = Component(
+        ref=ref, value="CH224K", pos=Point(20, 20), rotation=0,
+        layer=Layer.FRONT, width_mm=5.55, height_mm=8.05,
+        body_center=Point(20, 20), locked=True,
+        pads=[_pad(ref, "1", 18, 23, "VDD"), _pad(ref, "11", 20, 20, "GND")],
+    )
+    cap = Component(
+        ref=cap_ref, value="1uF", pos=Point(40, 40), rotation=0,
+        layer=Layer.FRONT, width_mm=3.05, height_mm=1.55,
+        body_center=Point(40, 40),
+        pads=[_pad(cap_ref, "1", 39.225, 40, "VDD"),
+              _pad(cap_ref, "2", 40.775, 40, "GND")],
+    )
+    state = _state([owner, cap])
+    solver = PlacementSolver(state, {"local_bypasses": specs, "legality_clearance_mm": 0.2})
+    solver._reserve_local_bypasses(state.components)
+    assert local_contract_violations(state, specs) == []
+    placed = {pad.pad_id: pad for pad in state.components[cap_ref].pads}
+    assert placed["1"].pos.dist(owner.pads[0].pos) <= 3
+    assert placed["2"].pos.dist(owner.pads[1].pos) > 3
+    assert state.components[ref].pos == Point(20, 20)
+
+
+@pytest.mark.parametrize(("recipe", "library", "footprint"), [
+    ("esp32-s3-mini-1u-n4r2-minimal@1", "esp32-s3-mini-1u-n4r2",
+     "BULETM-SMD_ESPRESSIF_ESP32-S3-MINI-1U-N8"),
+    ("esp32-s3-wroom-1-minimal@1", "esp32-s3-wroom-1", "WIRELM-SMD_ESP32-S3-WROOM-1"),
+    ("esp32-s3-wroom-1-n16r8-minimal@1", "esp32-s3-wroom-1-n16r8",
+     "WIRELM-SMD_ESP32-S3-WROOM-1"),
+    ("esp32-wroom-32e-minimal@1", "esp32-wroom-32e-n4", "WIFI-SMD_ESP32-WROOM-32E"),
+    ("esp32-c3-mini-1-minimal@2", "esp32-c3-mini-1-n4", "WIFIM-SMD_ESP32-C3-MINI-1"),
+    ("esp32-c3-mini-1-h4x-minimal@2", "esp32-c3-mini-1-h4x", "WIFIM-SMD_ESP32-C3-MINI-1"),
+])
+def test_module_ground_return_uses_unique_real_pad(recipe, library, footprint):
+    import re
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from kicraft.design.models import BOM, RecipeSelection
+    from kicraft.design.recipes.registry import expand_recipe
+    from kicraft.design.synthesis.autoplacer import _recipe_local_bypasses
+
+    ports = {"vdd": "+3V3", "gnd": "GND"}
+    if recipe != "esp32-wroom-32e-minimal@1":
+        ports.update({"usb_dm": "DM", "usb_dp": "DP"})
+    selection = RecipeSelection(recipe=recipe, instance="core", sheets={"mcu": "MCU"},
+                                port_bindings=ports)
+    expansion = expand_recipe(selection)
+    bom = BOM(parts=expansion.parts, connections=expansion.connections,
+              recipe_ownership=[expansion.ownership])
+    specs = _recipe_local_bypasses(SimpleNamespace(recipe_selections=[selection]), bom)
+    owner = next(p for p in expansion.parts if p.recipe_role == "mcu")
+    assert owner.footprint == f"{library}:{footprint}"
+    text = (Path("kicraft/parts_library") / library / f"{library}.pretty"
+            / f"{footprint}.kicad_mod").read_text()
+    assert len(re.findall(r'\(pad\s+"?1"?\s', text)) == 1
+    assert len(specs) == 2
+    for spec in specs:
+        assert spec["ground_return"] == {"owner_ref": owner.ref, "owner_pin": "1",
+                                         "member_pin": "2", "net": "GND",
+                                         "max_via_distance_mm": 3.0}
+        assert spec["max_distance_mm"] == 3.0
+
+
+def test_wroom_rf_edge_places_both_native_bypasses_with_canonical_ground():
+    from types import SimpleNamespace
+
+    from kicraft.autoplacer.brain.placement_solver import PlacementSolver, local_contract_violations
+    from kicraft.autoplacer.brain.types import AntennaEdgeIntent, KeepoutRect
+    from kicraft.design.models import BOM, RecipeSelection
+    from kicraft.design.recipes.registry import expand_recipe
+    from kicraft.design.synthesis.autoplacer import _recipe_local_bypasses
+
+    selection = RecipeSelection(recipe="esp32-s3-wroom-1-n16r8-minimal@1",
+                                instance="core", sheets={"mcu": "MCU"},
+                                port_bindings={"vdd": "+3V3", "gnd": "GND"})
+    expansion = expand_recipe(selection)
+    bom = BOM(parts=expansion.parts, connections=expansion.connections,
+              recipe_ownership=[expansion.ownership])
+    arch = SimpleNamespace(recipe_selections=[selection])
+    specs = _recipe_local_bypasses(arch, bom)
+    roles = {p.recipe_role: p.ref for p in expansion.parts}
+    owner_ref = roles["mcu"]
+    assert len(specs) == 2
+    for spec in specs:
+        assert spec["owner_ref"] == owner_ref
+        assert spec["pin_pairs"] == [["2", "1"]]
+        assert spec["ground_return"] == {"owner_ref": owner_ref, "owner_pin": "1",
+                                         "member_pin": "2", "net": "GND",
+                                         "max_via_distance_mm": 3.0}
+    # Native WROOM courtyard and pads, with the antenna support line on the top edge.
+    owner = Component(
+        ref=owner_ref, value="ESP32-S3-WROOM-1-N16R8", pos=Point(25, 10),
+        rotation=0, layer=Layer.FRONT, width_mm=19.45, height_mm=26.325,
+        body_center=Point(25, 6.7025), kind="ic",
+        pads=[_pad(owner_ref, "1", 16.25, 1.11, "GND"),
+              _pad(owner_ref, "2", 16.25, 2.38, "+3V3")],
+    )
+    caps = []
+    for index, role in enumerate(("local_decoupling", "bulk_decoupling")):
+        ref = roles[role]
+        x = 50 + 5 * index
+        caps.append(Component(
+            ref=ref, value="0603", pos=Point(x, 40), rotation=0, layer=Layer.FRONT,
+            width_mm=3.05, height_mm=1.55, kind="passive", body_center=Point(x, 40),
+            pads=[_pad(ref, "1", x - 0.775, 40, "+3V3"),
+                  _pad(ref, "2", x + 0.775, 40, "GND")],
+        ))
+    state = _state([owner, *caps])
+    state.antenna_edge_intents = [AntennaEdgeIntent(
+        owner_ref=owner_ref, source="explicit", source_id="rf", local_direction="top",
+        local_anchor_mm=-10, local_anchor_midpoint=Point(0, -10),
+        local_polygon=(Point(-9, -16.4), Point(9, -16.4),
+                       Point(9, -10), Point(-9, -10)), target_edge="top",
+    )]
+    state.keepout_rects = [KeepoutRect(Point(16, -6.4), Point(34, 0), owner_ref)]
+    solver = PlacementSolver(state, {"local_bypasses": specs, "legality_clearance_mm": 0.2})
+    solver._reserve_local_bypasses(state.components)
+    assert local_contract_violations(state, specs) == []
+    assert (owner.pos.x, owner.pos.y, owner.rotation) == (25, 10, 0)
+    for cap in caps:
+        pads = {p.pad_id: p for p in state.components[cap.ref].pads}
+        assert owner.pads[1].pos.dist(pads["1"].pos) <= 3
+        assert state.components[cap.ref].physical_bbox()[0].y >= 0
+
+    # The canonical return is proved against the real ownership, not merely named.
+    rows = [p.model_copy(update={"net": "OTHER"})
+            if p.ref == caps[0].ref and p.pin == "2" else p
+            for p in expansion.ownership.pins]
+    bad = bom.model_copy(update={"recipe_ownership": [
+        expansion.ownership.model_copy(update={"pins": rows})]})
+    with pytest.raises(ValueError, match="unproven local pin"):
+        _recipe_local_bypasses(arch, bad)
+
 
 @pytest.mark.parametrize("recipe", [
     "stm32g030f6p6-minimal@2", "stm32g030k6t6-minimal@3",
@@ -990,7 +1208,7 @@ def test_courtyard_repair_does_not_slide_reserved_or_other_locked_parts():
     assert {ref: (c.pos.x, c.pos.y) for ref, c in state.components.items()} == before
 
 
-def test_c3_rf_edge_two_front_0603_bypasses_refuse_no_joint_legal_slots():
+def test_c3_rf_edge_two_front_0603_bypasses_refuse_counterfactual_pair_contract():
     import json
     from kicraft.autoplacer.brain.placement_solver import PlacementSolver
     from kicraft.autoplacer.brain.types import AntennaEdgeIntent
@@ -1031,3 +1249,158 @@ def test_c3_rf_edge_two_front_0603_bypasses_refuse_no_joint_legal_slots():
     evidence = json.loads(raw)
     assert all(c["count"] > 0 for c in evidence["candidate_geometry"])
     assert evidence["gap_mm"] == 0.2
+
+
+@pytest.mark.parametrize("recipe", ["ap63203-3v3@1", "ap63205-5v@2"])
+def test_ap_power_loop_contract_is_derived_from_owned_pins(recipe, tmp_path):
+    import json
+    from types import SimpleNamespace
+    from kicraft.design.models import BOM, RecipeSelection
+    from kicraft.design.recipes.registry import expand_recipe
+    from kicraft.design.synthesis.autoplacer import _recipe_local_bypasses
+    from kicraft.design.synthesis.kicad_pro import write_kicad_pro
+
+    selection = RecipeSelection(recipe=recipe, instance="buck", sheets={"power": "POWER"},
+                                port_bindings={"input": "VIN", "gnd": "GND", "output": "VOUT"})
+    expansion = expand_recipe(selection)
+    bom = BOM(parts=expansion.parts, connections=expansion.connections,
+              recipe_ownership=[expansion.ownership])
+    specs = _recipe_local_bypasses(SimpleNamespace(recipe_selections=[selection]), bom)
+    roles = {p.recipe_role: p.ref for p in expansion.parts if p.recipe_role in
+             {"converter", "input_hf_cap", "bootstrap_cap", "inductor"}}
+    by_member = {s["bypass_ref"]: s for s in specs}
+    assert by_member[roles["input_hf_cap"]]["power_pins"] == ["3", "1"]
+    assert by_member[roles["bootstrap_cap"]]["pin_pairs"] == [["6", "1"], ["5", "2"]]
+    for role, width in (("input_hf_cap", 0.5), ("bootstrap_cap", 0.17), ("inductor", 0.5)):
+        assert by_member[roles[role]]["max_route_length_mm"] == 6.0
+        assert by_member[roles[role]]["min_route_width_mm"] == width
+    for role, count in (("input_cap", 8),
+                        ("output_cap", 7 if recipe == "ap63205-5v@2" else 4)):
+        bank = [p for p in expansion.parts if p.recipe_role == role]
+        assert len(bank) == count
+        assert all(p.ref in by_member for p in bank)
+        for part in bank:
+            contract = by_member[part.ref]
+            assert contract["max_distance_mm"] <= 10
+            assert contract["max_route_length_mm"] <= 25
+            assert contract["min_route_width_mm"] == 0.5
+            if role == "output_cap":
+                assert contract["owner_ref"] == roles["inductor"]
+                assert contract["pin_pairs"] == [["2", "1"]]
+                assert contract["ground_return"] == {
+                    "owner_ref": roles["converter"], "owner_pin": "4",
+                    "member_pin": "2", "net": "GND", "max_via_distance_mm": 3.0,
+                }
+    switch = by_member[roles["inductor"]]
+    assert switch["pin_pairs"] == [["5", "1"]]
+    assert "ground_pins" not in switch
+    net = switch["current_carrying_net"]
+    assert net != "VIN" and net != "VOUT"
+    arch = SimpleNamespace(power_nets=["VIN", "VOUT"])
+    pro = json.loads(write_kicad_pro(tmp_path, "POWER", arch, {net}).read_text())
+    assert {"netclass": "Power", "pattern": net} in pro["net_settings"]["netclass_patterns"]
+
+
+def test_tps_bypasses_target_actual_fet_pins():
+    from types import SimpleNamespace
+    from kicraft.design.models import BOM, RecipeSelection
+    from kicraft.design.recipes.registry import expand_recipe
+    from kicraft.design.synthesis.autoplacer import _recipe_local_bypasses
+
+    selection = RecipeSelection(recipe="tps26631-pd-inrush-power-path@1", instance="efuse",
+                                sheets={"power": "POWER"},
+                                port_bindings={"input": "VIN", "output": "VOUT", "gnd": "GND"})
+    expansion = expand_recipe(selection)
+    bom = BOM(parts=expansion.parts, connections=expansion.connections,
+              recipe_ownership=[expansion.ownership])
+    specs = _recipe_local_bypasses(SimpleNamespace(recipe_selections=[selection]), bom)
+    roles = {p.recipe_role: p.ref for p in expansion.parts}
+    by_ref = {s["bypass_ref"]: s for s in specs}
+    assert by_ref[roles["input_bypass"]]["power_pins"] == ["2", "1"]
+    assert by_ref[roles["output_bypass"]]["power_pins"] == ["17", "1"]
+
+
+def test_promoted_power_loop_detects_far_coil_pad():
+    from kicraft.autoplacer.brain.placement_solver import local_contract_violations
+
+    owner = _ic("U1", 20, 20, [_pad("U1", "5", 22, 20, "SW")])
+    coil = _cap("L1", 24, 20, [_pad("L1", "1", 23, 20, "SW")])
+    state = _state([owner, coil])
+    spec = {"owner_ref": "U1", "bypass_ref": "L1", "pin_pairs": [["5", "1"]],
+            "max_distance_mm": 3.0, "current_carrying_net": "SW"}
+    assert local_contract_violations(state, [spec]) == []
+    state.components["L1"].pads[0].pos = Point(32, 20)
+    assert any("distance" in e for e in local_contract_violations(state, [spec]))
+
+
+def test_single_pin_coil_contract_moves_far_coil_and_rejects_locked_far_coil():
+    from kicraft.autoplacer.brain.placement_solver import PlacementSolver, LocalBypassPlacementError
+
+    owner = Component(ref="U1", value="buck", pos=Point(20, 20), rotation=0,
+                      layer=Layer.FRONT, width_mm=3, height_mm=2, body_center=Point(20, 20),
+                      pads=[_pad("U1", "5", 21.4, 20, "SW")])
+    coil = Component(ref="L1", value="coil", pos=Point(60, 20), rotation=0,
+                     layer=Layer.FRONT, width_mm=7, height_mm=6.6, body_center=Point(60, 20),
+                     pads=[_pad("L1", "1", 56.8, 20, "SW"),
+                           _pad("L1", "2", 63.2, 20, "OUT")])
+    spec = {"owner_ref": "U1", "bypass_ref": "L1", "pin_pairs": [["5", "1"]],
+            "max_distance_mm": 3}
+    state = _state([owner, coil])
+    solver = PlacementSolver(state, {"local_bypasses": [spec], "legality_clearance_mm": 0.2})
+    solver._place_local_bypasses(state.components)
+    assert owner.pads[0].pos.dist(state.components["L1"].pads[0].pos) <= 3
+    assert owner.pos.dist(state.components["L1"].pos) > 3
+    coil.locked = True
+    state = _state([owner, coil])
+    with pytest.raises(LocalBypassPlacementError):
+        PlacementSolver(state, {"local_bypasses": [spec]})._place_local_bypasses(state.components)
+
+
+def test_promoted_input_bypass_detects_actual_far_ground_pad():
+    from kicraft.autoplacer.brain.placement_solver import local_contract_violations
+
+    owner = _ic("U1", 20, 20, [_pad("U1", "2", 18, 20, "VIN"),
+                                 _pad("U1", "5", 21, 20, "VIN"),
+                                 _pad("U1", "8", 20, 22, "GND")])
+    cap = _cap("C1", 19, 21, [_pad("C1", "1", 18.5, 21, "VIN"),
+                               _pad("C1", "2", 19.5, 21, "GND")])
+    spec = {"owner_ref": "U1", "bypass_ref": "C1", "power_pins": ["2", "1"],
+            "ground_pins": [["8"], "2"], "max_distance_mm": 3}
+    state = _state([owner, cap])
+    assert not local_contract_violations(state, [spec])
+    cap.pads[1].pos = Point(27, 21)
+    assert any("distance" in e for e in local_contract_violations(state, [spec]))
+
+
+
+
+def test_nested_output_bank_preserves_both_fixed_endpoints():
+    from kicraft.autoplacer.brain.placement_solver import PlacementSolver, local_contract_violations
+
+    owner = _ic("U1", 20, 20, [_pad("U1", "5", 21.4, 20, "SW")])
+    owner.width_mm, owner.height_mm = 3, 2
+    owner.locked = True
+    coil = Component(
+        ref="L1", value="4.7uH", pos=Point(5, 5), rotation=0,
+        layer=Layer.FRONT, width_mm=7, height_mm=6.6,
+        body_center=Point(5, 5), allowed_rotations=[0],
+        pads=[_pad("L1", "1", 1.8, 5, "SW"),
+              _pad("L1", "2", 8.2, 5, "VOUT")],
+    )
+    cap = _cap("C1", 30.5, 20, [
+        _pad("C1", "1", 30, 20, "VOUT"), _pad("C1", "2", 31, 20, "GND"),
+    ])
+    cap.locked = True
+    state = _state([owner, coil, cap])
+    state.board_outline = (Point(0, 0), Point(40, 40))
+    specs = [
+        {"owner_ref": "L1", "bypass_ref": "C1", "pin_pairs": [["2", "1"]],
+         "max_distance_mm": 3},
+        {"owner_ref": "U1", "bypass_ref": "L1", "pin_pairs": [["5", "1"]],
+         "max_distance_mm": 3},
+    ]
+    solver = PlacementSolver(state, {"local_bypasses": specs, "legality_clearance_mm": 0.2})
+    solver._reserve_local_bypasses(state.components)
+    assert local_contract_violations(state, specs) == []
+    assert state.components["U1"].pos == Point(20, 20)
+    assert state.components["C1"].pos == Point(30.5, 20)

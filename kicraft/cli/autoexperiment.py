@@ -26,6 +26,7 @@ leaf-first composition and routing pipeline.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -45,6 +46,7 @@ from kicraft.autoplacer.config import (
     DEFAULT_CONFIG,
     discover_project_config,
     enforce_param_constraints,
+    jsonable_config_value,
     load_project_config,
     normalize_bounds,
 )
@@ -367,6 +369,119 @@ def _accepted_leaf_artifacts(project_dir: Path) -> list[dict[str, Any]]:
             )
     return accepted
 
+def _convergence_inputs(project_dir: Path, config_path: str | None) -> str:
+    """Fingerprint source and project inputs, never generated experiment outputs."""
+    digest = hashlib.sha256()
+    source_root = PROJECT_DIR / "kicraft"
+    paths = {
+        path for path in source_root.rglob("*")
+        if path.is_file() and "__pycache__" not in path.parts
+        and path.suffix in {".py", ".json", ".yaml", ".yml", ".kicad_mod", ".kicad_sym"}
+    }
+    project_suffixes = {".kicad_sch", ".kicad_pcb", ".kicad_pro", ".kicad_dru", ".kicad_mod", ".kicad_sym"}
+    for root, dirs, files in os.walk(project_dir):
+        dirs[:] = [name for name in dirs if name != ".experiments"]
+        paths.update(Path(root) / name for name in files if Path(name).suffix in project_suffixes)
+    if config_path:
+        paths.add(Path(config_path))
+    for path in sorted(paths):
+        digest.update(str(path).encode())
+        digest.update(b"\0")
+        try:
+            digest.update(hashlib.sha256(path.read_bytes()).digest())
+        except OSError:
+            return ""
+    return digest.hexdigest()
+
+
+def _convergence_unit(artifact: dict[str, Any], round_index: int) -> tuple[str, ...] | None:
+    """Bind a selected accepted PCB/layout/metadata to their exact snapshots."""
+    directory = Path(artifact["artifact_dir"])
+    token = f"round_{round_index:04d}_"
+    try:
+        validation = artifact["solved_layout"]["validation"]
+        verdict = validation["leaf_acceptance_result"]
+        if verdict.get("accepted") is not True:
+            return None
+        hashes = []
+        for filename in ("leaf_routed.kicad_pcb", "metadata.json", "solved_layout.json"):
+            canonical = (directory / filename).read_bytes()
+            snapshot = (directory / (token + filename)).read_bytes()
+            if canonical != snapshot:
+                return None
+            hashes.append(hashlib.sha256(canonical).hexdigest())
+        return (str(directory), str(round_index), *hashes)
+    except (OSError, KeyError, TypeError, AttributeError):
+        return None
+
+
+def _reusable_leaf_paths(
+    project_dir: Path, units: dict[str, tuple[str, ...]]
+) -> set[str]:
+    """Revalidate in-memory units; incomplete or changed custody never reuses."""
+    from kicraft.autoplacer.brain.pins import read_pins
+
+    pins = read_pins(project_dir / ".experiments")["pinned_leaves"]
+    accepted = {a["instance_path"]: a for a in _accepted_leaf_artifacts(project_dir)}
+    reusable = set()
+    for path, unit in units.items():
+        artifact = accepted.get(path)
+        if artifact is None:
+            continue
+        pin = pins.get(Path(unit[0]).name, {})
+        if pin.get("round") != int(unit[1]):
+            continue
+        if _convergence_unit(artifact, int(unit[1])) == unit:
+            reusable.add(path)
+    return reusable
+
+
+def _remember_solved_units(
+    project_dir: Path, payload: dict[str, Any], units: dict[str, tuple[str, ...]],
+    *, prior_snapshots: set[Path] | None = None,
+) -> None:
+    """Remember only a current subprocess's selected, accepted complete units."""
+    from kicraft.autoplacer.brain.pins import read_pins
+
+    pins = read_pins(project_dir / ".experiments")["pinned_leaves"]
+    accepted = {a["instance_path"]: a for a in _accepted_leaf_artifacts(project_dir)}
+    for result in payload.get("results", []):
+        solved = result.get("solved", {}) if isinstance(result, dict) else {}
+        path = solved.get("instance_path")
+        artifact = accepted.get(path)
+        if artifact is None:
+            continue
+        pin = pins.get(Path(artifact["artifact_dir"]).name, {})
+        index = pin.get("round")
+        if not isinstance(index, int) or not any(
+            isinstance(r, dict) and r.get("round_index") == index
+            for r in solved.get("rounds", [])
+        ):
+            continue
+        directory = Path(artifact["artifact_dir"])
+        # A clock comparison is not a custody proof: filesystem mtimes can
+        # lag time.time_ns() at sub-tick resolution. Require all three
+        # snapshot names to be absent before this subprocess instead.
+        if any(
+            directory / f"round_{index:04d}_{name}" in (prior_snapshots or set())
+            for name in ("leaf_routed.kicad_pcb", "metadata.json", "solved_layout.json")
+        ):
+            continue
+        unit = _convergence_unit(artifact, index)
+        if unit is not None:
+            units[path] = unit
+
+
+def _convergence_selectors(
+    planned: set[str], reused: set[str], rescue: list[str]
+) -> tuple[list[str], bool]:
+    unresolved = planned - reused
+    if not unresolved:
+        return [], bool(planned)
+    selected = unresolved & set(rescue) if rescue else unresolved
+    # An empty --only list means ALL leaves to the child, not none.
+    return sorted(selected or unresolved), False
+
 
 def _unpinned_leaf_selectors(
     rounds_dir: Path, round_num: int, project_dir: Path
@@ -425,7 +540,7 @@ def _board_only_leaf_dirs(project_dir: Path) -> list[Path]:
     return out
 
 
-def _auto_pin_best_leaves(project_dir: Path) -> None:
+def _auto_pin_best_leaves(project_dir: Path, *, allow_incomplete: bool = False) -> None:
     """Pin each leaf to its best ACCEPTANCE-PASSING round of THIS run.
 
     Called after ``--leaves-only`` and before each parent compose in a full
@@ -484,12 +599,20 @@ def _auto_pin_best_leaves(project_dir: Path) -> None:
         if not isinstance(validation, dict):
             return False
         idx = r.get("round_index")
-        snapshot = artifact_dir / f"round_{int(idx):04d}_leaf_routed.kicad_pcb"
+        if not isinstance(idx, int):
+            return False
+        snapshot = artifact_dir / f"round_{idx:04d}_leaf_routed.kicad_pcb"
+        try:
+            layout = _load_json(artifact_dir / f"round_{idx:04d}_solved_layout.json")
+            verdict = layout["validation"].get("leaf_acceptance_result")
+            if not isinstance(verdict, dict):
+                verdict = (r.get("routing") or {}).get("_round_acceptance", {})
+            if verdict.get("accepted") is not True or not snapshot.is_file():
+                return False
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            return False
         graded = dict(validation)
-        if snapshot.is_file():
-            # The stored board_path is the shared canonical file, long since
-            # overwritten -- grade overlap magnitudes on the round's own board.
-            graded["board_path"] = str(snapshot)
+        graded["board_path"] = str(snapshot)
         # anchor_validation={} mirrors the solver's per-round gating; the
         # anchors gate is a winner-level concern.
         return bool(
@@ -582,7 +705,7 @@ def _auto_pin_best_leaves(project_dir: Path) -> None:
     # this should never happen; fail loudly if it does rather than ship a board
     # silently missing a leaf.
     dropped = [d.name for d in _board_only_leaf_dirs(project_dir)]
-    if dropped:
+    if dropped and not allow_incomplete:
         # Historically blamed on "solver serialization"; both real incidents
         # (2026-06-10, KC-V8YWN8 2026-07-02) were leaves whose solve FAILED
         # every round (routing_exception / all-rounds rejection), so nothing
@@ -601,43 +724,65 @@ def _auto_pin_best_leaves(project_dir: Path) -> None:
     print(f"Auto-pin summary: {pinned} pinned, {cleared} cleared, {skipped} skipped")
 
 
-def _pin_best_parent(project_dir: Path, best_dir: Path, best_round) -> None:
-    """Re-pin the BEST round's routed parent over the canonical parent artifact.
+_PARENT_SNAPSHOT_FILES = (
+    "parent_routed.kicad_pcb", "parent_routed.kicad_pro",
+    "parent_routed.kicad_prl", "parent_routed.kicad_dru",
+    "debug.json", "metadata.json", "solved_layout.json",
+)
 
-    Every parent round overwrites the shared canonical
-    ``subcircuits/<parent>/parent_routed.kicad_pcb``, so at run end that file
-    holds the LAST round's board -- even a discarded, gate-rejected one.
-    Downstream promotion resolves the canonical path by recency
-    (``artifact_paths.resolve_parent_board``), so without this re-pin the
-    build ships whatever was written last instead of the round the search
-    selected. Parent-side twin of ``_auto_pin_best_leaves``.
-    """
+
+def _snapshot_best_parent(parent_dir: Path, best_dir: Path, round_num: int, run_id: str) -> bool:
+    """Capture a round's board and contemporaneous diagnostics as one custody unit."""
+    required = ("parent_routed.kicad_pcb", "debug.json", "metadata.json")
+    manifest_path = best_dir / "parent_custody.json"
+    _safe_unlink(manifest_path)
+    if not all((parent_dir / name).is_file() for name in required):
+        return False
+    files = {}
+    for name in _PARENT_SNAPSHOT_FILES:
+        source = parent_dir / name
+        target = best_dir / name
+        if source.is_file():
+            _copy_if_exists(source, target)
+            files[name] = hashlib.sha256(target.read_bytes()).hexdigest()
+        else:
+            _safe_unlink(target)
+    _write_json(manifest_path, {
+        "run_id": run_id, "round_num": round_num,
+        "parent_dir": parent_dir.name, "files": files,
+    })
+    return True
+
+
+def _pin_best_parent(project_dir: Path, best_dir: Path, best_round, run_id: str) -> bool:
+    """Restore only a custody-bound selected board and its own diagnostics."""
     if best_round is None or not best_round.parent_routed:
-        return
-    best_board = best_dir / "parent_routed.kicad_pcb"
-    if not best_board.is_file():
-        return
-    parent_dir = _discover_latest_parent_artifact_dir(project_dir)
-    if parent_dir is None:
-        return
-    canonical = parent_dir / "parent_routed.kicad_pcb"
+        return False
     try:
-        clobbered = (
-            canonical.is_file()
-            and canonical.read_bytes() != best_board.read_bytes()
-        )
-    except OSError:
-        clobbered = True
-    if clobbered:
-        print(
-            f"  [pin-parent] canonical {canonical} held a non-best round's "
-            f"board; restoring best round {best_round.round_num}"
-        )
-    _copy_if_exists(best_board, canonical)
-    for ext in (".kicad_pro", ".kicad_prl"):
-        _copy_if_exists(
-            best_dir / f"parent_routed{ext}", parent_dir / f"parent_routed{ext}"
-        )
+        custody = _load_json(best_dir / "parent_custody.json")
+        files = custody["files"]
+        if (custody["run_id"] != run_id or custody["round_num"] != best_round.round_num
+                or not isinstance(files, dict)
+                or not {"parent_routed.kicad_pcb", "debug.json", "metadata.json"} <= files.keys()
+                or not set(files) <= set(_PARENT_SNAPSHOT_FILES)):
+            return False
+        if any(hashlib.sha256((best_dir / name).read_bytes()).hexdigest() != digest
+               for name, digest in files.items()):
+            return False
+        parent_dir = project_dir / ".experiments" / "subcircuits" / custody["parent_dir"]
+        if parent_dir.parent != project_dir / ".experiments" / "subcircuits" or not parent_dir.is_dir():
+            return False
+        for name in _PARENT_SNAPSHOT_FILES:
+            if name in files:
+                _copy_if_exists(best_dir / name, parent_dir / name)
+            else:
+                _safe_unlink(parent_dir / name)
+        _copy_if_exists(best_dir / "parent_custody.json", parent_dir / "parent_custody.json")
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+    return True
+
+
 
 
 def _all_leaf_artifacts(project_dir: Path) -> list[dict[str, Any]]:
@@ -2306,15 +2451,6 @@ def _mutate_config(
     return mutated
 
 
-def _jsonable_config_value(value: Any) -> Any:
-    if isinstance(value, set):
-        return sorted(value)
-    if isinstance(value, dict):
-        return {key: _jsonable_config_value(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_jsonable_config_value(item) for item in value]
-    return value
-
 
 def _config_overlay_from_defaults(config: Mapping[str, Any]) -> dict[str, Any]:
     overlay: dict[str, Any] = {}
@@ -2597,6 +2733,11 @@ def main(argv: list[str] | None = None) -> int:
     from kicraft.autoplacer.fab_profile import stamp_fab_floors_for_project
 
     stamp_fab_floors_for_project(project_dir, _initial_config)
+    # Units live only in this invocation: prior runs cannot seed the cache.
+    convergence_units: dict[str, tuple[str, ...]] = {}
+    convergence_input = _convergence_inputs(project_dir, resolved_config_path)
+    leaf_config_path: str | None = None
+    leaf_config_digest = ""
 
     effective_search_space = dict(CONFIG_SEARCH_SPACE)
     param_ranges_path = args.param_ranges
@@ -2744,6 +2885,12 @@ def main(argv: list[str] | None = None) -> int:
         # because file mtimes are wall-clock, not monotonic.
         round_wall_started_at = time.time()
 
+        def _fresh_for_this_round(p: Path) -> bool:
+            try:
+                return p.stat().st_mtime >= round_wall_started_at
+            except OSError:
+                return False
+
         round_candidate_config = dict(_best_config)
         current_round_config = resolved_config_path
 
@@ -2824,7 +2971,7 @@ def main(argv: list[str] | None = None) -> int:
         if round_candidate_config != _initial_config:
             round_config_file = round_dir / "round_config.json"
             round_config_overlay = _config_overlay_from_defaults(round_candidate_config)
-            serializable = _jsonable_config_value(round_config_overlay)
+            serializable = jsonable_config_value(round_config_overlay)
             with open(round_config_file, "w", encoding="utf-8") as f:
                 json.dump(serializable, f, indent=2)
                 f.write("\n")
@@ -2899,13 +3046,47 @@ def main(argv: list[str] | None = None) -> int:
                     previous_leaf_timing,
                 )
 
+        # Freeze the leaf solve configuration for this invocation. Parent
+        # search still receives its independently mutated round configuration.
+        # A changed input invalidates every unit and starts a new leaf config.
+        reuse_enabled = not (args.only or args.parents_only)
+        current_input = _convergence_inputs(project_dir, resolved_config_path) if reuse_enabled else ""
+        if reuse_enabled and current_input != convergence_input:
+            convergence_units.clear()
+            convergence_input = current_input
+            leaf_config_path = None
+        if leaf_config_path:
+            try:
+                config_digest = hashlib.sha256(Path(leaf_config_path).read_bytes()).hexdigest()
+            except OSError:
+                config_digest = ""
+            if config_digest != leaf_config_digest:
+                convergence_units.clear()
+                leaf_config_path = None
+        if reuse_enabled and leaf_config_path is None:
+            leaf_config_file = work_dir / "leaf_convergence_config.json"
+            _write_json(leaf_config_file, jsonable_config_value(
+                _config_overlay_from_defaults(round_candidate_config)
+            ))
+            leaf_config_path = str(leaf_config_file)
+            leaf_config_digest = hashlib.sha256(leaf_config_file.read_bytes()).hexdigest()
+        reused = _reusable_leaf_paths(project_dir, convergence_units) if current_input else set()
+        solve_selectors = list(plan.only) or args.only
+        skip_converged_solve = False
+        if reuse_enabled and reused:
+            solve_selectors, skip_converged_solve = _convergence_selectors(
+                planned_leaf_paths, reused, list(plan.only)
+            )
+            print(f"[leaf-convergence] reused {len(reused)} accepted leaf(s); "
+                  f"solving {len(solve_selectors)} unresolved: {', '.join(solve_selectors)}")
+
         solve_cmd = _build_solve_cmd(
             schematic=schematic,
             pcb=pcb,
             rounds=args.leaf_rounds,
             seed=round_seed,
-            config=current_round_config,
-            only=list(plan.only) or args.only,
+            config=leaf_config_path if reuse_enabled else current_round_config,
+            only=solve_selectors,
             workers=effective_workers,
             fast_smoke=args.fast_smoke,
             leaf_order=previous_leaf_order,
@@ -2945,13 +3126,15 @@ def main(argv: list[str] | None = None) -> int:
         solve_rc: int = 0
         solve_stdout: str = ""
         solve_stderr: str = ""
-        if args.parents_only:
+        prior_snapshots: set[Path] = set()
+        if args.parents_only or skip_converged_solve:
             # Skip the leaf solve subprocess entirely. The composer will
             # use whatever leaf state is already on disk (typically a
             # pinned-leaf set from a prior --leaves-only run).
             print(
-                f"[round {round_num}] --parents-only: skipping leaf solve, "
-                f"using existing leaf artifacts on disk"
+                f"[round {round_num}] "
+                f"{'all leaves qualified' if skip_converged_solve else '--parents-only'}: "
+                f"skipping leaf solve, using existing leaf artifacts on disk"
             )
         else:
             solve_env: dict[str, str] | None = None
@@ -2962,6 +3145,12 @@ def main(argv: list[str] | None = None) -> int:
                 solve_env = dict(os.environ)
                 solve_env["KICRAFT_LEAF_SOLVE_MAX_WALL_S"] = (
                     f"{plan.leaf_deadline_s:.0f}"
+                )
+            if reuse_enabled:
+                prior_snapshots = set(
+                    (project_dir / ".experiments" / "subcircuits").glob(
+                        "*/round_*"
+                    )
                 )
             solve_start_ts = _timing_now()
             solve_rc, solve_stdout, solve_stderr = _run_command(
@@ -3013,18 +3202,40 @@ def main(argv: list[str] | None = None) -> int:
                     return solve_verdict.rc_hint
                 break
 
-        # A full hierarchical run composes immediately after each leaf solve.
-        # Pin before that compose so it cannot consume the last invocation's
-        # canonical bytes when an earlier round is the selected leaf. The
-        # explicit --leaves-only/--parents-only workflow already establishes
-        # this boundary; parents-only must retain its existing pins unchanged.
-        if not args.leaves_only and not args.parents_only:
-            _auto_pin_best_leaves(project_dir)
+        if reuse_enabled:
+            try:
+                unchanged_config = (
+                    leaf_config_path is not None
+                    and hashlib.sha256(Path(leaf_config_path).read_bytes()).hexdigest()
+                    == leaf_config_digest
+                )
+            except OSError:
+                unchanged_config = False
+            if (
+                not current_input
+                or _convergence_inputs(project_dir, resolved_config_path) != current_input
+                or not unchanged_config
+            ):
+                print("error: leaf source, project inputs or solve config changed during "
+                      "the cohort; refusing to reuse its artifacts", file=sys.stderr)
+                return _RC_LEAF_FAILURE
+
+        # Pin after each cohort, including --leaves-only: reuse and parent
+        # composition must both consume the selected snapshot, not whichever
+        # board the most recent attempt happened to leave at the shared path.
+        # --parents-only retains its existing pins unchanged.
+        if not args.parents_only and (reuse_enabled or not args.leaves_only):
+            _auto_pin_best_leaves(project_dir, allow_incomplete=reuse_enabled)
             from kicraft.cli._leaf_replication import finalize_leaf_replication
 
             finalize_leaf_replication(project_dir)
 
         solve_payload = _extract_solve_json_payload(solve_stdout)
+        if reuse_enabled and current_input and not skip_converged_solve:
+            _remember_solved_units(
+                project_dir, solve_payload, convergence_units,
+                prior_snapshots=prior_snapshots,
+            )
         leaf_timing_summary = _extract_leaf_timing_summary(solve_payload)
 
         all_leafs = _all_leaf_artifacts(project_dir)
@@ -3091,7 +3302,14 @@ def main(argv: list[str] | None = None) -> int:
                 f"[round {round_num}] --leaves-only: skipping parent compose; "
                 f"pin leaves and rerun with --parents-only to compose"
             )
-        if not args.leaves_only:
+        incomplete_leafs = bool(
+            reuse_enabled and (
+                leaf_accepted < leaf_total or _board_only_leaf_dirs(project_dir)
+            )
+        )
+        if incomplete_leafs:
+            print(f"[round {round_num}] parent deferred: leaf qualification incomplete")
+        if not args.leaves_only and not incomplete_leafs:
             _write_live_status(
                 status_json_path,
                 status_txt_path,
@@ -3205,6 +3423,13 @@ def main(argv: list[str] | None = None) -> int:
             except Exception:
                 pass
             parent_routed = parent_route_rc == 0
+            if parent_routed:
+                parent_dir = _discover_latest_parent_artifact_dir(project_dir)
+                routed_board = parent_dir / "parent_routed.kicad_pcb" if parent_dir else None
+                if routed_board is None or not routed_board.is_file() or not _fresh_for_this_round(routed_board):
+                    parent_route_rc = 1
+                    parent_routed = False
+                    parent_route_stderr += "\nerror: parent compose succeeded without a fresh routed board"
             # Composed ≠ routed: the snapshot proves the leaves packed into a
             # parent board even when the route (and therefore rc) failed.
             parent_composed = _parent_was_composed(parent_output_json)
@@ -3275,11 +3500,7 @@ def main(argv: list[str] | None = None) -> int:
         # round's output. The mtime check is the only correct way to
         # tell "this render came from THIS round" because the file
         # path is the same regardless of which round wrote it.
-        def _fresh_for_this_round(p: Path) -> bool:
-            try:
-                return p.stat().st_mtime >= round_wall_started_at
-            except OSError:
-                return False
+        # The same round-scoped predicate also guards route selection above.
 
         round_previews = _discover_live_preview_paths(project_dir)
         sub_root = project_dir / ".experiments" / "subcircuits"
@@ -3468,32 +3689,17 @@ def main(argv: list[str] | None = None) -> int:
                 _copy_if_exists(preview, frames_dir / f"frame_{round_num:04d}.png")
                 _copy_if_exists(preview, frames_dir / "frame_latest.png")
 
-            # Promote the best round's parent PCB to a stable fab-ready
-            # path. Without this, even the best parent is one experiment
-            # away from being clobbered by the next round. The destination
-            # mirrors the canonical name in the parent artifact dir so
-            # tooling can open it the same way.
+            # Keep the routed board and the diagnostics from this exact round
+            # together; later compositions overwrite all canonical artifacts.
             best_parent_dir = _discover_latest_parent_artifact_dir(project_dir)
-            if best_parent_dir is not None:
-                best_parent_routed = best_parent_dir / "parent_routed.kicad_pcb"
-                if best_parent_routed.exists():
-                    _copy_if_exists(
-                        best_parent_routed, best_dir / "parent_routed.kicad_pcb"
-                    )
-                    # Pick up the .kicad_pro / .kicad_prl siblings if they
-                    # exist so KiCad opens the promoted board cleanly.
-                    for sibling_ext in (".kicad_pro", ".kicad_prl"):
-                        sibling = best_parent_routed.with_suffix(sibling_ext)
-                        if sibling.exists():
-                            _copy_if_exists(
-                                sibling, best_dir / f"parent_routed{sibling_ext}"
-                            )
-                    # Refresh the project-root fab-ready file the user can
-                    # open straight from the project directory.
-                    _copy_if_exists(
-                        best_parent_routed,
-                        project_dir / f"{project_dir.name}_best.kicad_pcb",
-                    )
+            if (round_result.parent_routed and best_parent_dir is not None
+                    and _snapshot_best_parent(best_parent_dir, best_dir, round_num, run_id)):
+                _copy_if_exists(
+                    best_parent_dir / "parent_routed.kicad_pcb",
+                    project_dir / f"{project_dir.name}_best.kicad_pcb",
+                )
+            else:
+                _safe_unlink(best_dir / "parent_custody.json")
 
         _append_jsonl(log_path, asdict(round_result))
         _write_round_detail(
@@ -3557,11 +3763,24 @@ def main(argv: list[str] | None = None) -> int:
         scheduler.observe_duration(
             max(0.0, time.monotonic() - _round_mono_start)
         )
+        if (
+            args.leaves_only and reuse_enabled and current_input
+            and planned_leaf_paths
+            and planned_leaf_paths <= _reusable_leaf_paths(project_dir, convergence_units)
+        ):
+            print("[leaf-convergence] all required leaves qualified; stopping leaf cohorts")
+            break
 
     phase = "done"
     if _check_stop_request(work_dir):
         phase = "done"
         _safe_unlink(work_dir / "stop.now")
+    # A failed round can leave a fresh but rejected router output at the
+    # canonical path. Only the selected successful round may be promoted.
+    parent_selected = False if args.leaves_only else _pin_best_parent(
+        project_dir, best_dir, best_round, run_id
+    )
+
 
     final_payload = {
         "pipeline": "hierarchical_subcircuits",
@@ -3571,6 +3790,7 @@ def main(argv: list[str] | None = None) -> int:
         "best_score": max(scheduler.best_score, 0.0),
         "kept_count": scheduler.kept_count,
         "best_round": asdict(best_round) if best_round else None,
+        "parent_selected": parent_selected,
         "started_at": start_iso,
         "completed_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "run_id": run_id,
@@ -3599,7 +3819,7 @@ def main(argv: list[str] | None = None) -> int:
         current_stage="complete",
         leaf_total=_reported.leaf_total if _reported else 0,
         leaf_accepted=_reported.leaf_accepted if _reported else 0,
-        parent_routed=_reported.parent_routed if _reported else False,
+        parent_routed=parent_selected,
         leaf_worker_count=effective_workers,
         leaf_workers_active=0,
         leaf_workers_queued=0,
@@ -3610,7 +3830,7 @@ def main(argv: list[str] | None = None) -> int:
         if _reported
         else None,
         top_level_status=(
-            "ready" if _reported and _reported.parent_routed else "not_ready"
+            "ready" if parent_selected else "not_ready"
         ),
         composition_status=(
             "complete"
@@ -3644,10 +3864,9 @@ def main(argv: list[str] | None = None) -> int:
                 f"    refreshed {_refreshed} replicated sibling leaf(s) from "
                 f"their pinned representatives"
             )
-    else:
-        # Parent rounds ran: make the canonical parent artifact hold the
-        # SELECTED round's board, not the last-written one.
-        _pin_best_parent(project_dir, best_dir, best_round)
+    elif not parent_selected:
+        print("error: no selected routed parent could be pinned", file=sys.stderr)
+        return 6
 
     print()
     print("=== Hierarchical Autoexperiment Complete ===")

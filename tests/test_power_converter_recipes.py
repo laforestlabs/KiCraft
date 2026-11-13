@@ -190,7 +190,7 @@ def test_tps54331_12v_feedback_math_is_connected_and_exact_nominally():
 def test_enable_control_voltage_limits_are_part_specific():
     # AP6320x documents EN as a high-voltage input; TPS54331 does not.
     assert enable_control_max_voltage("ap63203-3v3@1") == 32.0
-    assert enable_control_max_voltage("ap63205-5v@1") == 32.0
+    assert enable_control_max_voltage("ap63205-5v@2") == 32.0
     assert enable_control_max_voltage("tps54331-adjustable@2") == 6.0
     assert enable_control_max_voltage("tps54331-12v-1a@2") == 6.0
     assert enable_control_max_voltage("lm2577t-adj-12v-boost@1") == 18.0

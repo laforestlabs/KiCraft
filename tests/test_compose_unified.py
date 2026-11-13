@@ -25,6 +25,7 @@ from kicraft.cli.compose_subcircuits import (
     _compose_artifacts,
     _compute_final_outline,
     _ensure_edge_blocks_extremal,
+    _make_antenna_edges_extremal,
     _snap_parent_local,
     _wrap_loose_parent_components_as_leaves,
 )
@@ -777,3 +778,41 @@ def test_same_edge_bank_aligns_connector_datums_not_leaf_boxes(side):
     a = first.pos.y if horizontal else first.pos.x
     b = second.pos.y if horizontal else second.pos.x
     assert b - sign * 0.5 == pytest.approx(a)
+
+
+@pytest.mark.parametrize("side", ["left", "right", "top", "bottom"])
+def test_antenna_support_line_extremal_despite_outboard_leaf_bbox(side):
+    horizontal = side in ("top", "bottom")
+    low = side in ("left", "top")
+    antenna = _block("A", 10, 10, 10, 10)
+    other = _block("B", 30, 30, 2, 2)
+    if horizontal:
+        other.pos.y = 8 if low else 12
+    else:
+        other.pos.x = 8 if low else 12
+    zones = {"A": {"edge": side, "anchor_offsets_by_rotation": {0.0: Point(0, 0)}}}
+    solved = {"A": antenna, "B": other}
+    # The antenna bbox is already outermost; only the support datum is not.
+    _ensure_edge_blocks_extremal(solved, zones)
+    assert (antenna.pos.y if horizontal else antenna.pos.x) == 10
+    _make_antenna_edges_extremal(solved, zones, {"A"}, 0.2)
+    assert (antenna.pos.y if horizontal else antenna.pos.x) == pytest.approx(
+        6.8 if low else 13.2
+    )
+
+
+def test_antenna_edge_bank_moves_and_aligns_connector_datum():
+    antenna = _block("A", 10, 10, 10, 10)
+    connector = _block("J", 30, 11, 4, 4)
+    other = _block("B", 50, 8, 2, 2)
+    zones = {
+        "A": {"edge": "top", "anchor_offsets_by_rotation": {0.0: Point(0, 0)}},
+        "J": {"edge": "top", "anchor_offsets_by_rotation": {0.0: Point(0, 0)},
+              "edge_anchor_delta_mm": 0.5},
+    }
+    _make_antenna_edges_extremal(
+        {"A": antenna, "J": connector, "B": other}, zones, {"A"}, 0.2
+    )
+    assert antenna.pos.y == pytest.approx(6.8)
+    assert connector.pos.y + 0.5 == pytest.approx(6.8)
+    assert other.pos.y == 8

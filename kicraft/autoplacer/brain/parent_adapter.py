@@ -47,6 +47,7 @@ from .types import (
     Component,
     Layer,
     Net,
+    Pad,
     Point,
     SubCircuitDefinition,
 )
@@ -106,6 +107,8 @@ def artifact_to_component(
     block in the parent placer. ``block_blocker_set`` is populated, so
     pairs of blocks are checked for sparse-keepout compatibility before
     the solver decides whether to push them apart.
+    Independent pad copies retain the real port geometry for routing-distance
+    and crossing costs; solver moves never modify the immutable child layout.
 
     The body bbox tracks the artifact's *content* extent (not the leaf
     board outline) so the solver doesn't reserve empty space around each
@@ -158,15 +161,27 @@ def artifact_to_component(
             init_width = rg.width_mm
             init_height = rg.height_mm
 
-    return Component(
+    component = Component(
         ref=ref,
         value=artifact.sheet_name,
         pos=Point(body_center.x, body_center.y),
-        rotation=float(rotation),
+        rotation=0.0,
         layer=Layer.FRONT,
-        width_mm=float(init_width),
-        height_mm=float(init_height),
-        pads=[],
+        width_mm=float(width),
+        height_mm=float(height),
+        pads=[
+            Pad(
+                ref=ref,
+                pad_id=f"{leaf_ref}:{pad.pad_id}",
+                pos=Point(pad.pos.x, pad.pos.y),
+                net=pad.net,
+                layer=pad.layer,
+                size_mm=(Point(pad.size_mm.x, pad.size_mm.y)
+                         if pad.size_mm is not None else None),
+            )
+            for leaf_ref, child in artifact.layout.components.items()
+            for pad in child.pads
+        ],
         kind="subcircuit",
         body_center=Point(body_center.x, body_center.y),
         block_blocker_set=blocker_set,
@@ -174,6 +189,9 @@ def artifact_to_component(
         block_side=side,
         block_rotation_geometry=rotation_geometry,
     )
+    geometry.rotate_component_in_place(component, float(rotation))
+    component.width_mm, component.height_mm = float(init_width), float(init_height)
+    return component
 
 
 def infer_interconnect_nets_pre_placement(
@@ -184,10 +202,9 @@ def infer_interconnect_nets_pre_placement(
     """Infer parent-level nets keyed off synthetic block refs.
 
     Wraps ``infer_interconnect_nets_local`` to translate
-    ``(leaf_ref, pad_id)`` pad refs into ``(synthetic_block_ref, pad_id)``
-    form. The unified solver uses these to compute attractive forces
-    between blocks; routing is handled later by the parent stamp+route
-    pipeline using the original leaf refs.
+    ``(leaf_ref, pad_id)`` into synthetic block refs with leaf-qualified pad
+    identities. The unified solver uses both block connectivity and real pad
+    positions; later stamping and routing still use the original leaf refs.
     """
     layouts_by_path = {a.instance_path: a.layout for a in artifacts}
     raw = infer_interconnect_nets_local(parent_def, layouts_by_path)
@@ -206,7 +223,7 @@ def infer_interconnect_nets_pre_placement(
         seen: set[tuple[str, str]] = set()
         for leaf_ref, pad_id in net.pad_refs:
             block_ref = leaf_to_block.get(leaf_ref, leaf_ref)
-            entry = (block_ref, pad_id)
+            entry = (block_ref, f"{leaf_ref}:{pad_id}") if leaf_ref in leaf_to_block else (leaf_ref, pad_id)
             if entry in seen:
                 continue
             seen.add(entry)

@@ -140,7 +140,8 @@ def _recipe_local_bypasses(architecture: Architecture, bom: BOM) -> list[dict]:
             definition = get_recipe(selection.recipe)
         except (KeyError, ValueError):
             continue
-        rules = [r for r in definition.placement_constraints if r.kind == "owned_bypass"]
+        rules = [r for r in definition.placement_constraints
+                 if r.kind in ("owned_bypass", "owned_pin_local")]
         if not rules:
             continue
         manifests = [m for m in bom.recipe_ownership
@@ -158,34 +159,139 @@ def _recipe_local_bypasses(architecture: Architecture, bom: BOM) -> list[dict]:
         # Re-expand the selected recipe through the producer, not the saved
         # manifest: internal nets are instance-scoped by that same producer.
         canonical = expand_recipe(selection)
-        canonical_roles = {p.recipe_role: p.ref for p in canonical.parts}
+        def ref_key(part):
+            prefix = part.ref.rstrip("0123456789")
+            return prefix, int(part.ref[len(prefix):] or 0)
+
+        canonical_roles = {}
+        for part in canonical.parts:
+            canonical_roles.setdefault(part.recipe_role, []).append(part)
+        for members in canonical_roles.values():
+            members.sort(key=ref_key)
         canonical_pins = {(p.ref, p.pin): p.net for p in canonical.ownership.pins}
         ports = {port.name: port for port in definition.ports}
         declared_nets = set(ports) | set(definition.internal_nets)
-
-        def role_part(role):
+        def role_part(role, index=None):
             groups = [g for g in definition.parts if g.role == role]
-            members = [p for p in parts if p.recipe_role == role]
-            if len(groups) != 1 or groups[0].quantity != 1 or len(members) != 1:
+            members = sorted((p for p in parts if p.recipe_role == role), key=ref_key)
+            canonical_members = canonical_roles.get(role, [])
+            if (len(groups) != 1 or len(members) != groups[0].quantity
+                    or len(canonical_members) != groups[0].quantity):
                 raise ValueError(f"{selection.instance}: ambiguous recipe role {role}")
-            group, part = groups[0], members[0]
+            if index is None:
+                if len(members) != 1:
+                    raise ValueError(f"{selection.instance}: ambiguous recipe role {role}")
+                index = 0
+            if not isinstance(index, int) or not 0 <= index < len(members):
+                raise ValueError(f"{selection.instance}: invalid recipe role index {role}")
+            part = members[index]
+            group = groups[0]
             if (part.value, part.symbol, part.footprint, part.mpn) != (
                     group.value, group.symbol, group.footprint, group.mpn):
                 raise ValueError(f"{selection.instance}: altered recipe role {role}")
             return part
 
+        def canonical_ref(part):
+            members = sorted((p for p in parts if p.recipe_role == part.recipe_role), key=ref_key)
+            return canonical_roles[part.recipe_role][members.index(part)].ref
+
+        def role_index(part):
+            return sorted((p for p in parts if p.recipe_role == part.recipe_role),
+                          key=ref_key).index(part)
+
+        def prove_pin(part, number):
+            net = canonical_pins.get((canonical_ref(part), number))
+            rows = [p for p in manifest.pins if (p.ref, p.pin) == (part.ref, number)]
+            if (len(rows) != 1 or not net or rows[0].owner != "recipe"
+                    or rows[0].owner_id != selection.recipe
+                    or (rows[0].requirement_id not in selection.requirement_ids
+                        if selection.requirement_ids else rows[0].requirement_id is not None)
+                    or rows[0].net != net or actual.get((part.ref, number)) != [net]):
+                raise ValueError(f"{selection.instance}: unproven local pin {part.ref}.{number}")
+            return net
+
         for rule in rules:
-            owner = role_part(str(rule.parameters["anchor_role"]))
-            cap = role_part(str(rule.role))
+            owner = role_part(str(rule.parameters["anchor_role"]), rule.parameters.get("anchor_index"))
+            if rule.kind == "owned_pin_local":
+                member = role_part(str(rule.role), rule.parameters.get("member_index"))
+                pairs = []
+                declared_pairs = [(rule.parameters["owner_pin"], rule.parameters["member_pin"])]
+                if "return_owner_pin" in rule.parameters or "return_member_pin" in rule.parameters:
+                    declared_pairs.append((rule.parameters["return_owner_pin"],
+                                           rule.parameters["return_member_pin"]))
+                for pair in declared_pairs:
+                    owner_pin, member_pin = str(pair[0]), str(pair[1])
+                    owner_rows = [p for p in definition.pins if p.role == owner.recipe_role
+                                  and p.index == role_index(owner) and str(p.pin) == owner_pin]
+                    member_rows = [p for p in definition.pins if p.role == member.recipe_role
+                                   and p.index == role_index(member) and str(p.pin) == member_pin]
+                    if (len(owner_rows) != 1 or len(member_rows) != 1
+                            or owner_rows[0].net != member_rows[0].net):
+                        raise ValueError(f"{selection.instance}: invalid local pin pair")
+                    logical = owner_rows[0].net
+                    if logical not in declared_nets:
+                        raise ValueError(f"{selection.instance}: unknown local net {logical}")
+                    if prove_pin(owner, owner_pin) != prove_pin(member, member_pin):
+                        raise ValueError(f"{selection.instance}: mismatched local pin pair")
+                    pairs.append([owner_pin, member_pin])
+                if not 1 <= len(pairs) <= 2:
+                    raise ValueError(f"{selection.instance}: local contract requires one or two pin pairs")
+                spec = {"owner_ref": owner.ref, "bypass_ref": member.ref,
+                        "pin_pairs": pairs, "max_distance_mm": float(rule.parameters["max_mm"])}
+                plane_keys = ("plane_owner_pin", "plane_member_pin", "plane_net", "max_plane_via_mm")
+                if any(key in rule.parameters for key in (*plane_keys, "plane_owner_role", "plane_owner_index")):
+                    if not all(key in rule.parameters for key in plane_keys):
+                        raise ValueError(f"{selection.instance}: incomplete ground return")
+                    plane_owner = owner
+                    if "plane_owner_role" in rule.parameters or "plane_owner_index" in rule.parameters:
+                        plane_owner = role_part(
+                            str(rule.parameters.get("plane_owner_role", owner.recipe_role)),
+                            rule.parameters.get("plane_owner_index"),
+                        )
+                    owner_pin = str(rule.parameters["plane_owner_pin"])
+                    member_pin = str(rule.parameters["plane_member_pin"])
+                    logical = str(rule.parameters["plane_net"])
+                    owner_rows = [p for p in definition.pins if p.role == plane_owner.recipe_role
+                                  and p.index == role_index(plane_owner) and str(p.pin) == owner_pin]
+                    member_rows = [p for p in definition.pins if p.role == member.recipe_role
+                                   and p.index == role_index(member) and str(p.pin) == member_pin]
+                    if (logical not in declared_nets or len(owner_rows) != 1
+                            or len(member_rows) != 1 or owner_rows[0].net != logical
+                            or member_rows[0].net != logical):
+                        raise ValueError(f"{selection.instance}: invalid ground return pins")
+                    net = prove_pin(plane_owner, owner_pin)
+                    if prove_pin(member, member_pin) != net:
+                        raise ValueError(f"{selection.instance}: mismatched ground return")
+                    distance = float(rule.parameters["max_plane_via_mm"])
+                    if distance <= 0:
+                        raise ValueError(f"{selection.instance}: invalid ground return distance")
+                    spec["ground_return"] = {"owner_ref": plane_owner.ref, "owner_pin": owner_pin,
+                                             "member_pin": member_pin, "net": net,
+                                             "max_via_distance_mm": distance}
+                if "max_route_length_mm" in rule.parameters:
+                    spec["max_route_length_mm"] = float(rule.parameters["max_route_length_mm"])
+                    spec["min_route_width_mm"] = float(rule.parameters.get("min_route_width_mm", 0.5))
+                if rule.parameters.get("current_carrying"):
+                    spec["current_carrying_net"] = actual[(owner.ref, pairs[0][0])][0]
+                result.append(spec)
+                continue
+            cap = role_part(str(rule.role), rule.parameters.get("member_index"))
             power, ground = str(rule.parameters["power_net"]), str(rule.parameters["ground_net"])
 
-            def pin_numbers(role, logical):
-                return [str(p.pin) for p in definition.pins if p.role == role and p.net == logical]
+            def pin_numbers(role, logical, index=None):
+                return [str(p.pin) for p in definition.pins
+                        if p.role == role and p.net == logical
+                        and (index is None or p.index == index)]
 
-            op = pin_numbers(owner.recipe_role, power)
-            og = pin_numbers(owner.recipe_role, ground)
-            cp = pin_numbers(cap.recipe_role, power)
-            cg = pin_numbers(cap.recipe_role, ground)
+            op = pin_numbers(owner.recipe_role, power, role_index(owner))
+            if "anchor_power_pin" in rule.parameters:
+                requested = str(rule.parameters["anchor_power_pin"])
+                if requested not in op:
+                    raise ValueError(f"{selection.instance}: invalid qualified bypass pin")
+                op = [requested]
+            og = pin_numbers(owner.recipe_role, ground, role_index(owner))
+            cp = pin_numbers(cap.recipe_role, power, role_index(cap))
+            cg = pin_numbers(cap.recipe_role, ground, role_index(cap))
             if len(op) != 1 or not og or len(cp) != 1 or len(cg) != 1:
                 raise ValueError(f"{selection.instance}: invalid reviewed bypass pins")
             for ref, numbers, logical in ((owner.ref, op, power), (owner.ref, og, ground),
@@ -198,10 +304,9 @@ def _recipe_local_bypasses(architecture: Architecture, bom: BOM) -> list[dict]:
                         and (port is None or not port.default_tie
                              or not selection.port_bindings.get(port.default_tie))):
                     raise ValueError(f"{selection.instance}: unbound bypass net {logical}")
-                role = owner.recipe_role if ref == owner.ref else cap.recipe_role
-                canonical_ref = canonical_roles.get(role)
+                canonical_part_ref = canonical_ref(owner if ref == owner.ref else cap)
                 for number in numbers:
-                    net = canonical_pins.get((canonical_ref, number))
+                    net = canonical_pins.get((canonical_part_ref, number))
                     rows = [p for p in manifest.pins if (p.ref, p.pin) == (ref, number)]
                     row = rows[0] if len(rows) == 1 else None
                     if (not net or row is None or row.owner != "recipe"
@@ -210,10 +315,98 @@ def _recipe_local_bypasses(architecture: Architecture, bom: BOM) -> list[dict]:
                                 if selection.requirement_ids else row.requirement_id is not None)
                             or row.net != net or actual.get((ref, number)) != [net]):
                         raise ValueError(f"{selection.instance}: unproven bypass pin {ref}.{number}")
-            result.append({
+            spec = {
                 "owner_ref": owner.ref, "bypass_ref": cap.ref,
                 "power_pins": [op[0], cp[0]], "ground_pins": [og, cg[0]],
                 "max_distance_mm": float(rule.parameters["max_mm"]),
+            }
+            if "max_route_length_mm" in rule.parameters:
+                spec["max_route_length_mm"] = float(rule.parameters["max_route_length_mm"])
+                spec["min_route_width_mm"] = float(rule.parameters.get("min_route_width_mm", 0.5))
+                if "route_anchor_role" in rule.parameters:
+                    route_owner = role_part(str(rule.parameters["route_anchor_role"]))
+                    route_pin = str(rule.parameters["route_anchor_pin"])
+                    if route_pin not in pin_numbers(route_owner.recipe_role, power, role_index(route_owner)):
+                        raise ValueError(f"{selection.instance}: invalid current-path anchor")
+                    route_canonical_ref = canonical_ref(route_owner)
+                    net = canonical_pins.get((route_canonical_ref, route_pin))
+                    rows = [p for p in manifest.pins
+                            if (p.ref, p.pin) == (route_owner.ref, route_pin)]
+                    if (len(rows) != 1 or not net or rows[0].owner != "recipe"
+                            or rows[0].owner_id != selection.recipe
+                            or (rows[0].requirement_id not in selection.requirement_ids
+                                if selection.requirement_ids else rows[0].requirement_id is not None)
+                            or rows[0].net != net or actual.get((route_owner.ref, route_pin)) != [net]
+                            or actual.get((cap.ref, cp[0])) != [net]):
+                        raise ValueError(f"{selection.instance}: unproven current-path anchor")
+                    spec["route_anchor_ref"] = route_owner.ref
+                    spec["route_anchor_pin"] = route_pin
+            result.append(spec)
+    return result
+
+
+def canonical_recipe_thermal_requirements(architecture: Architecture, bom: BOM) -> list[dict]:
+    """Rebuild thermal requirements from selected recipes and proven BOM wiring."""
+    from kicraft.design.recipes.registry import expand_recipe, get_recipe
+
+    actual = {}
+    for connection in bom.connections:
+        for endpoint in connection.endpoints:
+            actual.setdefault((endpoint.ref, endpoint.pin), []).append(connection.net_name)
+    result = []
+    for selection in architecture.recipe_selections:
+        definition = get_recipe(selection.recipe)
+        rules = [rule for rule in definition.placement_constraints
+                 if rule.kind == "thermal_current_path" and "outer_copper_oz" in rule.parameters]
+        if not rules:
+            continue
+        manifests = [m for m in bom.recipe_ownership
+                     if m.recipe == selection.recipe and m.instance == selection.instance]
+        if len(manifests) != 1:
+            raise ValueError(f"{selection.instance}: missing canonical thermal recipe ownership")
+        manifest = manifests[0]
+        if (manifest.port_bindings != selection.port_bindings
+                or set(manifest.requirement_ids) != set(selection.requirement_ids)):
+            raise ValueError(f"{selection.instance}: thermal ownership bindings mismatch")
+        parts = [p for p in bom.parts if p.recipe_id == selection.recipe
+                 and p.recipe_instance == selection.instance and p.resolution_source == "recipe"]
+        if {p.ref for p in parts} != set(manifest.refs):
+            raise ValueError(f"{selection.instance}: thermal component ownership mismatch")
+        canonical = expand_recipe(selection)
+        canonical_roles = {p.recipe_role: p.ref for p in canonical.parts}
+        canonical_pins = {(p.ref, p.pin): p.net for p in canonical.ownership.pins}
+        for rule in rules:
+            groups = [group for group in definition.parts if group.role == rule.role]
+            owners = [p for p in parts if p.recipe_role == rule.role]
+            if len(groups) != 1 or groups[0].quantity != 1 or len(owners) != 1:
+                raise ValueError(f"{selection.instance}: ambiguous thermal owner")
+            owner, group = owners[0], groups[0]
+            if (owner.value, owner.symbol, owner.footprint, owner.mpn) != (
+                    group.value, group.symbol, group.footprint, group.mpn):
+                raise ValueError(f"{selection.instance}: altered thermal recipe role {rule.role}")
+            ground_pins = [str(p.pin) for p in definition.pins
+                           if p.role == rule.role and p.net == "gnd"]
+            if not ground_pins:
+                raise ValueError(f"{selection.instance}: thermal owner has no declared ground pins")
+            for number in ground_pins:
+                net = canonical_pins.get((canonical_roles.get(rule.role), number))
+                rows = [p for p in manifest.pins if (p.ref, p.pin) == (owner.ref, number)]
+                if (len(rows) != 1 or not net or rows[0].owner != "recipe"
+                        or rows[0].owner_id != selection.recipe
+                        or (rows[0].requirement_id not in selection.requirement_ids
+                            if selection.requirement_ids else rows[0].requirement_id is not None)
+                        or rows[0].net != net or actual.get((owner.ref, number)) != [net]):
+                    raise ValueError(f"{selection.instance}: unproven thermal ground pin {owner.ref}.{number}")
+            result.append({
+                "owner_ref": owner.ref,
+                "ground_pins": ground_pins,
+                "outer_copper_oz": float(rule.parameters["outer_copper_oz"]),
+                "ground_layers": (["F.Cu", "B.Cu"]
+                                  if rule.parameters.get("dual_layer_ground") else []),
+                "local_radius_mm": float(rule.parameters["local_radius_mm"]),
+                "minimum_local_ground_area_mm2": float(
+                    rule.parameters["minimum_local_ground_area_mm2"]),
+                "connected_ground_spreading": True,
             })
     return result
 
@@ -289,6 +482,12 @@ def write_autoplacer_json(
                 "max_distance_mm": local.max_distance_mm,
             })
     local_bypasses.extend(_recipe_local_bypasses(architecture, bom))
+    current_nets = {spec["current_carrying_net"] for spec in local_bypasses
+                    if "current_carrying_net" in spec}
+    body["power_nets"] = sorted(set(body["power_nets"]) | current_nets)
+    thermal = canonical_recipe_thermal_requirements(architecture, bom)
+    if thermal:
+        body["thermal_requirements"] = thermal
     if local_bypasses:
         body["local_bypasses"] = local_bypasses
 
