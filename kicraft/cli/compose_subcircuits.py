@@ -55,6 +55,7 @@ from kicraft.autoplacer.brain.parent_adapter import (
     infer_interconnect_nets_pre_placement,
     placements_from_solved_state,
     synthetic_block_ref,
+    usb_affinity_groups,
 )
 from kicraft.layout_editor.model import ManualLayout, load_manual_layout
 from kicraft.autoplacer.brain.placement_solver import (
@@ -2000,6 +2001,15 @@ def _compose_artifacts(
             "clearance_mm": spacing_mm,
             "parent_keep_in_rects": parent_keep_in_specs,
         }
+        affinity = usb_affinity_groups(
+            loaded_artifacts, synthetic_refs, cfg.get("usb_routing_contracts", []),
+        )
+        if affinity:
+            groups = {owner: list(members) for owner, members in
+                      (solver_cfg.get("ic_groups") or {}).items()}
+            for owner, members in affinity.items():
+                groups[owner] = sorted(set(groups.get(owner, [])) | set(members))
+            solver_cfg["ic_groups"] = groups
         solver = PlacementSolver(state_in, config=solver_cfg, seed=seed)
         solved = solver.solve()
         solver_phase_timings = dict(getattr(solver, "last_solve_phase_timings", {}))
@@ -3655,6 +3665,9 @@ def _search_best_layout(
         "total_search_ms": total_search_ms,
         "edge_pins_demoted": edge_pins_demoted,
         "winner_from_demoted_wave": winner_from_demoted_wave,
+        "selection_basis": "pre_route_placement_score_and_stamp_gates",
+        "routed_metrics": None,
+        "routed_metrics_reason": "only the selected placement is routed",
         "candidates": [c.to_dict() for c in candidates],
     }
     winner_state.phase_timings["candidate_search_ms"] = total_search_ms

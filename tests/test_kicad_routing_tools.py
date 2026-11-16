@@ -1,4 +1,5 @@
 import json
+import os
 import signal
 import subprocess
 import sys
@@ -1471,8 +1472,8 @@ def test_ground_connectivity_requires_actual_plane_proof_or_routing(tmp_path, pl
     import subprocess
 
     pcbnew = pytest.importorskip("pcbnew")
-    root = Path("/home/kicraft/KiCadRoutingTools")
-    python = Path("/home/kicraft/krt-venv/bin/python")
+    root = Path(os.environ.get("KICRAFT_KICAD_ROUTING_TOOLS_PATH", "/home/kicraft/KiCadRoutingTools"))
+    python = Path(os.environ.get("KICRAFT_KICAD_ROUTING_TOOLS_PYTHON", "/home/kicraft/krt-venv/bin/python"))
     if not (root / "py_router/kicad_parser.py").is_file() or not python.is_file():
         pytest.skip("pinned KiCadRoutingTools runtime unavailable")
     source, output = tmp_path / "source.kicad_pcb", tmp_path / "output.kicad_pcb"
@@ -1686,3 +1687,384 @@ assert all((400, y, 1) not in c.tracks for y in range(120, 681))
 assert (160, 160, 0) not in c.tracks
 """
     subprocess.run([str(python), "-c", probe, str(root), str(path)], check=True)
+
+
+def _usb_contract():
+    segment = {
+        "id": "port", "positive_net": "USB_DP", "negative_net": "USB_DM",
+        "positive_from": [{"ref": "J1", "pin": "1"}],
+        "positive_to": [{"ref": "U1", "pin": "1"}],
+        "negative_from": [{"ref": "J1", "pin": "2"}],
+        "negative_to": [{"ref": "U1", "pin": "2"}],
+    }
+    return {"id": "usb", "reference_net": "GND", "segments": [segment]}
+
+
+def test_usb_leaf_defers_missing_terminal_and_rejects_wrong_net(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    contract = _usb_contract()
+    pairs = rb._usb_pairs({"usb_routing_contracts": [contract]})
+    pads = [["J1", "1", "USB_DP"], ["J1", "2", "USB_DM"]]
+    monkeypatch.setattr(rb.subprocess, "run", lambda *a, **k: SimpleNamespace(stdout=json.dumps(pads)))
+    runtime = {"python": "python", "root": str(tmp_path)}
+    assert rb._usb_available_pairs(tmp_path / "board", runtime, pairs, "leaf", 1) == ([], ["port"])
+    with pytest.raises(ValueError, match="missing terminals"):
+        rb._usb_available_pairs(tmp_path / "board", runtime, pairs, "parent", 1)
+    pads.append(["U1", "1", "USB_DM"])
+    with pytest.raises(ValueError, match="wrong nets"):
+        rb._usb_available_pairs(tmp_path / "board", runtime, pairs, "leaf", 1)
+
+
+def test_usb_pair_requires_explicit_coupled_result():
+    good = {"p_net": "USB_DP", "n_net": "USB_DM", "outcome": "coupled", "incomplete_members": []}
+    summary = {"pair_reports": [good], "failed": 0, "successful": 1,
+               "polarity_swapped_pairs": [], "target_swaps": [], "single_ended_followup_nets": [],
+               "single_ended_fallback": {"attempted": []}}
+    rb._require_coupled_usb({"json_summaries": [summary]}, "USB_DP", "USB_DM")
+    for change in ({"outcome": "partial"}, {"p_net": "USB_DM"}, {"incomplete_members": ["USB_DP"]}):
+        with pytest.raises(RuntimeError, match="not fully coupled"):
+            rb._require_coupled_usb({"json_summaries": [dict(summary, pair_reports=[dict(good, **change)])]},
+                                    "USB_DP", "USB_DM")
+    with pytest.raises(RuntimeError, match="not fully coupled"):
+        rb._require_coupled_usb({"json_summaries": [dict(summary, single_ended_fallback={"attempted": ["USB_DP"]})]},
+                                "USB_DP", "USB_DM")
+
+def test_usb_bounded_local_requires_explicit_permission_and_consistent_summary():
+    report = {"pair": "USB", "p_net": "USB_DP", "n_net": "USB_DM",
+              "outcome": "bounded_local", "incomplete_members": []}
+    summary = {"pair_reports": [report], "failed": 0, "successful": 1,
+               "bounded_local_pairs": ["USB"], "routed_diff_pairs": [],
+               "polarity_swapped_pairs": [], "target_swaps": [],
+               "single_ended_followup_nets": [], "single_ended_fallback": {"attempted": []}}
+    stats = {"json_summaries": [summary]}
+    with pytest.raises(RuntimeError, match="not fully coupled"):
+        rb._require_coupled_usb(stats, "USB_DP", "USB_DM")
+    rb._require_coupled_usb(stats, "USB_DP", "USB_DM", allow_bounded_local=True)
+    for change in ({"bounded_local_pairs": []}, {"bounded_local_pairs": ["OTHER"]},
+                   {"routed_diff_pairs": ["USB"]}, {"single_ended_followup_nets": ["USB_DP"]}):
+        with pytest.raises(RuntimeError):
+            rb._require_coupled_usb({"json_summaries": [dict(summary, **change)]},
+                                    "USB_DP", "USB_DM", allow_bounded_local=True)
+
+
+
+def test_usb_strict_capability_fails_before_copper_is_read(monkeypatch, tmp_path):
+    runtime = _runtime(tmp_path)
+    monkeypatch.setattr(rb, "preflight_kicad_routing_tools", lambda _: runtime)
+    monkeypatch.setattr(rb.subprocess, "run", lambda *a, **k: SimpleNamespace(
+        returncode=0, stdout="usage: route_diff.py", stderr=""))
+    source, output = tmp_path / "in.kicad_pcb", tmp_path / "out.kicad_pcb"
+    source.write_text("not a board")
+    with pytest.raises(rb.KicadRoutingToolsUnavailableError, match="lacks --require-coupled"):
+        rb._route_krt_pass(str(source), str(output), {}, nets=["USB_DP", "USB_DM"],
+                           track_width=0.2, usb_contract=_usb_contract(), usb_gap=0.2)
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("value,mode", [
+    (1, "engineering_review"), ("true", "engineering_review"), (True, "production"),
+])
+def test_bounded_usb_policy_rejects_implicit_or_manufacturing_opt_in(value, mode, tmp_path):
+    with pytest.raises(ValueError, match="boolean|engineering_review"):
+        rb.route_with_kicad_routing_tools(
+            str(tmp_path / "in.kicad_pcb"), str(tmp_path / "out.kicad_pcb"),
+            {"usb_review_allow_bounded_launches": value, "usb_geometry_mode": mode},
+        )
+
+
+def test_bounded_usb_policy_requires_native_capability(monkeypatch, tmp_path):
+    runtime = _runtime(tmp_path)
+    monkeypatch.setattr(rb, "preflight_kicad_routing_tools", lambda _: runtime)
+    monkeypatch.setattr(rb.subprocess, "run", lambda *a, **k: SimpleNamespace(
+        returncode=0, stdout="--require-coupled", stderr=""))
+    source, output = tmp_path / "in.kicad_pcb", tmp_path / "out.kicad_pcb"
+    source.write_text("not a board")
+    with pytest.raises(rb.KicadRoutingToolsUnavailableError, match="bounded USB"):
+        rb._route_krt_pass(
+            str(source), str(output),
+            {"usb_geometry_mode": "engineering_review", "usb_review_allow_bounded_launches": True},
+            nets=["USB_DP", "USB_DM"], track_width=1.094, usb_contract=_usb_contract(),
+            usb_gap=0.17,
+        )
+    assert not output.exists()
+
+
+def test_usb_review_bounded_policy_preserves_main_geometry(monkeypatch, tmp_path):
+    geometry = {layer: {"width_mm": 1.094, "gap_mm": 0.17, "estimated_ohm": 89.8}
+                for layer in ("F.Cu", "B.Cu")}
+    monkeypatch.setattr(rb, "_usb_stackup", lambda *args, **kwargs: {
+        "layers": [], "planned_geometry": geometry, "contact_join_bounds": [],
+    })
+    profile = rb.calculate_usb_review_geometry(
+        tmp_path / "in.kicad_pcb",
+        {"usb_geometry_mode": "engineering_review", "usb_review_allow_bounded_launches": True},
+        _usb_contract(), ["USB_DP", "USB_DM"], runtime=_runtime(tmp_path),
+        floors={"track_width": 0.17, "clearance": 0.17}, timeout=1,
+    )
+    assert profile["geometry_by_layer"] == geometry
+    assert profile["fabrication_approved"] is False
+    assert profile["launch_policy"] == {
+        "mode": "bounded_uncontrolled", "width_mm": 0.17, "gap_mm": 0.17,
+        "max_length_mm": 2 * (1.094 + 0.17), "provenance": "uncontrolled_launch",
+        "contact_join_bounds": [],
+    }
+
+
+def test_bounded_usb_receipt_rejects_unbounded_copper_and_missing_aliases():
+    segment = _usb_contract()["segments"][0]
+    segment["positive_from"].append({"ref": "J1", "pin": "3"})
+    policy = {"width_mm": 0.17, "max_length_mm": 2.0, "contact_join_bounds": [{
+        "segment_id": segment["id"], "polarity": "positive", "side": "from",
+        "ref": "J1", "pins": ["1", "3"], "max_length_mm": 3.23,
+        "envelope_mm": [-0.34, -1.115, 1.34, 1.115],
+    }]}
+    def span(net, side, length=0.5):
+        return {"kind": "terminal_launch", "net": net, "side": side,
+                "length_mm": length, "provenance": "uncontrolled_launch",
+                "segments": [{"start": [0, 0], "end": [length, 0],
+                              "layer": "F.Cu", "width_mm": 0.17}]}
+    spans = [span(net, side) for net in ("USB_DP", "USB_DM") for side in ("src", "tgt")]
+    receipt = {"mode": "bounded_uncontrolled", "main_geometry": "coupled",
+               "impedance_status": "not_90_ohm_controlled_at_spans", "spans": spans}
+    stats = {"json_summaries": [{"usb_bounded_launch_receipts": [receipt]}]}
+    with pytest.raises(RuntimeError, match="alias"):
+        rb._require_usb_bounded_receipt(stats, segment, policy)
+    join = span("USB_DP", "from")
+    join.update(kind="alias_join", **{"from": {"ref": "J1", "pin": "3"},
+                                      "to": {"ref": "J1", "pin": "1"}})
+    spans.append(join)
+    assert rb._require_usb_bounded_receipt(stats, segment, policy) is receipt
+    # A winding contact-local join may exceed the main-pitch launch limit, but
+    # neither the physical pad envelope nor the independently derived limit.
+    join["segments"] = [
+        {"start": [0, 0], "end": [0, 1], "layer": "F.Cu", "width_mm": 0.17},
+        {"start": [0, 1], "end": [1, 1], "layer": "F.Cu", "width_mm": 0.17},
+        {"start": [1, 1], "end": [1, 0.3], "layer": "F.Cu", "width_mm": 0.17},
+    ]
+    join["length_mm"] = 2.7
+    assert rb._require_usb_bounded_receipt(stats, segment, policy) is receipt
+    join["segments"][1]["end"] = [1.4, 1]
+    join["segments"][2]["start"] = [1.4, 1]
+    join["segments"][2]["end"] = [1.4, 0.3]
+    join["length_mm"] = 3.1
+    with pytest.raises(RuntimeError, match="physical contact bound"):
+        rb._require_usb_bounded_receipt(stats, segment, policy)
+    join["segments"][1]["end"] = [1, 1]
+    join["segments"][2]["start"] = [1, 1]
+    join["segments"][2]["end"] = [1, 0.3]
+    join["length_mm"] = 2.7
+    policy["contact_join_bounds"][0]["pins"] = ["1", "4"]
+    with pytest.raises(RuntimeError, match="matching physical contact"):
+        rb._require_usb_bounded_receipt(stats, segment, policy)
+    policy["contact_join_bounds"][0]["pins"] = ["1", "3"]
+    policy["contact_join_bounds"][0]["max_length_mm"] = 2.6
+    with pytest.raises(RuntimeError, match="physical contact bound"):
+        rb._require_usb_bounded_receipt(stats, segment, policy)
+    policy["contact_join_bounds"][0]["max_length_mm"] = 3.23
+    spans[0] = span("USB_DP", "src", 2.1)
+    with pytest.raises(RuntimeError, match="unbounded"):
+        rb._require_usb_bounded_receipt(stats, segment, policy)
+
+
+def test_usb_main_segment_cannot_be_reported_as_local_uncontrolled():
+    segment = _usb_contract()["segments"][0]
+    segment["id"] = "connector_mcu_series"
+    receipt = {"mode": "bounded_uncontrolled", "main_geometry": "local_uncontrolled",
+               "impedance_status": "not_90_ohm_controlled_at_spans", "spans": []}
+    with pytest.raises(RuntimeError, match="main interconnect"):
+        rb._require_usb_bounded_receipt(
+            {"json_summaries": [{"usb_bounded_launch_receipts": [receipt]}]}, segment,
+            {"width_mm": 0.17, "max_length_mm": 2.5},
+        )
+
+
+@pytest.mark.parametrize("pair_report,followup,fallback", [
+    ({"outcome": "deferred", "incomplete_members": []}, [], []),
+    ({"outcome": "failed", "incomplete_members": ["USB_DP"]}, [], []),
+    ({"outcome": "coupled", "incomplete_members": []}, ["USB_DP"], []),
+    ({"outcome": "coupled", "incomplete_members": []}, [], ["USB_DM"]),
+])
+def test_usb_uncoupled_result_never_reaches_general_router(
+        monkeypatch, tmp_path, pair_report, followup, fallback):
+    source, output = tmp_path / "input.kicad_pcb", tmp_path / "output.kicad_pcb"
+    source.write_text("input")
+    _write_project(source)
+    monkeypatch.setattr(rb, "preflight_kicad_routing_tools", lambda _: _runtime(tmp_path))
+    monkeypatch.setattr(rb, "_width_groups", lambda *args: [(0.2, ["USB_DP", "USB_DM", "SIG"])])
+    monkeypatch.setattr(rb, "_usb_available_pairs", lambda board, runtime, pairs, scope, timeout: (pairs, []))
+    profile = {"stackup": {"layers": []}, "stackup_sha256": "x",
+               "geometry_by_layer": {"F.Cu": {"width_mm": 0.2, "gap_mm": 0.2}}}
+    monkeypatch.setattr(rb, "calculate_usb_review_geometry", lambda *a, **k: profile)
+    calls = []
+    def route(src, dst, config, *, nets, track_width, usb_contract=None, usb_gap=None):
+        calls.append(list(nets))
+        report = {"p_net": "USB_DP", "n_net": "USB_DM", **pair_report}
+        return {"json_summaries": [{"pair_reports": [report], "failed": 0, "successful": 1,
+                 "polarity_swapped_pairs": [], "target_swaps": [],
+                 "single_ended_followup_nets": followup,
+                 "single_ended_fallback": {"attempted": fallback}}]}
+    monkeypatch.setattr(rb, "_route_krt_pass", route)
+    config = {"usb_routing_contracts": [_usb_contract()], "usb_geometry_mode": "engineering_review"}
+    with pytest.raises(RuntimeError, match="not fully coupled"):
+        rb.route_with_kicad_routing_tools(str(source), str(output), config)
+    assert calls == [["USB_DP", "USB_DM"]]
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("deferred", [False, True])
+@pytest.mark.parametrize("review", [False, True])
+def test_usb_pairs_precede_single_ended_and_are_excluded(monkeypatch, tmp_path, deferred, review):
+    import hashlib
+    root = tmp_path / "krt"
+    root.mkdir()
+    source, output = tmp_path / "input.kicad_pcb", tmp_path / "output.kicad_pcb"
+    source.write_text("input")
+    _write_project(source)
+    contract = _usb_contract()
+    monkeypatch.setattr(rb, "preflight_kicad_routing_tools", lambda _: _runtime(root))
+    monkeypatch.setattr(rb, "_width_groups", lambda *args: [(0.2, ["USB_DP", "USB_DM", "SIG"])])
+    monkeypatch.setattr(rb, "_usb_available_pairs", lambda board, runtime, pairs, scope, timeout:
+                        ([], ["port"]) if deferred else (pairs, []))
+    gap = 0.3
+    stackup = {"layers": [{"name": "F.Cu"}], "planned_geometry": {
+        layer: {"width_mm": 0.2, "gap_mm": gap, "estimated_ohm": 90.0}
+        for layer in ("F.Cu", "B.Cu")}}
+    stackup_calls = []
+    def check_stackup(board, runtime, geometry, contract, nets, timeout, *, calculate=False):
+        stackup_calls.append(geometry)
+        return stackup
+    monkeypatch.setattr(rb, "_usb_stackup", check_stackup)
+    floors = rb._project_routing_floors(source.with_suffix(".kicad_pro"), {})
+    approval = {"source": "fabricator approval", "stackup_sha256": hashlib.sha256(
+        json.dumps(stackup["layers"], sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
+        "geometry_by_layer": {layer: {"width_mm": 0.2, "gap_mm": floors["clearance"] + 0.1}
+                              for layer in ("F.Cu", "B.Cu")}}
+    calls = []
+    def route(src, dst, config, *, nets, track_width, usb_contract=None, usb_gap=None):
+        calls.append((list(nets), usb_contract is not None, usb_gap))
+        Path(dst).write_text("routed")
+        rb._propagate_sibling_project_rules(src, dst)
+        reports = [{"p_net": "USB_DP", "n_net": "USB_DM", "outcome": "coupled", "incomplete_members": []}]
+        return {"successful_nets": 1, "failed_nets": 0, "total_vias": 0, "router_time_s": 0,
+                "json_summaries": [{"pair_reports": reports, "failed": 0, "successful": 1,
+                                    "polarity_swapped_pairs": [], "target_swaps": [],
+                                    "single_ended_followup_nets": [],
+                                    "single_ended_fallback": {"attempted": []}}]}
+    monkeypatch.setattr(rb, "_route_krt_pass", route)
+    config = {"usb_routing_contracts": [contract]}
+    if review:
+        config["usb_geometry_mode"] = "engineering_review"
+    else:
+        config["usb_impedance_fabrication_approval"] = approval
+    result = rb.route_with_kicad_routing_tools(str(source), str(output), config)
+    assert calls == ([(['SIG'], False, None)] if deferred else [
+        (['USB_DP', 'USB_DM'], True, gap if review else floors["clearance"] + 0.1), (['SIG'], False, None)])
+    assert result["deferred_usb_segments"] == (["port"] if deferred else [])
+    assert len(result["usb_routing_receipts"]) == (0 if deferred else 1)
+    assert stackup_calls == ([] if deferred else [
+        floors if review else {"track_width": 0.2, "clearance": floors["clearance"] + 0.1}])
+    if not deferred:
+        receipt = result["usb_routing_receipts"][0]
+        assert receipt["geometry_profile"]["provenance"] == (
+            "calculated_unconfirmed" if review else "fabricator_approved")
+        assert receipt["geometry_profile"]["fabrication_approved"] is (not review)
+        assert receipt["fabrication_approval"] == (None if review else approval)
+
+
+def test_usb_missing_fabricator_approval_never_runs_router(monkeypatch, tmp_path):
+    root = tmp_path / "krt"
+    root.mkdir()
+    source, output = tmp_path / "input.kicad_pcb", tmp_path / "output.kicad_pcb"
+    source.write_text("input")
+    _write_project(source)
+    monkeypatch.setattr(rb, "preflight_kicad_routing_tools", lambda _: _runtime(root))
+    monkeypatch.setattr(rb, "_width_groups", lambda *args: [(0.2, ["USB_DP", "USB_DM"])])
+    monkeypatch.setattr(rb, "_usb_available_pairs", lambda board, runtime, pairs, scope, timeout: (pairs, []))
+    monkeypatch.setattr(rb, "_usb_stackup", lambda *args: {"layers": [], "planned_geometry": {}})
+    def unexpected(*args, **kwargs):
+        pytest.fail("router launched without fabricator approval")
+    monkeypatch.setattr(rb, "_route_krt_pass", unexpected)
+    with pytest.raises(ValueError, match="requires fabricator approval"):
+        rb.route_with_kicad_routing_tools(str(source), str(output), {"usb_routing_contracts": [_usb_contract()]})
+    assert not output.exists()
+
+
+def test_usb_review_geometry_requires_explicit_opt_in_and_valid_floors(tmp_path):
+    board = tmp_path / "board.kicad_pcb"
+    contract = _usb_contract()
+    nets = ["USB_DP", "USB_DM"]
+    for config in ({}, {"usb_geometry_mode": "manufacturing"}, {"usb_geometry_mode": True}):
+        with pytest.raises(ValueError, match="explicit engineering_review"):
+            rb.calculate_usb_review_geometry(board, config, contract, nets)
+    config = {"usb_geometry_mode": "engineering_review"}
+    for floors in ({"track_width": 0, "clearance": 0.17},
+                   {"track_width": 0.17, "clearance": float("nan")}):
+        with pytest.raises(ValueError, match="invalid USB routing floor"):
+            rb.calculate_usb_review_geometry(board, config, contract, nets,
+                                             runtime=_runtime(tmp_path), floors=floors)
+    with pytest.raises(ValueError, match="90 ohms"):
+        rb.calculate_usb_review_geometry(board, config, dict(contract, impedance_tolerance=0.2), nets)
+
+
+def test_usb_review_geometry_uses_native_stackup_and_rejects_impossible_floors(tmp_path):
+    root = Path("/home/kicraft/KiCadRoutingTools-8eeee55fd4ba")
+    python = Path("/home/kicraft/krt-venv/bin/python")
+    if not python.is_file() or not (root / "py_router" / "impedance.py").is_file():
+        pytest.skip("pinned KiCadRoutingTools runtime not installed")
+    board = tmp_path / "board.kicad_pcb"
+    board.write_text('''(kicad_pcb (version 20240108) (generator pcbnew)
+  (general (thickness 1.6))
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal))
+  (setup (stackup
+    (layer "F.Cu" (type "copper") (thickness 0.07))
+    (layer "dielectric 1" (type "core") (thickness 1.46) (material "FR4") (epsilon_r 4.5))
+    (layer "B.Cu" (type "copper") (thickness 0.07))
+    (copper_finish "None")))
+  (net 0 "") (net 1 "USB_DP") (net 2 "USB_DM") (net 3 "GND")
+  (footprint "test" (layer "F.Cu") (at 10 20)
+    (property "Reference" "J1")
+    (pad "1" smd rect (at 0 0) (size 0.3 1.55) (layers "F.Cu") (net 1 "USB_DP"))
+    (pad "3" smd rect (at 1 0) (size 0.3 1.55) (layers "F.Cu") (net 1 "USB_DP"))))
+''')
+    runtime = dict(_runtime(root), python=str(python))
+    config = {"usb_geometry_mode": "engineering_review"}
+    nets = ["USB_DP", "USB_DM"]
+    floors = {"track_width": 0.17, "clearance": 0.17}
+    result = rb.calculate_usb_review_geometry(board, config, _usb_contract(), nets,
+                                               runtime=runtime, floors=floors, timeout=30)
+    assert result["provenance"] == "calculated_unconfirmed"
+    assert result["fabrication_approved"] is False
+    assert result["max_return_via_distance_mm"] == 1.0
+    assert result["geometry_by_layer"]["F.Cu"] == result["geometry_by_layer"]["B.Cu"]
+    for geometry in result["geometry_by_layer"].values():
+        assert geometry["width_mm"] >= floors["track_width"]
+        assert geometry["gap_mm"] >= floors["clearance"]
+        assert 81 <= geometry["estimated_ohm"] <= 99
+    contract = _usb_contract()
+    contract["segments"][0]["positive_from"].append({"ref": "J1", "pin": "3"})
+    bounded = rb.calculate_usb_review_geometry(
+        board, dict(config, usb_review_allow_bounded_launches=True), contract, nets,
+        runtime=runtime, floors=floors, timeout=30)
+    policy = bounded["launch_policy"]
+    assert policy["max_length_mm"] == pytest.approx(
+        2 * (bounded["geometry_by_layer"]["F.Cu"]["width_mm"] +
+             bounded["geometry_by_layer"]["F.Cu"]["gap_mm"]))
+    bound, = policy["contact_join_bounds"]
+    assert {k: bound[k] for k in ("segment_id", "polarity", "side", "ref", "pins")} == {
+        "segment_id": "port", "polarity": "positive", "side": "from",
+        "ref": "J1", "pins": ["1", "3"]}
+    assert bound["max_length_mm"] == pytest.approx(3.23)
+    assert bound["envelope_mm"] == pytest.approx([9.51, 18.885, 11.49, 21.115])
+    contract["segments"][0]["positive_from"].append({"ref": "J1", "pin": "absent"})
+    incomplete = rb.calculate_usb_review_geometry(
+        board, dict(config, usb_review_allow_bounded_launches=True), contract, nets,
+        runtime=runtime, floors=floors, timeout=30)
+    assert incomplete["launch_policy"]["contact_join_bounds"] == []
+    with pytest.raises(ValueError, match="geometry search bounds"):
+        rb.calculate_usb_review_geometry(board, config, _usb_contract(), nets,
+                                        runtime=runtime, floors={"track_width": 101, "clearance": 0.17},
+                                        timeout=30)
+    board.write_text(board.read_text().replace("(epsilon_r 4.5)", "(epsilon_r 0)"))
+    with pytest.raises(ValueError, match="stackup"):
+        rb.calculate_usb_review_geometry(board, config, _usb_contract(), nets,
+                                        runtime=runtime, floors=floors, timeout=30)

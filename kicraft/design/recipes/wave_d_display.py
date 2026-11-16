@@ -46,6 +46,8 @@ WS2812_EXTERNAL_STRIP = _recipe(
     recipe="ws2812-external-strip-interface@1", family="ws2812-external-strip",
     exact="WS2812-EXTERNAL-STRIP",
     aliases=("WS2812 addressable LED strip",),
+    parameters={"external_load_current_a": 0.25},
+    allowed={"external_load_current_a": (0.25,)},
     ports=(Port(name="vdd_5v", direction="power"), Port(name="gnd", direction="power"), Port(name="data_in", direction="input")),
     internal=("data_shifted", "data_series"),
     parts=(

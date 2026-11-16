@@ -919,22 +919,15 @@ def _resolve_bom_mpn_sourcing(
     inductors) were unverified LLM prose: a hallucinated or out-of-stock part
     sailed through to the fab BOM. Four tiers, by how a part carries sourcing:
 
-      - explicit C# in ``sourcing_note``  -> must exist in the offline
-        catalog, BE the part the symbol/footprint describe (the KC-9EZE3S
-        identity cross-check, stock footprints only —
-        :func:`_lcsc_identity_conflict`), clear the JLC stock floor, and be
-        orderable at retail;
-      - library-bundle part (manifest carries the LCSC) -> existence is gated
-        by ``_unresolved_lcsc``; here the manifest C# must clear the JLC
-        floor and be orderable at retail (bundles were previously exempt
-        from stock checks entirely, so a long-vendored part could run dry
-        without anything noticing);
-      - bare MPN -> offline catalog search. The exact/family-prefix matches
-        (e.g. "SS34" -> "SS34F") are walked best-JLC-stock-first; the first
-        one also in stock at retail is AUTO-PINNED into ``sourcing_note``
-        (``fab_export`` reads the C# from there, so the fab BOM csv stops
-        shipping blank LCSC columns); none orderable -> error back to the
-        model while its lookup tools are still in reach.
+      - explicit typed or prose C# -> catalog and identity validation;
+      - library-bundle part -> validate its manifest identity;
+      - bare MPN -> select an identity-compatible offline catalog match;
+      - no MPN -> search by value and package.
+
+    The selected C# is persisted in ``part.lcsc`` before stock decisions.
+    A disagreement among selected, prose, symbol and footprint identities is
+    an error, never a reason to choose one identity over another.
+    For a generic part with no MPN, keyword search may select a part:
       - no MPN at all -> keyword search by value + package
         (``jlcparts.bom_keyword``: "1k 0603", "pin header 2.54mm 1x2P";
         qualifier tokens are relaxed away on a miss). Floor-clearing
@@ -1088,6 +1081,8 @@ def _resolve_bom_mpn_sourcing(
         being replaced: the offline catalog's stock floor and the retail storefront.
         """
         cid = str(getattr(record, "lcsc", "") or "").strip().upper()
+        if not re.fullmatch(r"C[1-9]\d*", cid):
+            return False
         if not cid:
             return False
         hit = jlcparts.lookup(cid)
@@ -1107,7 +1102,8 @@ def _resolve_bom_mpn_sourcing(
         """
         from kicraft.design import part_identity, sourcing_policy
 
-        lib = _lib_prefix(part.symbol) or _lib_prefix(part.footprint or "")
+        lib = next((name for name in (_lib_prefix(part.symbol), _lib_prefix(part.footprint or ""))
+                    if name in manifest_by_name), None)
         man = manifest_by_name.get(lib) if lib else None
         record = part_identity.physical_inventory_record(
             mpn=part.mpn, symbol=part.symbol, footprint=part.footprint
@@ -1134,6 +1130,7 @@ def _resolve_bom_mpn_sourcing(
             part.footprint = getattr(alternative, "footprint", None)
             alt_cid = str(getattr(alternative, "lcsc", "") or "").strip().upper()
             if alt_cid:
+                part.lcsc = alt_cid
                 part.sourcing_note = f"LCSC {alt_cid}"
             bom.substitutions.append(
                 Substitution(
@@ -1170,7 +1167,25 @@ def _resolve_bom_mpn_sourcing(
             if receipt is not None:
                 receipt.append({"ref": part.ref, "verdict": "excluded_not_orderable"})
             continue
-        cid = extract_lcsc_pin(note)
+        note_cid = extract_lcsc_pin(note)
+        symbol_lib = _lib_prefix(part.symbol)
+        fp_lib = _lib_prefix(part.footprint or "")
+        identities = {
+            "selected": part.lcsc,
+            "sourcing note": note_cid,
+        }
+        for source, lib in (("symbol manifest", symbol_lib), ("footprint manifest", fp_lib)):
+            manifest = manifest_by_name.get(lib)
+            if manifest is not None:
+                identities[source] = str((manifest.sourcing or {}).get("lcsc") or "").strip().upper() or None
+        present = {key: value for key, value in identities.items() if value}
+        if any(not re.fullmatch(r"C[1-9]\d*", value) for value in present.values()):
+            bad.append(f"{part.ref}: invalid LCSC identity: {present}")
+            continue
+        if len(set(present.values())) > 1:
+            bad.append(f"{part.ref}: conflicting LCSC identities: {present}")
+            continue
+        cid = part.lcsc or note_cid
         if cid:
             label = mpn or (part.value or "").strip() or part.symbol
             hit = jlcparts.lookup(cid)
@@ -1178,30 +1193,15 @@ def _resolve_bom_mpn_sourcing(
             # the identity heuristics read stock naming conventions only.
             fp_lib = _lib_prefix(part.footprint or "")
             fp_is_bundle = fp_lib in manifest_by_name
-            bundle_manifest = manifest_by_name.get(fp_lib)
+            bundle_manifest = manifest_by_name.get(fp_lib) or manifest_by_name.get(symbol_lib)
             verified_missing_bundle = (
                 hit is None
                 and bundle_manifest is not None
                 and str((bundle_manifest.sourcing or {}).get("lcsc") or "").strip().upper() == cid
                 and _retail_manifest_identity_verified(bundle_manifest, part.mpn)
             )
-            if fp_is_bundle:
-                # Bundle-pin equality (KC-9EZE3S appendix): an explicit pin on
-                # a curated bundle that differs from the bundle's own C# is
-                # quiet part/footprint drift — the footprint was drawn for the
-                # manifest's part, but the fab BOM will order the pinned one.
-                # Warning, not offender: an intentional substitute (same
-                # package, better stock) is legitimate.
-                man_cid = (
-                    str((manifest_by_name[fp_lib].sourcing or {}).get("lcsc") or "").strip().upper()
-                )
-                if man_cid and man_cid != cid.strip().upper():
-                    warnings.append(
-                        f"{part.ref} ({label}): sourcing_note pins LCSC {cid} "
-                        f"but its footprint's bundle '{fp_lib}' was drawn for "
-                        f"LCSC {man_cid} — verify the pinned part matches the "
-                        f"footprint's land pattern"
-                    )
+            # All selected, prose, symbol and footprint identities were checked
+            # for exact equality before catalog and stock handling.
             conflict = None
             if hit is not None and not fp_is_bundle:
                 conflict = _lcsc_identity_conflict(part, hit)
@@ -1228,7 +1228,11 @@ def _resolve_bom_mpn_sourcing(
                     f"for: find it with lookup_lcsc_id, or add_part_from_lcsc "
                     f"{cid} and use that bundle's own symbol/footprint ids"
                 )
-            elif hit is not None and (hit.get("stock") or 0) < floor:
+            else:
+                part.lcsc = cid
+            if hit is None and not verified_missing_bundle or conflict:
+                continue
+            if hit is not None and (hit.get("stock") or 0) < floor:
                 _out_of_stock(
                     part,
                     label=label,
@@ -1263,7 +1267,7 @@ def _resolve_bom_mpn_sourcing(
                                    "verify retail stock before committing")
                     _receipt(part, cid, hit, verdict, info, False)
             continue
-        lib = _lib_prefix(part.symbol) or _lib_prefix(part.footprint or "")
+        lib = next((name for name in (symbol_lib, fp_lib) if name in manifest_by_name), None)
         man = manifest_by_name.get(lib) if lib else None
         if man is not None and (man.sourcing or {}).get("lcsc"):
             # Curated/fetched bundle: existence is gated by _unresolved_lcsc;
@@ -1276,7 +1280,13 @@ def _resolve_bom_mpn_sourcing(
                 bad.append(
                     f"{part.ref}: bundle LCSC {cid} has no verified catalog or distributor identity"
                 )
-            elif hit is not None and (hit.get("stock") or 0) < floor:
+            else:
+                part.lcsc = cid
+            if hit is None and (
+                _assembled_chip_rc(part) or not _retail_manifest_identity_verified(man, part.mpn)
+            ):
+                continue
+            if hit is not None and (hit.get("stock") or 0) < floor:
                 _out_of_stock(
                     part,
                     label=lib,
@@ -1388,6 +1398,10 @@ def _resolve_bom_mpn_sourcing(
                 best_by_kw[key] = (best, unv, bool(cands))
             best, unv, had_cands = best_by_kw[key]
             if best is not None:
+                if not re.fullmatch(r"C[1-9]\d*", str(best["lcsc"])):
+                    bad.append(f"{part.ref}: invalid catalog LCSC identity {best['lcsc']!r}")
+                    continue
+                part.lcsc = str(best["lcsc"])
                 part.sourcing_note = (f"{note} " if note else "") + f"LCSC {best['lcsc']}"
                 verdict, info = _retail_verdict(best["lcsc"], picky=True)
                 _receipt(part, str(best["lcsc"]), best, verdict, info, True)
@@ -1492,6 +1506,10 @@ def _resolve_bom_mpn_sourcing(
                 '"reason": "not orderable"})' + _alternates_note(part, dead_cid, floor)
             )
         else:
+            if not re.fullmatch(r"C[1-9]\d*", str(best["lcsc"])):
+                bad.append(f"{part.ref}: invalid catalog LCSC identity {best['lcsc']!r}")
+                continue
+            part.lcsc = str(best["lcsc"])
             part.sourcing_note = (f"{note} " if note else "") + f"LCSC {best['lcsc']}"
             verdict, info = _retail_verdict(best["lcsc"], picky=True)
             _receipt(part, str(best["lcsc"]), best, verdict, info, True)
@@ -3857,6 +3875,11 @@ def _apply_slot(
         state.placement = PlacementSection.model_validate(slot_data)
     else:
         raise ValueError(f"unknown stage {stage!r}; expected one of {KNOWN_STAGES}")
+    if stage != "placement":
+        # A review describes one exact source state, never a replacement slot.
+        state.review_coverage = None
+        state.review_findings = []
+        state.stage_status.pop("electrical_review", None)
 
 
 def _bom_core_categories(state: ConversationState) -> set[str]:
@@ -4921,6 +4944,8 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
 
 def _persist_artifacts(state, state_path: Path | None, artifacts) -> None:
     """Record artifacts in memory and persist them when state.json exists."""
+    if state is None:
+        return
     state.artifacts = artifacts
     if state_path is None:
         return
@@ -6158,8 +6183,69 @@ def _layout_failure_evidence_text(failure_summary: dict) -> str:
     return "\n".join(parts)
 
 
+def _verify_usb_routes(pcb: Path, config: dict) -> dict:
+    """Bind native USB geometry proof to this exact promoted board."""
+    contracts = config.get("usb_routing_contracts", [])
+    if not contracts:
+        return {"ok": True, "errors": [], "contracts": []}
+    import tempfile
+    from kicraft.autoplacer.routing_board import run_pcbnew_script
+    from kicraft.autoplacer.config import jsonable_config_value
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="kicraft-usb-contract-") as tmp:
+            result = Path(tmp) / "audit.json"
+            run_pcbnew_script(
+                "import json, pcbnew\n"
+                "from pathlib import Path\n"
+                "from kicraft.autoplacer.hardware.usb_contract import audit_usb_routing\n"
+                f"board = pcbnew.LoadBoard({str(pcb)!r})\n"
+                f"config = json.loads({json.dumps(jsonable_config_value(config))!r})\n"
+                "receipt = audit_usb_routing(board, config['usb_routing_contracts'], config)\n"
+                f"Path({str(result)!r}).write_text(json.dumps(receipt))\n"
+            )
+            receipt = json.loads(result.read_text())
+    except Exception as exc:
+        receipt = {"ok": False, "errors": [f"USB physical contract unverified: {exc}"],
+                   "contracts": []}
+    receipt["board_sha256"] = hashlib.sha256(pcb.read_bytes()).hexdigest()
+    atomic_write_text(pcb.with_suffix(".usb-routing.receipt.json"),
+                      json.dumps(receipt, indent=2) + "\n")
+    return receipt
+
+
+def _verify_dangling_copper(pcb: Path, evidence: list[dict] | None = None) -> dict:
+    """Require complete native DRC and item-specific proof for retained dead ends."""
+    import subprocess
+    from kicraft.autoplacer.brain.escape_cleanup import audit_dangling_copper
+
+    report_path = pcb.with_suffix(".drc.full.json")
+    report_path.unlink(missing_ok=True)
+    try:
+        result = subprocess.run(
+            ["kicad-cli", "pcb", "drc", "--format", "json", "--severity-all",
+             "--all-track-errors", "--output", str(report_path), str(pcb)],
+            capture_output=True, text=True, timeout=180,
+        )
+        if result.returncode:
+            raise RuntimeError(f"native DRC exited {result.returncode}: {result.stderr[-1000:]}")
+        receipt = audit_dangling_copper(
+            pcb, json.loads(report_path.read_text(encoding="utf-8")), evidence=evidence,
+        )
+    except Exception as exc:
+        receipt = {
+            "board_sha256": hashlib.sha256(pcb.read_bytes()).hexdigest() if pcb.is_file() else None,
+            "complete": False, "accepted": False, "error": str(exc),
+        }
+    receipt["ok"] = bool(receipt.get("complete") and receipt.get("accepted"))
+    atomic_write_text(pcb.with_suffix(".dangling.receipt.json"),
+                      json.dumps(receipt, indent=2) + "\n")
+    return receipt
+
+
 def _verify_routed_board(
     pcb: Path, *, required_same_edge_refs: tuple[str, ...] | None = None,
+    physical_config: dict | None = None,
 ) -> dict:
     """Acceptance gate: no shorts, no unconnected (connector-shield items waived),
     no physical-assembly blocker (courtyard overlap / antenna keep-out intrusion),
@@ -6260,6 +6346,23 @@ def _verify_routed_board(
     # NOT "ok" (it carries warnings) but it is fab-acceptable; genuine routed
     # geometry errors are never exportable.
     blocking_courtyard = courtyard > 0 and not courtyard_minor_only
+    if physical_config is None:
+        from kicraft.autoplacer.config import discover_project_config, load_project_config
+        sidecar = discover_project_config(pcb.parent)
+        physical_config = load_project_config(str(sidecar)) if sidecar is not None else {}
+    usb_receipt = _verify_usb_routes(pcb, physical_config)
+    if not usb_receipt["ok"]:
+        accepted = False
+        reasons.extend(usb_receipt["errors"])
+    dangling_receipt = _verify_dangling_copper(
+        pcb, evidence=physical_config.get("dangling_copper_evidence", []),
+    )
+    if not dangling_receipt["ok"]:
+        accepted = False
+        reasons.append(
+            "dangling copper audit incomplete" if not dangling_receipt.get("complete")
+            else f"unproven dangling copper: {len(dangling_receipt.get('unproven', []))} violations"
+        )
     return {
         "ok": accepted and shorts == 0 and unconnected == 0 and courtyard == 0 and keepout == 0,
         "fab_acceptable": (
@@ -6269,6 +6372,8 @@ def _verify_routed_board(
             and not blocking_courtyard
             and not illegal_geometry
             and not same_edge_violations
+            and usb_receipt["ok"]
+            and dangling_receipt["ok"]
         ),
         "shorts": shorts,
         "unconnected": unconnected,
@@ -6278,6 +6383,8 @@ def _verify_routed_board(
         "keepout": keepout,
         "reasons": reasons,
         "required_same_edge_violations": same_edge_violations,
+        "usb_routing": usb_receipt,
+        "dangling_copper": dangling_receipt,
         "warnings": warnings,
         "tracks": v.get("track_summary", {}) or {},
         # Positioned diagnosis for the manual-layout editor and PCB overlay.
@@ -6375,47 +6482,55 @@ def _maybe_electrical_review(
     identity.  Web callers omit them and retain the established environment-based
     review route.
     """
-    if state is None or not stage_done("wiring", state.model_dump()):
-        return {"ran": False, "findings": [], "blocked": False, "cost_usd": 0.0}
-    if os.environ.get("KICRAFT_ELECTRICAL_REVIEW", "").strip().lower() in (
-        "0",
-        "false",
-        "no",
-        "off",
-    ):
-        return {"ran": False, "findings": [], "blocked": False, "cost_usd": 0.0}
-    try:
-        from .synthesis.electrical_review import (
-            build_design_digest,
-            review_design_corroborated,
-        )
+    from .synthesis.electrical_review import build_design_evidence, review_design_corroborated
 
+    result = {
+        "ran": False, "findings": [], "blocked": False, "cost_usd": 0.0,
+        "provider_ok": None, "schema_ok": None, "semantic_clean": None,
+        "error": "electrical review incomplete: wiring unavailable",
+    }
+    if state is None:
+        return result
+    try:
+        evidence = build_design_evidence(state, project_root=project_dir)
+        state.review_coverage = evidence.coverage
+        if not stage_done("wiring", state.model_dump()):
+            return result
+        if os.environ.get("KICRAFT_ELECTRICAL_REVIEW", "").strip().lower() in (
+            "0", "false", "no", "off",
+        ):
+            return {**result, "error": "electrical review incomplete: disabled"}
+        if not evidence.coverage.complete:
+            return {
+                **result,
+                "error": "electrical review incomplete: mandatory evidence omitted: "
+                + ", ".join(evidence.coverage.omitted_mandatory),
+            }
         scoped_client, s = _review_client_and_settings(client, settings, run_id)
-        digest = build_design_digest(state, project_root=project_dir)
-        model = s.review_model or s.model
         res = review_design_corroborated(
             scoped_client,
-            digest,
-            model=model,
+            evidence.digest,
+            model=s.review_model or s.model,
             reasoning=s.review_reasoning(),
             max_tokens=s.review_max_tokens,
             temperature=s.review_temperature,
             corroboration=s.review_corroboration,
         )
-        if not res["ok"]:
-            print(
-                f"[build] electrical review skipped (model error: {res['error']})", file=sys.stderr
-            )
-            return {"ran": False, "findings": [], "blocked": False, "cost_usd": res["cost_usd"]}
         return {
-            "ran": True,
+            **result,
+            "ran": bool(res["ok"]),
             "findings": res["findings"],
             "blocked": res["blocked"],
             "cost_usd": res["cost_usd"],
+            "provider_ok": res.get("provider_ok"),
+            "schema_ok": res.get("schema_ok"),
+            "semantic_clean": not bool(res["findings"]) if res["ok"] else None,
+            "error": res.get("error"),
         }
-    except (Exception, SystemExit) as e:  # Settings.from_env raises SystemExit w/o a key
-        print(f"[build] electrical review skipped ({type(e).__name__}: {e})", file=sys.stderr)
-        return {"ran": False, "findings": [], "blocked": False, "cost_usd": 0.0}
+    except (Exception, SystemExit) as e:
+        error = f"electrical review incomplete: {type(e).__name__}: {e}"
+        print(f"[build] {error}", file=sys.stderr)
+        return {**result, "error": error, "provider_ok": False}
 
 
 _REVIEW_BOM_RE = re.compile(
@@ -6494,6 +6609,39 @@ def _emit_review_findings(progress, findings: list[dict]) -> None:
         )
 
 
+def _persist_review_outcome(state, state_path, review, *, cost_usd, wall_s):
+    """Persist observed review dimensions even when geometry generation continues."""
+    from .models import StageDiagnostic
+
+    coverage = state.review_coverage
+    complete = bool(review.get("ran") and coverage is not None and coverage.complete)
+    findings = review.get("findings") or []
+    state.review_findings = [
+        ReviewFinding(
+            severity=f.get("severity", "note"), area=f.get("area", ""),
+            issue=f.get("issue", ""), suggestion=f.get("suggestion") or "",
+        )
+        for f in findings
+    ]
+    diagnostics = []
+    if not complete:
+        diagnostics.append(StageDiagnostic(
+            code="electrical_review_incomplete", severity="advisory", detector_version=1,
+            message=review.get("error") or "electrical review incomplete: no complete verdict",
+            evidence=list(coverage.omitted_mandatory) if coverage is not None else ["Coverage unknown"],
+        ))
+    state.stage_status["electrical_review"] = StageStatus(
+        ok=complete, provider_ok=review.get("provider_ok"), schema_ok=review.get("schema_ok"),
+        semantic_clean=not bool(findings) if complete else None,
+        repair_required=bool(review.get("blocked")), diagnostics=diagnostics,
+        cost_usd=round(cost_usd, 6), wall_s=round(wall_s, 3),
+        finished_at=_dt.datetime.now(_dt.timezone.utc).isoformat(),
+    )
+    _surface_review_findings(state, state_path, findings)
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_text(state_path, state.model_dump_json(indent=2) + "\n")
+
+
 def run_post_wiring_review(
     state_path: Path,
     project_dir: Path,
@@ -6521,13 +6669,6 @@ def run_post_wiring_review(
     build proceeds. Returns the last review result dict for observability.
     """
     skipped = {"ran": False, "findings": [], "blocked": False, "cost_usd": 0.0}
-    if os.environ.get("KICRAFT_ELECTRICAL_REVIEW", "").strip().lower() in (
-        "0",
-        "false",
-        "no",
-        "off",
-    ):
-        return skipped  # explicit opt-out: don't even paint the tab
     state = _load_state(state_path) if state_path.exists() else None
     if state is None or not stage_done("wiring", state.model_dump()):
         return skipped
@@ -6563,10 +6704,16 @@ def run_post_wiring_review(
             progress(
                 {
                     "kind": "build_log",
-                    "text": "[build]     electrical review skipped (no result; see server log)",
+                    "text": "[build]     electrical review incomplete: "
+                    + (review.get("error") or "no result; see server log"),
                 }
             )
-            progress({"kind": "stage_done", "stage": "electrical_review", "ok": True})
+            _persist_review_outcome(
+                state, state_path, review, cost_usd=total_cost, wall_s=time.monotonic() - t0,
+            )
+            progress({"kind": "stage_done", "stage": "electrical_review", "ok": False,
+                      "provider_ok": review.get("provider_ok"), "schema_ok": review.get("schema_ok"),
+                      "semantic_clean": None})
             return review
         _emit_review_findings(progress, review["findings"])
         findings = review["findings"]
@@ -6585,7 +6732,8 @@ def run_post_wiring_review(
             # stage events, then a fresh stage_start reopens this tab for
             # the (minutes-long) second pass.
             progress(
-                {"kind": "stage_done", "stage": "electrical_review", "ok": True, "cost": total_cost}
+                {"kind": "stage_done", "stage": "electrical_review", "ok": True,
+                 "semantic_clean": False, "cost": total_cost}
             )
             # Review is evidence, not permission to rewrite the whole board:
             # scope the repair to the owning stage the finding attributes to.
@@ -6619,44 +6767,50 @@ def run_post_wiring_review(
                 findings = review["findings"]
                 _emit_review_findings(progress, findings)
             # else: keep pass-1 findings — the best information we have.
-        # Persist the outcome durably (state.review_findings + stage_status feed
-        # the reopened GUI; _surface_review_findings feeds the user-facing
-        # assumptions/open_questions and writes state.json as a side effect,
-        # but early-returns on a clean review — hence the unconditional write).
-        state.review_findings = [
-            ReviewFinding(
-                severity=f.get("severity", "note"),
-                area=f.get("area", ""),
-                issue=f.get("issue", ""),
-                suggestion=f.get("suggestion") or "",
-            )
-            for f in findings
-        ]
-        state.stage_status["electrical_review"] = StageStatus(
-            ok=True,
-            cost_usd=round(total_cost, 6),
-            finished_at=_dt.datetime.now(_dt.timezone.utc).isoformat(),
-            wall_s=round(time.monotonic() - t0, 3),
+        if not review["ran"]:
+            # A failed re-review cannot qualify the newly committed design.
+            review = {**review, "findings": findings}
+        _persist_review_outcome(
+            state, state_path, review, cost_usd=total_cost, wall_s=time.monotonic() - t0,
         )
-        try:
-            _surface_review_findings(state, state_path, findings)
-        except Exception as e:  # noqa: BLE001 - surfacing must never break the run
-            print(f"[review] could not surface findings: {e}", file=sys.stderr)
-        state_path.parent.mkdir(parents=True, exist_ok=True)
-        atomic_write_text(state_path, state.model_dump_json(indent=2) + "\n")
         progress(
-            {"kind": "stage_done", "stage": "electrical_review", "ok": True, "cost": total_cost}
+            {"kind": "stage_done", "stage": "electrical_review",
+             "ok": state.stage_status["electrical_review"].ok,
+             "provider_ok": review.get("provider_ok"), "schema_ok": review.get("schema_ok"),
+             "semantic_clean": state.stage_status["electrical_review"].semantic_clean,
+             "cost": total_cost}
         )
         return review
     except Exception as e:  # noqa: BLE001 - fail-soft: never block a sound build
         progress(
             {
                 "kind": "build_log",
-                "text": f"[build]     electrical review skipped ({type(e).__name__}: {e})",
+                "text": f"[build]     electrical review incomplete ({type(e).__name__}: {e})",
             }
         )
-        progress({"kind": "stage_done", "stage": "electrical_review", "ok": True})
-        return skipped
+        failed = {**skipped, "error": f"electrical review incomplete: {type(e).__name__}: {e}"}
+        _persist_review_outcome(
+            state, state_path, failed, cost_usd=total_cost, wall_s=time.monotonic() - t0,
+        )
+        progress({"kind": "stage_done", "stage": "electrical_review", "ok": False})
+        return failed
+
+
+def _refresh_required_silk(state, project_root):
+    """Reconstruct required content from current reviewed interface ownership."""
+    if state is None or state.bom is None:
+        return []
+    from .models import SilkPlan
+    from .synthesis.silk_plan import (
+        merge_required_labels, required_silk_defects, uncovered_connectors,
+    )
+
+    plan = state.silk_plan or SilkPlan()
+    labels = merge_required_labels(state, plan.labels, project_root=project_root)
+    state.silk_plan = plan.model_copy(update={
+        "labels": labels, "uncovered_connectors": uncovered_connectors(labels, state),
+    })
+    return required_silk_defects(state, project_root=project_root)
 
 
 def run_silk_plan_authoring(
@@ -6669,115 +6823,70 @@ def run_silk_plan_authoring(
     settings=None,
     run_id: str | None = None,
 ) -> dict:
-    """Author the silkscreen content plan after wiring, before deterministic build.
-
-    Same lifecycle slot as ``run_post_wiring_review``: runs after the wiring
-    commit and BEFORE the build is enqueued, commits to the top-level
-    ``state.silk_plan``, and the no-LLM build tail places it geometrically.
-    The LLM authors content only; ``lint_labels`` drops anything the design
-    state cannot corroborate (recorded in ``SilkPlan.dropped_at_lint``).
-
-    Fail-soft like the review: on ANY error (no key, network, malformed
-    output) the slot stays unset and the build falls back to the
-    deterministic legend. ``KICRAFT_SILK_PLAN=0`` disables the LLM call but
-    still commits the metadata slot (title/board_code for the legend).
-    """
-    skipped = {"ran": False, "labels": 0, "cost_usd": 0.0}
+    """Commit required deterministic facts; the model may add optional wording."""
     state = _load_state(state_path) if state_path.exists() else None
     if state is None or state.bom is None or not state.bom.parts:
-        return skipped
-    from kicraft.design.models import SilkPlan
-    from kicraft.design.synthesis.silk_plan import uncovered_connectors
+        return {"ran": False, "labels": 0, "cost_usd": 0.0}
+    from .models import StageDiagnostic
+    from .synthesis.silk_plan import (
+        author_labels, build_interface_digest, lint_labels, merge_required_labels,
+        required_silk_defects, uncovered_connectors,
+    )
 
     t0 = time.monotonic()
     total_cost = 0.0
-    llm_enabled = os.environ.get("KICRAFT_SILK_PLAN", "").strip().lower() not in (
-        "0",
-        "false",
-        "no",
-        "off",
-    )
+    ran = False
+    errors = []
     try:
-        title = ""
-        kept: list = []
-        dropped: list[str] = []
-        author_model = None
-        if llm_enabled:
-            progress(
-                {"kind": "build_log", "text": "[build]     silk plan: authoring board labels ..."}
-            )
-            from .synthesis.electrical_review import build_design_digest
-            from .synthesis.silk_plan import author_labels, lint_labels
-
-            scoped_client, s = _review_client_and_settings(client, settings, run_id)
-            author_model = s.review_model or s.model
-            digest = build_design_digest(state, project_root=project_dir)
-            # review_max_tokens, not a small local cap: the reasoning-heavy
-            # review models burn 10-23k thinking tokens before the JSON
-            # answer; a small cap truncates (finish=length) with EMPTY text
-            # (see the review_max_tokens note in server/config.py).
-            res = author_labels(
-                scoped_client,
-                digest,
-                model=author_model,
-                reasoning=s.review_reasoning(),
-                max_tokens=s.review_max_tokens,
-            )
-            total_cost = res["cost_usd"]
-            if not res["ok"]:
-                progress(
-                    {
-                        "kind": "build_log",
-                        "text": f"[build]     silk plan: authoring failed "
-                        f"({res['error']}); legend-only fallback",
-                    }
+        errors = _refresh_required_silk(state, project_dir)
+        if board_code is not None:
+            state.silk_plan.board_code = board_code
+        enabled = os.environ.get("KICRAFT_SILK_PLAN", "").strip().lower() not in (
+            "0", "false", "no", "off",
+        )
+        if enabled:
+            try:
+                scoped_client, settings = _review_client_and_settings(client, settings, run_id)
+                model = settings.review_model or settings.model
+                progress({"kind": "build_log", "text": "[build]     silk plan: optional wording ..."})
+                result = author_labels(
+                    scoped_client, build_interface_digest(state, project_root=project_dir),
+                    model=model, reasoning=settings.review_reasoning(),
+                    max_tokens=settings.review_max_tokens,
                 )
-            else:
-                title = res["title"]
-                kept, dropped = lint_labels(res["labels"], state, project_root=project_dir)
-        uncovered = uncovered_connectors(kept, state)
-        state.silk_plan = SilkPlan(
-            title=title or None,
-            board_code=board_code,
-            labels=kept,
-            dropped_at_lint=dropped,
-            uncovered_connectors=uncovered,
-            author_model=author_model,
-            cost_usd=round(total_cost, 6),
-        )
-        state.stage_status["silk_plan"] = StageStatus(
-            ok=True,
-            cost_usd=round(total_cost, 6),
-            finished_at=_dt.datetime.now(_dt.timezone.utc).isoformat(),
-            wall_s=round(time.monotonic() - t0, 3),
-        )
-        state_path.parent.mkdir(parents=True, exist_ok=True)
-        atomic_write_text(state_path, state.model_dump_json(indent=2) + "\n")
-        progress(
-            {
-                "kind": "build_log",
-                "text": f"[build]     silk plan: {len(kept)} label(s) committed"
-                + (f", {len(dropped)} dropped at lint" if dropped else ""),
-            }
-        )
-        for reason in dropped:
-            progress({"kind": "build_log", "text": f"[build]     silk plan lint dropped {reason}"})
-        for ref in uncovered:
-            progress(
-                {
-                    "kind": "build_log",
-                    "text": f"[build]     silk plan: connector {ref} has no label",
-                }
-            )
-        return {"ran": llm_enabled, "labels": len(kept), "cost_usd": total_cost}
-    except (Exception, SystemExit) as e:  # noqa: BLE001 - never block the build
-        progress(
-            {
-                "kind": "build_log",
-                "text": f"[build]     silk plan skipped ({type(e).__name__}: {e})",
-            }
-        )
-        return skipped
+                total_cost = result["cost_usd"]
+                ran = bool(result["ok"])
+                if ran:
+                    optional, dropped = lint_labels(result["labels"], state, project_root=project_dir)
+                    labels = merge_required_labels(state, optional, project_root=project_dir)
+                    state.silk_plan = state.silk_plan.model_copy(update={
+                        "title": result["title"] or state.silk_plan.title,
+                        "labels": labels, "dropped_at_lint": dropped,
+                        "uncovered_connectors": uncovered_connectors(labels, state),
+                        "author_model": model, "cost_usd": round(total_cost, 6),
+                    })
+                else:
+                    progress({"kind": "build_log", "text":
+                              f"[build]     silk optional wording unavailable: {result['error']}"})
+            except (Exception, SystemExit) as exc:
+                progress({"kind": "build_log", "text":
+                          f"[build]     silk optional wording unavailable: {exc}"})
+        errors = required_silk_defects(state, project_root=project_dir)
+    except Exception as exc:
+        errors = [f"required silk facts unavailable: {exc}"]
+    state.stage_status["silk_plan"] = StageStatus(
+        ok=not errors, semantic_clean=not errors,
+        diagnostics=[StageDiagnostic(code="required_silk_incomplete", severity="advisory",
+                     detector_version=1, message=error) for error in errors],
+        cost_usd=round(total_cost, 6), wall_s=round(time.monotonic() - t0, 3),
+        finished_at=_dt.datetime.now(_dt.timezone.utc).isoformat(),
+    )
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_text(state_path, state.model_dump_json(indent=2) + "\n")
+    count = len(state.silk_plan.labels) if state.silk_plan else 0
+    progress({"kind": "build_log", "text": f"[build]     silk plan: {count} labels; "
+              + ("required coverage complete" if not errors else "; ".join(errors))})
+    return {"ran": ran, "labels": count, "cost_usd": total_cost, "errors": errors}
 
 
 def run_post_wiring_lifecycle(
@@ -6818,16 +6927,15 @@ def run_post_wiring_lifecycle(
     )
     return {
         "execution_mode": execution_mode,
-        # Completion records that the shared fail-soft lifecycle was exercised;
-        # ``ran`` distinguishes an actual model result from an opt-out/error.
-        # Neither is fulfillment evidence.
+        # These are review/content outcomes, not evidence of bench qualification.
+        # ``ran`` separately records an actual optional model result.
         "post_wiring_review": {
-            "status": "completed",
+            "status": "completed" if review.get("ran") else "incomplete",
             "ran": bool(review.get("ran")),
             "cost_usd": round(float(review.get("cost_usd") or 0.0), 6),
         },
         "silkscreen": {
-            "status": "completed",
+            "status": "incomplete" if silk.get("errors") else "completed",
             "ran": bool(silk.get("ran")),
             "cost_usd": round(float(silk.get("cost_usd") or 0.0), 6),
         },
@@ -6994,6 +7102,50 @@ def _canonical_thermal_for_config(state, config: dict, *, do_fab: bool) -> list[
     return canonical
 
 
+def _configure_usb_geometry_mode(
+    project_dir: Path, stem: str, config: dict, *, engineering_review: bool,
+    allow_bounded_launches: bool = False,
+) -> dict:
+    """Persist explicit review intent in derived routing input, never approval."""
+    mode = config.get("usb_geometry_mode", "fabrication")
+    if mode not in {"fabrication", "engineering_review"}:
+        raise ValueError(f"unknown USB geometry mode: {mode!r}")
+    bounded = config.get("usb_review_allow_bounded_launches", False)
+    if type(bounded) is not bool:
+        raise ValueError("bounded USB launch policy must be a boolean")
+    if not engineering_review:
+        if mode == "engineering_review":
+            raise ValueError("review routing input requires explicit --engineering-review")
+        if bounded or allow_bounded_launches:
+            raise ValueError("bounded USB launches require --engineering-review")
+        return config
+    updates = {}
+    if mode != "engineering_review":
+        updates["usb_geometry_mode"] = "engineering_review"
+    if allow_bounded_launches and not bounded:
+        updates["usb_review_allow_bounded_launches"] = True
+    if updates:
+        config = dict(config, **updates)
+        atomic_write_text(
+            project_dir / f"{stem}_autoplacer.json",
+            json.dumps(config, indent=2) + "\n",
+        )
+    return config
+
+
+def _canonical_usb_for_config(state, config: dict) -> list[dict]:
+    """A stale or missing sidecar cannot erase a reviewed USB requirement."""
+    if state is None or state.architecture is None or state.bom is None:
+        return config.get("usb_routing_contracts", [])
+    from kicraft.design.synthesis.autoplacer import usb_routing_contracts
+
+    canonical = [contract.model_dump(mode="json")
+                 for contract in usb_routing_contracts(state.architecture, state.bom)]
+    if config.get("usb_routing_contracts", []) != canonical:
+        raise ValueError("autoplacer USB contracts differ from current recipes; regenerate synthesis")
+    return canonical
+
+
 def _promote_verify_fab(
     state,
     state_path: Path,
@@ -7147,14 +7299,26 @@ def _promote_verify_fab(
         return 6
     shutil.copy(routed, pcb)  # copy (not copy2) -> honest promote-time mtime
     print(f"[build] 3/5 promoted routed parent -> {pcb.name}")
+    # Cleanup authority travels with this exact selected routed parent. Never
+    # rediscover another round's placement or infer ownership from locked copper.
+    cleanup_path = pcb.with_suffix(".escape-cleanup.receipt.json")
+    try:
+        from kicraft.autoplacer.brain.escape_cleanup import cleanup_signal_escapes
+        cleanup_receipt = cleanup_signal_escapes(
+            pcb, Path(str(routed) + ".escape_ownership.json"), cleanup_path,
+        )
+        cleanup_receipt["ok"] = cleanup_receipt.get("accepted") is True
+    except Exception as exc:
+        cleanup_receipt = {"ok": False, "error": str(exc)}
+        print(f"[build]     signal escape cleanup unverified ({exc})", file=sys.stderr)
 
-    # 3a. Silkscreen legend + authored labels. Runs on the promoted board
-    # AFTER routing/pour are final and BEFORE the verify gate, so the DRC
-    # pass below sees the added silk. Content comes from state.silk_plan
-    # (LLM-authored pre-build, linted); absent slot => deterministic legend
-    # only. Best-effort: silk is cosmetic and must never break the tail.
+
+    # Required interface text is a delivery contract; optional text may be dropped.
+    silk_errors = []
+    silk_res = {}
     try:
         from kicraft.autoplacer.hardware.silk_legend import apply_silk_legend
+        silk_errors.extend(_refresh_required_silk(state, project_dir))
 
         silk_res = apply_silk_legend(pcb, state)
         _placed = silk_res.get("placed") or []
@@ -7171,8 +7335,14 @@ def _promote_verify_fab(
         if artifacts is not None:
             artifacts.silk_placed = [str(p["id"]) for p in _placed]
             artifacts.silk_dropped = [f"{d['id']}: {d['reason']}" for d in _dropped]
-    except Exception as _silk_err:  # noqa: BLE001 - cosmetic, never a gate
-        print(f"[build]     silk legend skipped ({_silk_err})", file=sys.stderr)
+        from .synthesis.silk_plan import required_silk_defects
+        if state is not None and state.bom is not None:
+            silk_errors.extend(required_silk_defects(
+                state, placed_ids=[str(p["id"]) for p in _placed], project_root=project_dir,
+            ))
+    except Exception as _silk_err:
+        silk_errors.append(f"required silk placement unverified: {_silk_err}")
+        print(f"[build]     required silk placement failed ({_silk_err})", file=sys.stderr)
     artifact_paths.write_promote_provenance(
         pcb,
         run_id=run_id,
@@ -7191,12 +7361,45 @@ def _promote_verify_fab(
         required_same_edge_connector_refs(state.intent, state.bom)
         if state is not None and state.intent is not None and state.bom is not None else None
     )
-    gate = _verify_routed_board(pcb, required_same_edge_refs=required_same_edge_refs)
-    # Recheck the promoted native geometry, not the leaf-placement proposal.
-    # A failed/unreadable contract is a fabrication failure, never an advisory.
     config_path = project_dir / f"{stem}_autoplacer.json"
+    config_error = None
     try:
         config = json.loads(config_path.read_text()) if config_path.is_file() else {}
+        _canonical_usb_for_config(state, config)
+        config = _configure_usb_geometry_mode(
+            project_dir, stem, config,
+            engineering_review=config.get("usb_geometry_mode") == "engineering_review",
+        )
+    except Exception as exc:
+        config = {}
+        config_error = f"USB contract authority verification failed: {exc}"
+    engineering_review = config.get("usb_geometry_mode") == "engineering_review"
+    if engineering_review:
+        do_fab = False
+    gate = _verify_routed_board(
+        pcb, required_same_edge_refs=required_same_edge_refs, physical_config=config,
+    )
+    silk_receipt = {
+        **silk_res, "ok": not silk_errors, "errors": silk_errors,
+        "board_sha256": hashlib.sha256(pcb.read_bytes()).hexdigest(),
+    }
+    atomic_write_text(pcb.with_suffix(".silk.receipt.json"),
+                      json.dumps(silk_receipt, indent=2) + "\n")
+    gate["silk"] = silk_receipt
+    cleanup_receipt["board_sha256"] = hashlib.sha256(pcb.read_bytes()).hexdigest()
+    atomic_write_text(cleanup_path, json.dumps(cleanup_receipt, indent=2) + "\n")
+    gate["escape_cleanup"] = cleanup_receipt
+    if not cleanup_receipt["ok"]:
+        gate["fab_acceptable"] = False
+        gate.setdefault("reasons", []).append("signal escape cleanup ownership/custody unverified")
+    if silk_errors:
+        gate["fab_acceptable"] = False
+        gate.setdefault("reasons", []).extend(silk_errors)
+    if config_error:
+        gate["fab_acceptable"] = False
+        gate.setdefault("reasons", []).append(config_error)
+    # Recheck promoted native geometry, never just requested router settings.
+    try:
         specs = config.get("local_bypasses", [])
         if state is not None and state.architecture is not None and state.bom is not None:
             from kicraft.design.synthesis.autoplacer import _recipe_local_bypasses
@@ -7406,9 +7609,34 @@ def _promote_verify_fab(
         "violations": list(gate.get("violations", []) or []),
         "missing_refs": list(missing_refs or []),
     }
+    if engineering_review:
+        gate["fab_acceptable"] = False
+        gate["ok"] = False
+        gate["engineering_review"] = True
+        reason = "engineering-review geometry is unconfirmed; fabrication release blocked"
+        gate.setdefault("reasons", []).append(reason)
+        verify_summary["reasons"] = list(gate["reasons"])
     if verify_summary_out is not None:
         verify_summary_out.update(verify_summary)
 
+    gate["board_sha256"] = hashlib.sha256(pcb.read_bytes()).hexdigest()
+    if engineering_review:
+        atomic_write_text(
+            pcb.with_suffix(".engineering-review.receipt.json"),
+            json.dumps({
+                "mode": "engineering_review",
+                "provenance": "calculated_unconfirmed",
+                "fabrication_approved": False,
+                "board_sha256": gate["board_sha256"],
+                "usb_geometry_ok": gate.get("usb_routing", {}).get("geometry_ok", False),
+                "shorts": gate["shorts"],
+                "unconnected": gate["unconnected"],
+                "verification_receipt": pcb.with_suffix(".verification.receipt.json").name,
+                "limitation": "Full physical verification is reported separately; no fabrication release.",
+            }, indent=2) + "\n",
+        )
+    atomic_write_text(pcb.with_suffix(".verification.receipt.json"),
+                      json.dumps(gate, indent=2) + "\n")
     if not gate.get("fab_acceptable", gate["ok"]) or missing_refs:
         print(
             f"[build]     kept failed board {pcb.name} for inspection "
@@ -7432,6 +7660,7 @@ def _promote_verify_fab(
         # Best-effort 3D render so the designer can visually inspect the
         # failure (courtyard overlaps, stranded connectors, etc.) directly
         # in the GUI.  Never let a render failure change the exit code.
+        inspection_render = None
         try:
             import subprocess as _sp
 
@@ -7463,8 +7692,7 @@ def _promote_verify_fab(
                 timeout=120,
             )
             if render_path.exists():
-                artifacts.board_3d_png = render_path
-                _persist_artifacts(state, state_path, artifacts)
+                inspection_render = render_path
                 print(f"[build]     3D inspection render saved: {render_path.name}")
         except Exception:
             pass
@@ -7478,6 +7706,9 @@ def _promote_verify_fab(
             summary=verify_summary,
             pcb=pcb,
         )
+        if inspection_render is not None:
+            artifacts.board_3d_png = inspection_render
+            _persist_artifacts(state, state_path, artifacts)
         return 7
 
     # 4a. Non-blocking warnings (a minor, fraction-of-a-mm courtyard clip on an
@@ -7515,7 +7746,8 @@ def _promote_verify_fab(
     from kicraft.design.synthesis.fab_export import export_fab
 
     bom_parts = [p.model_dump() for p in state.bom.parts]
-    fab = export_fab(str(pcb), str(project_dir), stem, bom_parts=bom_parts)
+    fab = export_fab(str(pcb), str(project_dir), stem, bom_parts=bom_parts,
+                     state=state, project_root=state_path.parent.parent)
 
     artifacts.routed_pcb = pcb
     artifacts.fab_zip = Path(fab["zip"])
@@ -7899,13 +8131,31 @@ def _layout_route_fab(
     carries none of them, so build is byte-for-byte unchanged."""
     seed = getattr(args, "seed", None)
     route = getattr(args, "route", True)
-    do_fab = not getattr(args, "no_fab", False)
+    engineering_review = bool(getattr(args, "engineering_review", False))
+    do_fab = not getattr(args, "no_fab", False) and not engineering_review
     done_label = getattr(args, "done_label", "BUILD COMPLETE")
     # Reject stale recipe-owned thermal metadata before spending a routing round.
     # Project-only replay remains a non-fab diagnostic when state is unavailable.
     try:
         config_path = project_dir / f"{stem}_autoplacer.json"
         config = json.loads(config_path.read_text()) if config_path.is_file() else {}
+        if engineering_review and not route:
+            raise ValueError("--engineering-review requires routing, not --no-route")
+        config = _configure_usb_geometry_mode(
+            project_dir, stem, config, engineering_review=engineering_review,
+            allow_bounded_launches=bool(getattr(args, "usb_bounded_launches", False)),
+        )
+        usb_contracts = _canonical_usb_for_config(state, config)
+        silk_errors = _refresh_required_silk(state, project_dir)
+        if silk_errors:
+            raise ValueError("; ".join(silk_errors))
+        if state is not None and state.architecture is not None and state.bom is not None:
+            from .synthesis.autoplacer import canonical_silk_label_reservations
+            reservations = canonical_silk_label_reservations(
+                state.architecture, state.bom, intent=state.intent, project_root=project_dir,
+            )
+            if config.get("silk_label_reservations", {}) != reservations:
+                raise ValueError("required silk reservations are stale; regenerate synthesis")
         thermal = _canonical_thermal_for_config(state, config, do_fab=do_fab)
         if thermal:
             from kicraft.autoplacer.fab_profile import require_two_ounce_project_rules
@@ -7914,8 +8164,42 @@ def _layout_route_fab(
             if not has_two_ounce_outer_stackup(pcb):
                 raise ValueError("required 2 oz outer copper stackup is absent before layout")
             require_two_ounce_project_rules(pcb.with_suffix(".kicad_pro"), config)
+        if route and usb_contracts:
+            if engineering_review:
+                from kicraft.autoplacer.config import DEFAULT_CONFIG
+                from kicraft.autoplacer.kicad_routing_tools import calculate_usb_review_geometry
+                routing_config = {**DEFAULT_CONFIG, **config}
+                profiles = []
+                for contract in usb_contracts:
+                    nets = [segment[key] for segment in contract["segments"]
+                            for key in ("positive_net", "negative_net")]
+                    profiles.append({
+                        "contract_id": contract["id"],
+                        "geometry": calculate_usb_review_geometry(
+                            pcb, routing_config, contract, nets,
+                        ),
+                    })
+                atomic_write_text(
+                    pcb.with_suffix(".engineering-review-input.receipt.json"),
+                    json.dumps({
+                        "mode": "engineering_review",
+                        "fabrication_approved": False,
+                        "input_board_sha256": hashlib.sha256(pcb.read_bytes()).hexdigest(),
+                        "profiles": profiles,
+                    }, indent=2) + "\n",
+                )
+                print("[build] engineering review: calculated USB geometry; "
+                      "fabricator confirmation absent; fabrication release blocked")
+            else:
+                from kicraft.autoplacer.kicad_routing_tools import require_usb_fabrication_approval
+                require_usb_fabrication_approval(config)
     except Exception as exc:
-        print(f"error: thermal contract verification failed: {exc}", file=sys.stderr)
+        print(f"error: pre-layout physical contract verification failed: {exc}", file=sys.stderr)
+        _persist_pcb_diagnostics(
+            state, state_path, artifacts, stem, project_dir,
+            stage="place_route",
+            summary={"reasons": ["physical_contract"], "evidence": {"pre_layout": str(exc)}},
+        )
         return 7
 
 
@@ -8924,6 +9208,14 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="skip the post-build session archive",
     )
+    p_build.add_argument(
+        "--engineering-review", action="store_true",
+        help="route with explicitly unconfirmed calculated USB geometry; never export fabrication data",
+    )
+    p_build.add_argument(
+        "--usb-bounded-launches", action="store_true",
+        help="allow bounded, explicitly uncontrolled USB pad launches and contact joins in engineering review only",
+    )
     p_build.set_defaults(func=_cmd_build)
 
     p_replay = sub.add_parser(
@@ -8989,6 +9281,14 @@ def main(argv: list[str] | None = None) -> int:
         "--no-fab",
         action="store_true",
         help="skip the fab-package export (stop after the verify gate)",
+    )
+    p_replay.add_argument(
+        "--engineering-review", action="store_true",
+        help="route a review candidate with unconfirmed calculated USB geometry; fabrication stays blocked",
+    )
+    p_replay.add_argument(
+        "--usb-bounded-launches", action="store_true",
+        help="allow bounded, explicitly uncontrolled USB pad launches and contact joins in engineering review only",
     )
     p_replay.add_argument(
         "--archive",

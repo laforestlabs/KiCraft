@@ -353,7 +353,7 @@ class _Placer:
         # dropping: a DIP table across the board still beats no table. The
         # anchored pass already failed, so sweep candidates (fp=None), front
         # silk, smallest height first.
-        if int(label.get("priority", 2)) == 1 and fp is not None:
+        if int(label.get("priority", 2)) == 1 and fp is not None and not label.get("required"):
             for h in sorted(heights):
                 txt = _make_text(self.board, label["text"], h, pcbnew.F_SilkS, False)
                 w, th, ox, oy = self._measure(txt)
@@ -425,6 +425,13 @@ class _Placer:
                 w, th, ox, oy = self._measure(txt)
                 for tx, ty in self._pin_candidates(pb, cx, cy, w, th, dirs):
                     box = (tx, ty, tx + w, ty + th)
+                    if label.get("required"):
+                        # Clamping an off-board candidate must not move a
+                        # pin legend to an unrelated part of the connector.
+                        dx = max(pb[0] - box[2], box[0] - pb[2], 0.0)
+                        dy = max(pb[1] - box[3], box[1] - pb[3], 0.0)
+                        if dx * dx + dy * dy > 4.5 * 4.5:
+                            continue
                     if self._spot_ok(side, box):
                         self._commit(txt, side, tx, ty, ox, oy,
                                      f"{label_id}:{pin}", h)
@@ -533,8 +540,8 @@ def main(argv: list[str]) -> int:
 
     labels = sorted(
         payload.get("labels") or [],
-        key=lambda lb: (int(lb.get("priority", 2)), _size_key(lb),
-                        str(lb.get("id", ""))),
+        key=lambda lb: (not bool(lb.get("required")), int(lb.get("priority", 2)),
+                        _size_key(lb), str(lb.get("id", ""))),
     )
     for label in labels:
         if label.get("kind") == "pinout":
@@ -550,8 +557,19 @@ def main(argv: list[str]) -> int:
                 {"id": "legend", "reason": "no clear silk strip on either side"}
             )
 
+    expected = []
+    for label in labels:
+        if not label.get("required"):
+            continue
+        if label.get("kind") == "pinout":
+            expected.extend(f"{label['id']}:{pin['pin']}" for pin in label.get("pins", []))
+        else:
+            expected.append(label["id"])
+    placed = {item["id"] for item in placer.placed}
+    required_missing = sorted(set(expected) - placed)
     with open(payload["result_path"], "w") as f:
-        json.dump({"placed": placer.placed, "dropped": placer.dropped}, f, indent=1)
+        json.dump({"placed": placer.placed, "dropped": placer.dropped,
+                   "required_expected": expected, "required_missing": required_missing}, f, indent=1)
 
     board.Save(payload.get("output_path") or payload["pcb_path"])
     # Success sentinel (matches routing_board._PCBNEW_OK_SENTINEL) so a

@@ -8,13 +8,17 @@ diff.
 
 from __future__ import annotations
 
-from kicraft.design.models import InterSheetNet, Sheet, SheetPin
+import re
+
+from kicraft.design.models import Architecture, BOM, InterSheetNet, Sheet, SheetPin
 from kicraft.design.synthesis.emitter import (
     _SHEET_PIN_PITCH_MM,
     _SheetInstance,
+    _emit_root,
     _emit_sheet_block,
     _sheet_required_height,
 )
+from kicraft.design.synthesis.sch_geometry import text_width_mm
 
 
 def _sheet_inst(n_signal_pins: int, name: str = "MCU") -> _SheetInstance:
@@ -57,3 +61,20 @@ def test_height_grows_for_pin_dense_sheet_only():
     # A sparse sheet keeps the base height (byte-for-byte unchanged layout).
     sparse = _sheet_inst(3)
     assert _sheet_required_height(sparse, 30.48) == 30.48
+
+
+def test_root_wraps_sheets_and_reserves_full_pin_names(tmp_path):
+    instances = [_sheet_inst(1, f"BLOCK{i}") for i in range(5)]
+    long_name = "__KICRAFT_RECIPE__POWER_CONVERTER_INSTANCE_PRIVATE_SIGNAL_DP"
+    for si in instances:
+        si.inter_sheet_endpoints[0][0].name = long_name
+    arch = Architecture(sheets=[si.sheet for si in instances],
+                        power_nets=[], inter_sheet_nets=[])
+    root = _emit_root("DEMO", tmp_path, instances, arch, BOM(parts=[]), "Demo")
+    text = root.read_text()
+    boxes = re.findall(r'\(sheet\s+\(at ([\d.]+) ([\d.]+)\)\s+'
+                       r'\(size ([\d.]+) ([\d.]+)\)', text)
+    assert len(boxes) == 5
+    assert len({float(box[1]) for box in boxes}) == 3
+    assert all(float(box[2]) > text_width_mm(long_name) for box in boxes)
+    assert text.count(f'(pin "{long_name}"') == 5

@@ -1099,6 +1099,474 @@ print(json.dumps(result))
     return [(float(width), list(nets)) for width, nets in json.loads(result.stdout)]
 
 
+def require_usb_fabrication_approval(
+    config: dict[str, Any], floors: dict[str, float] | None = None,
+) -> tuple[dict[str, Any], float, float]:
+    """Validate approval inputs before search; native stackup matching follows."""
+    approval = config.get("usb_impedance_fabrication_approval")
+    if not isinstance(approval, dict) or not isinstance(approval.get("source"), str) or not approval["source"].strip():
+        raise ValueError("USB controlled impedance requires fabricator approval")
+    geometry = approval.get("geometry_by_layer")
+    if not isinstance(geometry, dict):
+        raise ValueError("USB fabrication approval has no per-layer geometry")
+    dimensions = []
+    for layer in ("F.Cu", "B.Cu"):
+        approved = geometry.get(layer)
+        if not isinstance(approved, dict):
+            raise ValueError(f"USB fabrication approval has no geometry for {layer}")
+        width, gap = approved.get("width_mm"), approved.get("gap_mm")
+        if any(isinstance(v, bool) or not isinstance(v, (int, float)) or
+               not math.isfinite(v) or v <= 0 for v in (width, gap)):
+            raise ValueError(f"invalid USB fabrication geometry for {layer}")
+        if floors is not None and (width < floors["track_width"] or gap < floors["clearance"]):
+            raise ValueError(f"USB fabrication geometry violates routing floors on {layer}")
+        dimensions.append((width, gap))
+    if dimensions[0] != dimensions[1]:
+        raise ValueError("USB router requires the same approved width and gap on both copper layers")
+    return approval, *dimensions[0]
+
+
+def _usb_pairs(config: dict[str, Any]) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    """Flatten contracts without allowing ambiguous or repeated member nets."""
+    pairs = []
+    seen: set[str] = set()
+    for contract in config.get("usb_routing_contracts", []) or []:
+        if not isinstance(contract, dict) or not contract.get("segments"):
+            raise ValueError("USB routing contract has no segments")
+        if not isinstance(contract.get("reference_net"), str) or not contract["reference_net"]:
+            raise ValueError("USB differential routing requires an explicit reference net")
+        for key, default in (("impedance_ohm", 90), ("impedance_tolerance", 0.1),
+                             ("max_skew_mm", 0.5)):
+            value = contract.get(key, default)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+                raise ValueError(f"invalid USB routing contract {key}: {value!r}")
+        for segment in contract["segments"]:
+            p, n = segment.get("positive_net"), segment.get("negative_net")
+            if (not isinstance(p, str) or not isinstance(n, str) or
+                    not p.endswith("_DP") or n != p[:-3] + "_DM" or
+                    any(c in p + n for c in "*?[]") or p.startswith("-") or n.startswith("-") or
+                    p in seen or n in seen):
+                raise ValueError(f"invalid or repeated USB differential members: {p!r}, {n!r}")
+            seen.update((p, n))
+            pairs.append((contract, segment))
+    return pairs
+
+
+def _usb_stackup(board: Path, runtime: dict[str, str], floors: dict[str, float],
+                 contract: dict[str, Any], nets: list[str], timeout: float,
+                 *, calculate: bool = False) -> dict[str, Any]:
+    """Validate native stackup and either verify or calculate symmetric geometry."""
+    script = """
+import contextlib, json, math, sys
+from kicad_parser import parse_kicad_pcb, extract_stackup
+from net_queries import expand_net_patterns, resolve_return_net_id
+from impedance import calculate_impedance_for_layer, calculate_width_for_impedance
+path, gap, width, target, tol, nets, reference, calculate, segments = sys.argv[1], float(sys.argv[2]), float(sys.argv[3]), float(sys.argv[4]), float(sys.argv[5]), json.loads(sys.argv[6]), sys.argv[7], sys.argv[8] == '1', json.loads(sys.argv[9])
+launch_gap, launch_width = gap, width
+with contextlib.redirect_stdout(sys.stderr):
+    pcb = parse_kicad_pcb(path)
+    layers = extract_stackup(open(path, encoding='utf-8').read())
+    if [x.name for x in layers if x.layer_type == 'copper'] != ['F.Cu', 'B.Cu']:
+        raise ValueError('USB requires an explicitly specified two-layer stackup')
+    if len(layers) != 3 or layers[1].layer_type not in ('core', 'prepreg'):
+        raise ValueError('unsupported USB stackup dielectric structure')
+    if any(not math.isfinite(x.thickness) or x.thickness <= 0 for x in layers) or not math.isfinite(layers[1].epsilon_r) or layers[1].epsilon_r <= 1:
+        raise ValueError('USB stackup must specify copper thickness, dielectric thickness and epsilon_r')
+    if set(expand_net_patterns(pcb, nets)) != set(nets):
+        raise ValueError('USB net selection is absent or ambiguous')
+    for name in nets:
+        ids = [nid for nid, net in pcb.nets.items() if net.name == name]
+        if len(ids) != 1 or resolve_return_net_id(pcb, ids[0])[1] != reference:
+            raise ValueError('USB reference net does not match router return domain for ' + name)
+    pcb.board_info.stackup = layers
+    if calculate:
+        # The router has one width/gap for both layers. Search widths using
+        # the same nominal-stackup impedance function used for verification.
+        # The bounded gap search includes the floor and logarithmically spans
+        # up to 100 mm; dimensions outside these bounds are not routable here.
+        min_width, min_gap = width, gap
+        max_width, max_gap = 100.0, 100.0
+        if min_width > max_width or min_gap > max_gap:
+            raise ValueError('USB routing floors exceed geometry search bounds')
+        def impedance(layer, w, g):
+            z = calculate_impedance_for_layer(pcb, layer, w, spacing=g).get('zdiff', 0)
+            if not math.isfinite(z) or z <= 0:
+                raise ValueError('invalid calculated USB impedance on ' + layer)
+            return z
+        def width_at(layer, g, wanted):
+            lo, hi = min_width, max_width
+            for _ in range(64):
+                mid = (lo + hi) / 2
+                if impedance(layer, mid, g) > wanted:
+                    lo = mid
+                else:
+                    hi = mid
+            return (lo + hi) / 2
+        gaps = [min_gap]
+        while gaps[-1] < max_gap:
+            gaps.append(min(max_gap, gaps[-1] * 1.1))
+        for candidate_gap in gaps:
+            low, high = min_width, max_width
+            for layer in ('F.Cu', 'B.Cu'):
+                if impedance(layer, max_width, candidate_gap) > target * (1 + tol):
+                    low = max_width + 1
+                    break
+                if impedance(layer, min_width, candidate_gap) < target * (1 - tol):
+                    low = max_width + 1
+                    break
+                low = max(low, width_at(layer, candidate_gap, target * (1 + tol)))
+                high = min(high, width_at(layer, candidate_gap, target * (1 - tol)))
+            if low <= high:
+                # Prefer the native target-width solution when it fits the
+                # common tolerance interval; otherwise use the bounded solve.
+                solved = calculate_width_for_impedance(
+                    pcb, 'F.Cu', target, spacing=candidate_gap, is_differential=True
+                ).get('calculated_width_mm', 0)
+                if not math.isfinite(solved) or not low <= solved <= high:
+                    solved = width_at('F.Cu', candidate_gap, target)
+                width = min(high, max(low, solved))
+                gap = candidate_gap
+                break
+        else:
+            raise ValueError('no symmetric USB geometry within routing floors and impedance tolerance')
+    result = {}
+    for layer in ('F.Cu', 'B.Cu'):
+        z = calculate_impedance_for_layer(pcb, layer, width, spacing=gap).get('zdiff', 0)
+        if not math.isfinite(z) or z <= 0 or abs(z - target) > target * tol:
+            raise ValueError('USB geometry is outside impedance tolerance on ' + layer)
+        result[layer] = {'width_mm': width, 'gap_mm': gap, 'estimated_ohm': z}
+    bounds = []
+    pads = [p for fp in pcb.footprints.values() for p in fp.pads]
+    for segment in segments:
+        if not calculate or any(segment.get(p + '_net') not in nets for p in ('positive', 'negative')):
+            continue
+        for polarity in ('positive', 'negative'):
+            net = segment.get(polarity + '_net')
+            if net not in nets:
+                continue
+            for side in ('from', 'to'):
+                endpoints = segment.get(polarity + '_' + side, [])
+                if len(endpoints) <= 1:
+                    continue
+                refs = {ep['ref'] for ep in endpoints}
+                pins = [str(ep['pin']) for ep in endpoints]
+                if len(refs) != 1 or len(set(pins)) != len(pins):
+                    raise ValueError('USB alias group must contain distinct pads on one component')
+                ref = next(iter(refs))
+                matches = [[p for p in pads if p.component_ref == ref and str(p.pad_number) == pin and p.net_name == net] for pin in pins]
+                if any(not match for match in matches):
+                    continue
+                if any(len(match) != 1 for match in matches):
+                    raise ValueError('USB alias pad geometry is ambiguous')
+                contacts = [match[0] for match in matches]
+                corners = []
+                for pad in contacts:
+                    ortho_delta = abs(pad.rotation - round(pad.rotation / 90.0) * 90.0)
+                    if (pad.pad_type == 'np_thru_hole' or pad.shape == 'custom' or
+                            pad.hole_x is not None or pad.hole_y is not None or
+                            1e-9 < ortho_delta <= 1.0 or
+                            not all(math.isfinite(v) for v in (pad.global_x, pad.global_y, pad.size_x, pad.size_y, pad.rect_rotation)) or
+                            pad.size_x <= 0 or pad.size_y <= 0):
+                        raise ValueError('unsupported USB alias pad geometry')
+                    angle = math.radians(pad.rect_rotation)
+                    co, si = math.cos(angle), math.sin(angle)
+                    corners.append([(pad.global_x + x * co - y * si, pad.global_y + x * si + y * co)
+                                    for x in (-pad.size_x / 2, pad.size_x / 2)
+                                    for y in (-pad.size_y / 2, pad.size_y / 2)])
+                envelope = [min(x for cs in corners for x, y in cs) - launch_gap - launch_width,
+                            min(y for cs in corners for x, y in cs) - launch_gap - launch_width,
+                            max(x for cs in corners for x, y in cs) + launch_gap + launch_width,
+                            max(y for cs in corners for x, y in cs) + launch_gap + launch_width]
+                max_length = 0.0
+                for i, a in enumerate(contacts):
+                    for j in range(i + 1, len(contacts)):
+                        b = contacts[j]
+                        dx, dy = b.global_x - a.global_x, b.global_y - a.global_y
+                        distance = math.hypot(dx, dy)
+                        if distance <= 0:
+                            raise ValueError('coincident USB alias contacts')
+                        nx, ny = -dy / distance, dx / distance
+                        half = max(abs((x - p.global_x) * nx + (y - p.global_y) * ny)
+                                   for p, cs in zip(contacts, corners) for x, y in cs)
+                        max_length = max(max_length, distance + 2 * (half + launch_gap + launch_width))
+                bounds.append({'segment_id': segment['id'], 'polarity': polarity, 'side': side,
+                               'ref': ref, 'pins': pins, 'max_length_mm': max_length,
+                               'envelope_mm': envelope})
+    result_bounds = bounds
+print(json.dumps({'layers': [vars(x) for x in layers], 'planned_geometry': result,
+                  'contact_join_bounds': result_bounds}))
+"""
+    try:
+        result = subprocess.run(
+            [runtime["python"], "-c", script, str(board), str(floors["clearance"]),
+             str(floors["track_width"]), str(contract.get("impedance_ohm", 90)),
+             str(contract.get("impedance_tolerance", 0.1)), json.dumps(nets), contract["reference_net"],
+             "1" if calculate else "0", json.dumps(contract.get("segments", []))],
+            cwd=Path(runtime["root"]) / "py_router", capture_output=True, text=True,
+            check=True, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise KicadRoutingToolsTimeoutError("KiCadRoutingTools timed out resolving USB stackup") from exc
+    except subprocess.CalledProcessError as exc:
+        raise ValueError(f"unsupported USB stackup or net selection: {exc.stderr.strip()}") from exc
+    return json.loads(result.stdout)
+
+def _usb_bounded_launches_enabled(config: dict[str, Any]) -> bool:
+    value = config.get("usb_review_allow_bounded_launches", False)
+    if not isinstance(value, bool):
+        raise ValueError("usb_review_allow_bounded_launches must be a boolean")
+    if value and config.get("usb_geometry_mode") != "engineering_review":
+        raise ValueError("bounded USB launches require engineering_review mode")
+    return value
+
+
+def calculate_usb_review_geometry(
+    board: Path, config: dict[str, Any], contract: dict[str, Any], nets: list[str],
+    *, runtime: dict[str, str] | None = None, floors: dict[str, float] | None = None,
+    timeout: float | None = None,
+) -> dict[str, Any]:
+    """Calculate nominal USB geometry for engineering review, never fabrication."""
+    if config.get("usb_geometry_mode") != "engineering_review":
+        raise ValueError("USB calculated geometry requires explicit engineering_review mode")
+    bounded_launches = _usb_bounded_launches_enabled(config)
+    target, tolerance = contract.get("impedance_ohm", 90), contract.get("impedance_tolerance", 0.1)
+    if (isinstance(target, bool) or not isinstance(target, (int, float)) or target != 90 or
+            isinstance(tolerance, bool) or not isinstance(tolerance, (int, float)) or
+            not math.isfinite(tolerance) or not 0 < tolerance <= 0.1):
+        raise ValueError("USB review geometry requires 90 ohms and at most 10% tolerance")
+    board = Path(board)
+    if runtime is None:
+        runtime = preflight_kicad_routing_tools(config)
+    if floors is None:
+        floors = _project_routing_floors(_routing_project(board, config), config)
+    for key in ("track_width", "clearance"):
+        value = floors.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+            raise ValueError(f"invalid USB routing floor {key}")
+    if timeout is None:
+        timeout = float(config.get("kicad_routing_tools_timeout_s", 120))
+    stackup = _usb_stackup(board, runtime, floors, contract, nets, timeout, calculate=True)
+    geometry = stackup["planned_geometry"]
+    profile = {
+        "provenance": "calculated_unconfirmed",
+        "fabrication_approved": False,
+        "source": "Pinned KiCadRoutingTools nominal-stackup differential impedance solver",
+        "stackup_sha256": hashlib.sha256(json.dumps(
+            stackup["layers"], sort_keys=True, separators=(",", ":")
+        ).encode()).hexdigest(),
+        "stackup": stackup,
+        "geometry_by_layer": geometry,
+        "max_return_via_distance_mm": 1.0,
+        "assumptions": [
+            "Nominal native stackup and differential microstrip model; no fabrication tolerances.",
+            "Outer-layer soldermask is not included in the pinned differential microstrip model.",
+            "Continuous reference plane assumed; actual routed copper requires independent verification.",
+            "1.0 mm return-via distance is an engineering criterion, not fabricator approval.",
+        ],
+    }
+    if bounded_launches:
+        main = geometry["F.Cu"]
+        profile["launch_policy"] = {
+            "mode": "bounded_uncontrolled",
+            "width_mm": floors["track_width"],
+            "gap_mm": floors["clearance"],
+            "max_length_mm": 2 * (main["width_mm"] + main["gap_mm"]),
+            "contact_join_bounds": stackup["contact_join_bounds"],
+            "provenance": "uncontrolled_launch",
+        }
+    return profile
+
+
+def _require_krt_strict_coupled(runtime: dict[str, str], timeout: float, *,
+                                bounded_launches: bool = False) -> None:
+    """Check the installed frontend before attempting any USB pair route."""
+    root = Path(runtime["root"])
+    try:
+        result = subprocess.run(
+            [runtime["python"], str(root / "py_router" / "route_diff.py"), "--help"],
+            cwd=root, capture_output=True, text=True, timeout=min(timeout, 30),
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise KicadRoutingToolsUnavailableError(
+            f"Cannot check strict coupled routing capability: {exc}"
+        ) from exc
+    if result.returncode or "--require-coupled" not in result.stdout:
+        raise KicadRoutingToolsUnavailableError(
+            "KiCadRoutingTools lacks --require-coupled; apply "
+            "deploy/tuning-i7/kicad-routing-tools-strict-coupled.patch to a separate "
+            "pinned checkout and configure kicad_routing_tools_path to that checkout"
+        )
+    if bounded_launches and "--usb-bounded-launch-policy" not in result.stdout:
+        raise KicadRoutingToolsUnavailableError(
+            "KiCadRoutingTools lacks --usb-bounded-launch-policy; bounded USB "
+            "review launches cannot be routed by this native checkout"
+        )
+
+
+def _require_coupled_usb(stats: dict[str, Any], positive: str, negative: str, *,
+                         allow_bounded_local: bool = False) -> None:
+    summaries = stats["json_summaries"]
+    if len(summaries) != 1:
+        raise RuntimeError("USB differential router did not report exactly one result")
+    summary = summaries[0]
+    reports = summary.get("pair_reports", [])
+    fallback = summary.get("single_ended_fallback")
+    if (not isinstance(reports, list) or len(reports) != 1 or
+            not isinstance(reports[0], dict) or reports[0].get("p_net") != positive or
+            reports[0].get("n_net") != negative or
+            reports[0].get("outcome") not in (("coupled", "bounded_local") if allow_bounded_local else ("coupled",)) or
+            reports[0].get("incomplete_members") != [] or summary.get("failed") != 0 or
+            not isinstance(summary.get("successful"), int) or summary["successful"] < 1 or
+            summary.get("polarity_swapped_pairs") != [] or summary.get("target_swaps") != [] or
+            summary.get("single_ended_followup_nets") != [] or
+            not isinstance(fallback, dict) or fallback.get("attempted") != []):
+        raise RuntimeError(f"USB differential pair was not fully coupled: {positive}, {negative}; {summary!r}")
+    if reports[0]["outcome"] == "bounded_local":
+        pair = reports[0].get("pair")
+        if (not isinstance(pair, str) or not pair or summary.get("bounded_local_pairs") != [pair] or
+                summary.get("routed_diff_pairs") != []):
+            raise RuntimeError("USB bounded local pair summary is invalid")
+
+
+def _require_usb_bounded_receipt(stats: dict[str, Any], segment: dict[str, Any],
+                                 policy: dict[str, Any]) -> dict[str, Any]:
+    receipts = stats["json_summaries"][0].get("usb_bounded_launch_receipts")
+    if not isinstance(receipts, list) or len(receipts) != 1 or not isinstance(receipts[0], dict):
+        raise RuntimeError("USB bounded launch receipt is missing")
+    receipt = receipts[0]
+    if (receipt.get("mode") != "bounded_uncontrolled" or
+            receipt.get("main_geometry") not in ("coupled", "local_uncontrolled") or
+            receipt.get("impedance_status") != "not_90_ohm_controlled_at_spans" or
+            not isinstance(receipt.get("spans"), list)):
+        raise RuntimeError("USB bounded launch receipt is invalid")
+    if (receipt["main_geometry"] == "local_uncontrolled" and
+            segment.get("id") not in ("connector_esd", "series_mcu")):
+        raise RuntimeError("USB main interconnect cannot be an uncontrolled local link")
+    nets = {segment["positive_net"], segment["negative_net"]}
+    local_counts = {net: 0 for net in nets}
+    launches = set()
+    joins = {}
+    for span in receipt["spans"]:
+        if not isinstance(span, dict) or span.get("net") not in nets or span.get("provenance") != "uncontrolled_launch":
+            raise RuntimeError("USB bounded launch receipt contains an invalid span")
+        kind = span.get("kind")
+        if kind not in ("alias_join", "terminal_launch", "local_link"):
+            raise RuntimeError("USB bounded launch receipt contains an unknown span")
+        try:
+            measured = sum(math.hypot(float(row["end"][0]) - float(row["start"][0]),
+                                      float(row["end"][1]) - float(row["start"][1]))
+                           for row in span["segments"])
+            length = float(span["length_mm"])
+            if (not math.isfinite(length) or not math.isfinite(measured) or length < 0 or
+                    abs(length - measured) > 1e-6 or
+                    (kind != "alias_join" and
+                     length > policy["max_length_mm"] * (2 if kind == "local_link" else 1) + 1e-6) or
+                    any(not math.isfinite(float(row["width_mm"])) or
+                        abs(float(row["width_mm"]) - policy["width_mm"]) > 1e-6
+                        for row in span["segments"])):
+                raise ValueError
+        except (KeyError, TypeError, ValueError, IndexError, OverflowError) as exc:
+            raise RuntimeError("USB bounded launch span is unbounded or malformed") from exc
+        if kind == "local_link":
+            local_counts[span["net"]] += 1
+        elif kind == "terminal_launch":
+            key = (span["net"], span.get("side"))
+            if key in launches or key[1] not in ("src", "tgt"):
+                raise RuntimeError("USB bounded launch terminals are ambiguous")
+            launches.add(key)
+        else:
+            key = (span["net"], span.get("side"))
+            joins.setdefault(key, []).append(span)
+    if receipt["main_geometry"] == "coupled":
+        if any(local_counts.values()) or launches != {(n, s) for n in nets for s in ("src", "tgt")}:
+            raise RuntimeError("USB bounded launch receipt lacks paired terminal launches")
+    elif launches or any(count != 1 for count in local_counts.values()):
+        raise RuntimeError("USB bounded local-link receipt lacks both members")
+    for polarity in ("positive", "negative"):
+        net = segment[f"{polarity}_net"]
+        for side in ("from", "to"):
+            declared = {(ep["ref"], str(ep["pin"])) for ep in segment[f"{polarity}_{side}"]}
+            group = joins.pop((net, side), [])
+            try:
+                edges = [((s["from"]["ref"], str(s["from"]["pin"])),
+                          (s["to"]["ref"], str(s["to"]["pin"]))) for s in group]
+            except (KeyError, TypeError) as exc:
+                raise RuntimeError("USB alias join receipt is malformed") from exc
+            if (len(edges) != len(declared) - 1 or
+                    any(a not in declared or b not in declared or a == b or a[0] != b[0] for a, b in edges) or
+                    (edges and (len({b for _, b in edges}) != 1 or
+                                {a for a, _ in edges} | {edges[0][1]} != declared))):
+                raise RuntimeError("USB alias joins do not cover the declared component contacts")
+            if edges:
+                candidates = [b for b in policy.get("contact_join_bounds", [])
+                              if b.get("segment_id") == segment["id"] and b.get("polarity") == polarity
+                              and b.get("side") == side and {(b.get("ref"), str(p)) for p in b.get("pins", [])} == declared]
+                if len(candidates) != 1:
+                    raise RuntimeError("USB alias join has no matching physical contact bound")
+                try:
+                    bound = candidates[0]
+                    limit = float(bound["max_length_mm"])
+                    xmin, ymin, xmax, ymax = map(float, bound["envelope_mm"])
+                    if not all(math.isfinite(v) for v in (limit, xmin, ymin, xmax, ymax)) or limit <= 0 or xmin > xmax or ymin > ymax:
+                        raise ValueError
+                    for span in group:
+                        if float(span["length_mm"]) > limit + 1e-6:
+                            raise ValueError
+                        for row in span["segments"]:
+                            for endpoint in ("start", "end"):
+                                x, y = map(float, row[endpoint])
+                                if not (math.isfinite(x) and math.isfinite(y) and
+                                        xmin - 1e-6 <= x <= xmax + 1e-6 and
+                                        ymin - 1e-6 <= y <= ymax + 1e-6):
+                                    raise ValueError
+                except (KeyError, TypeError, ValueError, OverflowError) as exc:
+                    raise RuntimeError("USB alias join exceeds its physical contact bound") from exc
+    if joins:
+        raise RuntimeError("USB alias joins target undeclared contacts")
+    return receipt
+
+
+def _usb_available_pairs(board: Path, runtime: dict[str, str], pairs: list,
+                         scope: str, timeout: float) -> tuple[list, list[str]]:
+    script = """
+import contextlib, json, sys
+from kicad_parser import parse_kicad_pcb
+with contextlib.redirect_stdout(sys.stderr):
+    pcb = parse_kicad_pcb(sys.argv[1])
+print(json.dumps([[p.component_ref, str(p.pad_number), p.net_name] for fp in pcb.footprints.values() for p in fp.pads]))
+"""
+    try:
+        result = subprocess.run([runtime["python"], "-c", script, str(board)],
+                                cwd=Path(runtime["root"]) / "py_router",
+                                capture_output=True, text=True, check=True, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        raise KicadRoutingToolsTimeoutError("KiCadRoutingTools timed out resolving USB terminals") from exc
+    except subprocess.CalledProcessError as exc:
+        raise ValueError(f"could not resolve USB terminals: {exc.stderr.strip()}") from exc
+    pads = {(ref, pin, net) for ref, pin, net in json.loads(result.stdout)}
+    refs_pins = {(ref, pin) for ref, pin, _ in pads}
+    available, deferred = [], []
+    for contract, segment in pairs:
+        expected = []
+        for polarity in ("positive", "negative"):
+            net = segment[f"{polarity}_net"]
+            for end in ("from", "to"):
+                endpoints = segment.get(f"{polarity}_{end}")
+                if not isinstance(endpoints, list) or not endpoints:
+                    raise ValueError(f"USB segment {segment.get('id')} has missing terminals")
+                expected.extend((ep["ref"], str(ep["pin"]), net) for ep in endpoints)
+        wrong = [item for item in expected if item not in pads and item[:2] in refs_pins]
+        if wrong:
+            raise ValueError(f"USB terminals assigned to wrong nets: {wrong!r}")
+        missing = [item for item in expected if item not in pads]
+        if missing:
+            if scope != "leaf":
+                raise ValueError(f"USB segment {segment.get('id')} missing terminals: {missing!r}")
+            deferred.append(segment["id"])
+        else:
+            available.append((contract, segment))
+    return available, deferred
+
 def route_with_kicad_routing_tools(
     kicad_pcb_path: str, output_path: str, config: dict[str, Any]
 ) -> dict[str, Any]:
@@ -1107,6 +1575,7 @@ def route_with_kicad_routing_tools(
     output_board = Path(output_path).resolve()
     if input_board == output_board:
         raise ValueError("KiCadRoutingTools input and output board paths must be distinct")
+    _usb_bounded_launches_enabled(config)
     output_board.unlink(missing_ok=True)
     runtime = preflight_kicad_routing_tools(config)
     project = _routing_project(input_board, config)
@@ -1123,6 +1592,20 @@ def route_with_kicad_routing_tools(
             f"staged input retained at {staged}"
         )
     groups = _width_groups(staged, runtime, floors["track_width"], remaining, config)
+    usb_pairs = _usb_pairs(config)
+    usb_nets = {segment[key] for _, segment in usb_pairs for key in ("positive_net", "negative_net")}
+    if usb_pairs and any("*" in nets for _, nets in groups):
+        raise ValueError("USB routing cannot use a wildcard single-ended worklist")
+    if usb_pairs and config.get("kicad_routing_tools_layers") not in (None, [], ["F.Cu", "B.Cu"]):
+        raise ValueError("USB differential routing supports only the declared two-layer stackup")
+    available, deferred = ([], [])
+    if usb_pairs:
+        remaining = timeout - (time.monotonic() - started)
+        if remaining <= 0:
+            raise KicadRoutingToolsTimeoutError("KiCadRoutingTools timed out before USB terminal resolution")
+        available, deferred = _usb_available_pairs(
+            staged, runtime, usb_pairs, config.get("usb_routing_scope", "parent"), remaining,
+        )
     ground_keepouts = None
     ground_zone_name = f"KiCraft local ground reservation {uuid.uuid4().hex}"
     if config.get("routing_local_ground_reservations"):
@@ -1151,11 +1634,72 @@ def route_with_kicad_routing_tools(
     groups = [
         (width, remaining_nets)
         for width, nets in groups
-        if (remaining_nets := [net for net in nets if net not in plane_grounds])
+        if (remaining_nets := [net for net in nets if net not in plane_grounds and net not in usb_nets])
     ]
     passes = []
     current = staged
-    if not groups:
+    usb_receipts = []
+    for index, (contract, segment) in enumerate(available, 1):
+        remaining = timeout - (time.monotonic() - started)
+        if remaining <= 0:
+            raise KicadRoutingToolsTimeoutError("KiCadRoutingTools timed out before USB pair routing")
+        nets = [segment["positive_net"], segment["negative_net"]]
+        if config.get("usb_geometry_mode") == "engineering_review":
+            profile = calculate_usb_review_geometry(
+                current, config, contract, nets, runtime=runtime, floors=floors, timeout=remaining,
+            )
+            stackup, stackup_hash = profile["stackup"], profile["stackup_sha256"]
+            width = profile["geometry_by_layer"]["F.Cu"]["width_mm"]
+            gap = profile["geometry_by_layer"]["F.Cu"]["gap_mm"]
+            approval = None
+        else:
+            approval, width, gap = require_usb_fabrication_approval(config, floors)
+            stackup = _usb_stackup(current, runtime, {"track_width": width, "clearance": gap},
+                                   contract, nets, remaining)
+            stackup_hash = hashlib.sha256(json.dumps(
+                stackup["layers"], sort_keys=True, separators=(",", ":")
+            ).encode()).hexdigest()
+            if approval.get("stackup_sha256") != stackup_hash:
+                raise ValueError(f"USB controlled impedance requires fabricator approval for stackup {stackup_hash}")
+            profile = {"provenance": "fabricator_approved", "fabrication_approved": True,
+                       "source": approval["source"], "stackup_sha256": stackup_hash,
+                       "stackup": stackup, "geometry_by_layer": approval["geometry_by_layer"]}
+        remaining = timeout - (time.monotonic() - started)
+        if remaining <= 0:
+            raise KicadRoutingToolsTimeoutError("KiCadRoutingTools timed out before USB pair routing")
+        candidate = output_board.with_name(f"{output_board.stem}.krt-usb-{index:02d}.kicad_pcb")
+        pass_config = dict(config, kicad_routing_tools_timeout_s=remaining, _krt_deadline=started + timeout)
+        if "launch_policy" in profile:
+            pass_config["_usb_bounded_launch_policy"] = {**profile["launch_policy"], "segment": segment}
+        stats = _route_krt_pass(str(current), str(candidate), pass_config, nets=nets,
+                                track_width=width, usb_contract=contract, usb_gap=gap)
+        _require_coupled_usb(
+            stats, *nets,
+            allow_bounded_local=(
+                config.get("usb_geometry_mode") == "engineering_review" and
+                _usb_bounded_launches_enabled(config) and "launch_policy" in profile and
+                segment.get("id") in ("connector_esd", "series_mcu")),
+        )
+        native_receipt = (_require_usb_bounded_receipt(stats, segment, profile["launch_policy"])
+                          if "launch_policy" in profile else None)
+        if native_receipt is not None:
+            outcome = stats["json_summaries"][0]["pair_reports"][0]["outcome"]
+            if (outcome == "bounded_local") != (native_receipt["main_geometry"] == "local_uncontrolled"):
+                raise RuntimeError("USB bounded local outcome disagrees with launch receipt")
+        usb_receipts.append({"contract_id": contract["id"], "segment_id": segment["id"],
+                             "input_sha256": hashlib.sha256(current.read_bytes()).hexdigest(),
+                             "stackup_sha256": stackup_hash, "stackup": stackup,
+                             "fabrication_approval": approval, "geometry_profile": profile,
+                             "native_launch_receipt": native_receipt})
+        passes.append(stats)
+        current = candidate
+    if _usb_bounded_launches_enabled(config) and config.get("usb_routing_scope", "parent") != "leaf":
+        for contract in {row["contract_id"] for row in usb_receipts}:
+            if not any(row["contract_id"] == contract and
+                       row["native_launch_receipt"]["main_geometry"] == "coupled"
+                       for row in usb_receipts):
+                raise RuntimeError(f"USB contract {contract} has no full-width coupled main copper")
+    if not groups and not available:
         # Keep the hash-bound staged plan immutable even without router passes.
         current = output_board.with_name(f"{output_board.stem}.krt-plane-connected.kicad_pcb")
         shutil.copy2(staged, current)
@@ -1222,6 +1766,8 @@ def route_with_kicad_routing_tools(
         total_vias=total("total_vias"),
         router_time_s=total("router_time_s"),
         json_summaries=[summary for item in passes for summary in item["json_summaries"]],
+        usb_routing_receipts=usb_receipts,
+        deferred_usb_segments=deferred,
         passes=passes,
     )
     if ground_plan is not None:
@@ -1233,7 +1779,8 @@ def _route_krt_pass(
     kicad_pcb_path: str,
     output_path: str,
     config: dict[str, Any],
-    *, nets: list[str], track_width: float,
+    *, nets: list[str], track_width: float, usb_contract: dict[str, Any] | None = None,
+    usb_gap: float | None = None,
 ) -> dict[str, Any]:
     """Route directly while preserving input copper and project design rules."""
     from kicraft.autoplacer.brain.copper_accounting import (
@@ -1251,6 +1798,11 @@ def _route_krt_pass(
 
     runtime = preflight_kicad_routing_tools(config)
     root = Path(runtime["root"])
+    if usb_contract is not None:
+        _require_krt_strict_coupled(
+            runtime, float(config.get("kicad_routing_tools_timeout_s", 120)),
+            bounded_launches=_usb_bounded_launches_enabled(config),
+        )
     output_board.unlink(missing_ok=True)
     input_copper = import_routed_copper(str(input_board))
 
@@ -1292,6 +1844,20 @@ def _route_krt_pass(
         # copper; new thermal VIPs belong to the qualified ground finisher.
         same_net_pad_clearance=floors["clearance"] if pad_via_keepouts else None,
     )
+    if usb_contract is not None:
+        command[1] = str(root / "py_router" / "route_diff.py")
+        command.extend([
+            "--require-coupled",
+            "--diff-pair-gap", str(usb_gap),
+            "--diff-pair-intra-match",
+            "--length-match-tolerance", str(usb_contract.get("max_skew_mm", 0.5)),
+        ])
+        if _usb_bounded_launches_enabled(config):
+            policy = config.get("_usb_bounded_launch_policy")
+            if not isinstance(policy, dict):
+                raise ValueError("bounded USB routing requires the calculated policy and declared segment")
+            command.extend(["--usb-bounded-launch-policy",
+                            json.dumps(policy, sort_keys=True, separators=(",", ":"))])
     timeout_s = float(config.get("kicad_routing_tools_timeout_s", 120))
     if "_krt_deadline" in config:
         timeout_s = min(timeout_s, config["_krt_deadline"] - time.monotonic())

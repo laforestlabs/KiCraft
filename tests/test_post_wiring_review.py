@@ -25,12 +25,19 @@ from kicraft.server.web import _REVIEW_FINDING_RE
 
 
 def _state() -> ConversationState:
-    return ConversationState(bom=BOM(
-        parts=[BomPart(ref="U1", value="x", symbol="Fake:X",
-                       footprint="Package_SO:SOIC-8", sheet="A")],
-        connections=[NetConnection(net_name="+3V3", sheet="A",
-                                   endpoints=[PinEndpoint(ref="U1", pin="1")])],
-    ))
+    return ConversationState.model_validate({
+        "review_coverage": {
+            "source_fingerprint": "0" * 64, "expected_refs": ["U1"], "included_refs": ["U1"],
+            "expected_nets": ["+3V3"], "included_nets": ["+3V3"],
+            "omitted_mandatory": [], "complete": True,
+        },
+        "bom": {
+            "parts": [{"ref": "U1", "value": "x", "symbol": "Fake:X",
+                       "footprint": "Package_SO:SOIC-8", "sheet": "A"}],
+            "connections": [{"net_name": "+3V3", "sheet": "A",
+                             "endpoints": [{"ref": "U1", "pin": "1"}]}],
+        },
+    })
 
 
 def _write_state(tmp_path: Path) -> Path:
@@ -104,7 +111,7 @@ def test_blocker_re_drives_wiring_once_and_persists_second_pass(tmp_path, monkey
     assert sj["stage_status"]["electrical_review"]["cost_usd"] == 0.05
 
 
-def test_skipped_review_closes_the_tab_without_durable_status(tmp_path, monkeypatch):
+def test_skipped_review_persists_incomplete_status(tmp_path, monkeypatch):
     monkeypatch.delenv("KICRAFT_ELECTRICAL_REVIEW", raising=False)
     sp = _write_state(tmp_path)
     monkeypatch.setattr(cli_app, "_maybe_electrical_review", lambda st, pd, **_: {
@@ -115,17 +122,22 @@ def test_skipped_review_closes_the_tab_without_durable_status(tmp_path, monkeypa
     # The tab opened and closed (no spinner left behind) ...
     assert len(_events_of("stage_start", events)) == 1
     assert len(_events_of("stage_done", events)) == 1
-    # ... but no durable outcome is claimed for a review that never ran.
     sj = json.loads(sp.read_text())
-    assert "electrical_review" not in (sj.get("stage_status") or {})
+    status = sj["stage_status"]["electrical_review"]
+    assert status["ok"] is False and status["semantic_clean"] is None
+    assert status["diagnostics"][0]["code"] == "electrical_review_incomplete"
 
 
-def test_env_opt_out_emits_nothing(tmp_path, monkeypatch):
+def test_env_opt_out_persists_unreviewed(tmp_path, monkeypatch):
     monkeypatch.setenv("KICRAFT_ELECTRICAL_REVIEW", "0")
     sp = _write_state(tmp_path)
     events: list[dict] = []
     res = run_post_wiring_review(sp, tmp_path, events.append)
-    assert res["ran"] is False and events == []
+    assert res["ran"] is False
+    saved = json.loads(sp.read_text())
+    assert saved["stage_status"]["electrical_review"]["ok"] is False
+    assert saved["stage_status"]["electrical_review"]["semantic_clean"] is None
+    assert _events_of("stage_done", events)[0]["ok"] is False
 
 
 def test_review_crash_is_fail_soft(tmp_path, monkeypatch):
@@ -231,3 +243,16 @@ def test_lifecycle_records_execution_mode_and_buckets_spend_separately(tmp_path,
     assert lifecycle["execution_mode"] == "web"
     assert lifecycle["post_wiring_review"]["ran"] is False
     assert lifecycle["post_wiring_review"]["cost_usd"] == 0.0
+
+
+def test_wiring_replacement_invalidates_previous_clean_review():
+    state = _state()
+    state.stage_status["electrical_review"] = cli_app.StageStatus(
+        ok=True, provider_ok=True, schema_ok=True, semantic_clean=True,
+    )
+    cli_app._apply_slot(state, "wiring", {
+        "connections": [{"net_name": "GND", "sheet": "A",
+                         "endpoints": [{"ref": "U1", "pin": "1"}]}],
+    }, project_stem=None)
+    assert state.review_coverage is None
+    assert "electrical_review" not in state.stage_status

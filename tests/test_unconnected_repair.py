@@ -124,7 +124,8 @@ def test_gap_cap_scales_to_board_diagonal(tmp_path):
     assert _gap_cap_mm(big, {"signal_repair_max_mm": 45.0}) == 45.0
 
 
-def test_repair_ties_track_to_track_edge(tmp_path):
+@pytest.mark.parametrize("paired", [False, True])
+def test_repair_ties_track_to_track_edge(tmp_path, paired):
     """C1 v2 track-endpoint anchors: an unconnected edge whose BOTH endpoints
     are dangling track stubs (run_10's USB_DN/XIN signature) was skipped
     no_pad_anchor under the pads-only rule; it must now tie from the bare
@@ -173,11 +174,28 @@ def test_repair_ties_track_to_track_edge(tmp_path):
         board.Add(t)
     board.Save(path)
 
-    s = repair_unconnected_signals(path, {})
-
-    assert s["edges"] == 1
-    assert not any("no_pad_anchor" in sk for sk in s["skipped"]), s
-    assert s["tied"] == 1, f"track<->track edge not tied: {s}"
+    from pathlib import Path
+    original = Path(path).read_bytes()
+    cfg = {}
+    if paired:
+        cfg["usb_routing_contracts"] = [{
+            "id": "usb", "reference_net": "GND", "segments": [{
+                "id": "port", "positive_net": "SIG", "negative_net": "OTHER",
+                "positive_from": [{"ref": "J1", "pin": "1"}],
+                "positive_to": [{"ref": "J2", "pin": "1"}],
+                "negative_from": [{"ref": "J1", "pin": "2"}],
+                "negative_to": [{"ref": "J2", "pin": "2"}],
+            }],
+        }]
+    s = repair_unconnected_signals(path, cfg)
+    if paired:
+        assert s["tied"] == 0
+        assert any("USB differential owner required" in reason for reason in s["skipped"])
+        assert Path(path).read_bytes() == original
+    else:
+        assert s["edges"] == 1
+        assert not any("no_pad_anchor" in sk for sk in s["skipped"]), s
+        assert s["tied"] == 1, f"track<->track edge not tied: {s}"
 
 
 def test_repair_ties_dogleg_around_partial_wall(tmp_path):

@@ -136,6 +136,18 @@ def _pad_number_key(pad: Any) -> tuple[int, int | str]:
     return (0, int(number)) if number.isdigit() else (1, number)
 
 
+def declared_usb_nets(cfg: dict[str, Any]) -> set[str]:
+    """Exact pair nets reserved for the differential owner, never name guesses."""
+    from kicraft.design.models import USBRoutingContract
+
+    return {
+        name
+        for raw in cfg.get("usb_routing_contracts", [])
+        for segment in USBRoutingContract.model_validate(raw).segments
+        for name in (segment.positive_net, segment.negative_net)
+    }
+
+
 def signal_escape_specs(
     board: Any,
     cfg: dict[str, Any] | None = None,
@@ -156,6 +168,7 @@ def signal_escape_specs(
     floors = fab_floors(cfg)
     width_mm = floors["track_mm"]
     power_nets = set(cfg.get("power_nets", ()))
+    paired_nets = declared_usb_nets(cfg)
     specs: list[BreakoutSpec] = []
     for footprint in sorted(board.GetFootprints(), key=lambda fp: fp.GetReferenceAsString()):
         # Wider local output pads can be caged by the same earlier power
@@ -168,7 +181,7 @@ def signal_escape_specs(
         candidates = []
         pad_layers = {}
         for pad in footprint.Pads():
-            if pad.GetNetname() in power_nets:
+            if pad.GetNetname() in power_nets or pad.GetNetname() in paired_nets:
                 continue
             is_signal = (
                 pad.GetAttribute() in (pcbnew.PAD_ATTRIB_SMD, pcbnew.PAD_ATTRIB_CONN)

@@ -35,6 +35,8 @@ def _route_parent_board(
     from kicraft.autoplacer.kicad_routing_tools import KicadRoutingToolsTimeoutError
 
     routed_pcb = stamped_pcb.parent / "parent_routed.kicad_pcb"
+    # A failed or historical stamp must not inherit an earlier round's receipt.
+    Path(str(routed_pcb) + ".escape_ownership.json").unlink(missing_ok=True)
     # The parent route is a single KRT invocation over the whole composed net
     # set, and its in-run recovery ladder (rip -> #103 reconciliation) does not
     # fit the 120 s leaf cap -- see kicad_routing_tools_parent_timeout_s. The
@@ -233,6 +235,19 @@ def _route_parent_board(
             finally:
                 sidecar.unlink(missing_ok=True)
 
+    # Ground finishing is append-only. Certify it before guarded repairs,
+    # which may intentionally replace illegal or dangling routed copper.
+    if needs_ground_finish:
+        from kicraft.autoplacer.brain.copper_accounting import fingerprint_trace, fingerprint_via
+        from kicraft.autoplacer.kicad_routing_tools import _preservation_group
+        finished_copper = import_routed_copper(str(routed_pcb))
+        custody = {
+            name: _preservation_group(original_copper.get(name, []), finished_copper.get(name, []), fp)
+            for name, fp in (("traces", fingerprint_trace), ("vias", fingerprint_via))
+        }
+        if any(group["missing_count"] for group in custody.values()):
+            raise RuntimeError(f"ground finishing lost routed copper: {custody}")
+
     # Root parent has no interface anchors -- skip anchor validation.
     # Anchor completeness is a leaf-level gate, not a parent-level gate.
     validation = validate_routed_board(
@@ -283,16 +298,19 @@ def _route_parent_board(
     # Import all copper from the routed board (child + new parent traces +
     # any repair ties; must run AFTER the repair so its copper is captured).
     copper = import_routed_copper(str(routed_pcb))
+    ownership_path = Path(str(stamped_pcb) + ".escape_ownership.json")
+    if ownership_path.is_file():
+        from kicraft.autoplacer.brain.copper_accounting import attach_stamped_escape_ownership
+
+        ownership = json.loads(ownership_path.read_text())
+        validation["signal_escape_ownership"] = attach_stamped_escape_ownership(copper, ownership)
+        routed_ownership_path = Path(str(routed_pcb) + ".escape_ownership.json")
+        validation["signal_escape_ownership"]["receipt_path"] = str(routed_ownership_path)
+        if validation["signal_escape_ownership"]["unresolved_source_uuids"]:
+            validation["accepted"] = False
+            validation.setdefault("rejection_reasons", []).append("signal_escape_ownership_incomplete")
 
     if needs_ground_finish:
-        from kicraft.autoplacer.brain.copper_accounting import fingerprint_trace, fingerprint_via
-        from kicraft.autoplacer.kicad_routing_tools import _preservation_group
-        custody = {
-            name: _preservation_group(original_copper.get(name, []), copper.get(name, []), fp)
-            for name, fp in (("traces", fingerprint_trace), ("vias", fingerprint_via))
-        }
-        if any(group["missing_count"] for group in custody.values()):
-            raise RuntimeError(f"ground finishing lost routed copper: {custody}")
         validation["ground_finish_custody"] = custody
         if thermal_requirements:
             from kicraft.autoplacer.brain.gnd_pour import audit_thermal_ground
@@ -350,6 +368,12 @@ def _route_parent_board(
                 reasons.append(reason)
             validation["courtyard_overlaps"] = [o.to_dict() for o in (measured or [])]
 
+    if ownership_path.is_file():
+        import hashlib
+
+        ownership["routed_board_sha256"] = hashlib.sha256(routed_pcb.read_bytes()).hexdigest()
+        routed_ownership_path.write_text(json.dumps(ownership, indent=2, sort_keys=True) + "\n")
+
     return {
         "failed": False,
         "routed_board_path": str(routed_pcb),
@@ -399,7 +423,7 @@ def _attempt_illegal_geometry_repair(
     record: dict = {"ran": True, "kept": False}
     try:
         _geo_cfg = json.dumps({
-            k: cfg[k] for k in ("geometry_repair_max_rips",) if k in cfg
+            k: cfg[k] for k in ("geometry_repair_max_rips", "usb_routing_contracts") if k in cfg
         })
         run_pcbnew_script(
             "import json\n"
@@ -455,6 +479,7 @@ def _attempt_illegal_geometry_repair(
                 "signal_repair_max_mm",
                 "via_size_mm",
                 "via_drill_mm",
+                "usb_routing_contracts",
             )
             if k in cfg
         })

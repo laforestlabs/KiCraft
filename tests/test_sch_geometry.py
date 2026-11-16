@@ -63,6 +63,109 @@ def test_opposite_and_step() -> None:
     assert step(0.0, 0.0, "up", 2.54) == (0.0, -2.54)
 
 
+def test_hierarchical_and_local_label_text_do_not_overlap():
+    from kicraft.design.synthesis.router import (
+        HierLabelPlacement, NetLabel, RoutedSheet, WireSegment,
+        _label_rect, _rects_overlap, _resolve_label_collisions,
+    )
+
+    routed = RoutedSheet(
+        wires=[WireSegment(0, 0, 2.54, 0), WireSegment(0, 1.27, 2.54, 1.27)],
+        labels=[NetLabel("LOCAL_LONG_NAME", 2.54, 0)],
+        hier_labels=[HierLabelPlacement("HIER_LONG_NAME", "input", 2.54, 1.27)],
+    )
+    _resolve_label_collisions(routed, [], [])
+    local, hier = routed.labels[0], routed.hier_labels[0]
+    assert not _rects_overlap(
+        _label_rect(local.text, local.x_mm, local.y_mm, local.angle_deg),
+        _label_rect(hier.name, hier.x_mm, hier.y_mm, hier.angle_deg),
+    )
+    assert (local.x_mm, local.y_mm) == (2.54, 0)
+    assert (hier.x_mm, hier.y_mm) == (2.54, 1.27)
+    assert local.text == "LOCAL_LONG_NAME" and hier.name == "HIER_LONG_NAME"
+
+
+def test_label_fanout_keeps_connected_wire_and_clear_text():
+    from kicraft.design.synthesis.router import (
+        NetLabel, RoutedSheet, WireSegment, _label_rect, _rects_overlap,
+        _resolve_label_collisions,
+    )
+
+    routed = RoutedSheet(
+        wires=[WireSegment(-2.54, 0, 0, 0)],
+        labels=[NetLabel("SIGNAL_NAME", 0, 0), NetLabel("X" * 200, 0, 1.27)],
+    )
+    body = (-15, -1, -5, 1)
+    _resolve_label_collisions(routed, [body], [])
+    first, other = routed.labels
+    assert not _rects_overlap(
+        _label_rect(first.text, first.x_mm, first.y_mm, first.angle_deg),
+        _label_rect(other.text, other.x_mm, other.y_mm, other.angle_deg),
+    )
+    assert len(routed.wires) == 3
+    assert (routed.wires[1].x1_mm, routed.wires[1].y1_mm) == (0, 0)
+    assert (routed.wires[-1].x2_mm, routed.wires[-1].y2_mm) == (first.x_mm, first.y_mm)
+
+
+def test_capacitor_and_ground_clear_vendor_module_graphics():
+    from kicraft.design.models import BOM, BomPart, NetConnection, PinEndpoint, Sheet
+    from kicraft.design.synthesis.placement import place_sheet
+    from kicraft.design.synthesis.sch_geometry import placed_graphics_bounds
+
+    sheet = Sheet(name="MCU", stem="MCU", function="controller")
+    parts = [
+        BomPart(ref="U1", value="ESP32-S3-WROOM-1-N16R8",
+                symbol="esp32-s3-wroom-1-n16r8:ESP32-S3-WROOM-1",
+                footprint="esp32-s3-wroom-1-n16r8:WIRELM-SMD_ESP32-S3-WROOM-1", sheet="MCU"),
+        BomPart(ref="C1", value="100nF", symbol="Device:C",
+                footprint="Capacitor_SMD:C_0402_1005Metric", sheet="MCU"),
+    ]
+    bom = BOM(parts=parts, connections=[
+        NetConnection(net_name="+3V3", sheet="MCU", endpoints=[
+            PinEndpoint(ref="U1", pin="2"), PinEndpoint(ref="C1", pin="1")]),
+        NetConnection(net_name="GND", sheet="MCU", endpoints=[
+            PinEndpoint(ref="U1", pin="1"), PinEndpoint(ref="C1", pin="2")]),
+    ])
+    placed = {part.ref: part for part in place_sheet(sheet, parts, bom)}
+    module = placed["U1"]
+    body = placed_graphics_bounds(parts[0].symbol, 1, module.x_mm, module.y_mm, 0)
+    assert body is not None
+    assert placed["C1"].y_mm + 8.0 < body[1]
+
+
+def test_rotated_power_value_avoids_adjacent_hierarchical_label():
+    from kicraft.design.synthesis.emitter import _emit_power_symbol, _fit_leaf_page
+    from kicraft.design.synthesis.router import (
+        HierLabelPlacement, PowerSymbol, RoutedSheet, WireSegment,
+        _label_rect, _place_power_values, _power_value_rect, _rects_overlap,
+        _resolve_label_collisions,
+    )
+
+    routed = RoutedSheet(
+        wires=[WireSegment(-2.54, 0, 0, 0), WireSegment(0, 3, 2.54, 3)],
+        power_symbols=[PowerSymbol("power:GND", 0, 0, 90)],
+        hier_labels=[HierLabelPlacement("HUB75_ENABLE", "output", 0, 3, 0)],
+    )
+    original_power_wire = routed.wires[0]
+    obstacles = _place_power_values(routed, [])
+    _resolve_label_collisions(routed, obstacles, [])
+    power, label = routed.power_symbols[0], routed.hier_labels[0]
+    assert routed.wires[0] == original_power_wire
+    assert not _rects_overlap(
+        _power_value_rect(power),
+        _label_rect(label.name, label.x_mm, label.y_mm, label.angle_deg),
+    )
+    assert power.value_x_mm is not None and power.value_y_mm is not None
+    emitted = _emit_power_symbol(power, "leaf", "DEMO", "ground")
+    assert (f'(at {power.value_x_mm:g} {power.value_y_mm:g} 270)' in emitted)
+    _, fitted, _ = _fit_leaf_page([], [], routed)
+    fitted_power, fitted_label = fitted.power_symbols[0], fitted.hier_labels[0]
+    assert not _rects_overlap(
+        _power_value_rect(fitted_power),
+        _label_rect(fitted_label.name, fitted_label.x_mm,
+                    fitted_label.y_mm, fitted_label.angle_deg),
+    )
+
 # ---------- kicad-cli regression: transform matches KiCad ----------
 
 from kicraft.design.synthesis.symbol_library import (  # noqa: E402

@@ -141,13 +141,21 @@ explicit `ground_return.owner_ref` independently identifies the converter's
 ground pad; the placement owner is not assumed to have a ground terminal.
 Ground-return proof requires a shared native filled-copper island or a locally
 bonded via within the contract distance, not merely a nearby same-net via.
-Nested placement owners reserve in dependency order and use the same hard
-courtyard clearance throughout their connected ownership family. A single
-coupled bank tries interior anchor positions first; independent groups retain
-edge-first packing. Neither ordering removes legal candidate positions.
-Within each ownership-group search, unchanged obstacle envelopes are reused;
-candidate bounds are rebuilt per pose and applicable gap. The cache is rebuilt
-after installing a group's poses, so nested owners retain current geometry.
+Connected ownership families reserve transactionally before locking any member.
+Member-owners are enumerated in dependency order, then all remaining leaf
+domains are packed jointly with compatibility propagation. Candidate geometry
+starts from immutable rotated prototypes, avoiding accumulated translation drift.
+Only exactly matching complete physical/electrical pose domains may exchange
+reference labels to remove permutations. Failure memo storage is bounded by
+domain cardinality; eviction recomputes a failure instead of discarding poses.
+Nested primary-owner rotations favor inward dependent power ports. Joint banks
+try their coarse local-distance envelope lattice across allowed rotations before
+the exhaustive owner grids. Single-family fallback grids are center-first;
+independent families pack edge-first rather than splitting a wide fallback
+canvas. Every original allowed rotation, grid and original pose remains
+available, with unchanged fixed-part, clearance, current and ground checks.
+Unchanged obstacle envelopes are reused within a group search and rebuilt after
+installing its poses, so nested owners retain current geometry.
 CH224K VDD bypasses use the same plane-backed ground proof: the supply terminal
 stays within 3 mm of VDD, while the buried exposed ground pad and capacitor ground
 must bond to common filled copper. A 3 mm ground-pad-centre rule would require
@@ -160,6 +168,9 @@ Offset track/via contacts qualify only when an interior transverse section prove
 the entire actual track width lies inside the annulus, excluding the drill with
 two-native-unit margins. The measured section joins the existing via layer node
 at its actual distance; unproved offset contacts retain connectivity only.
+A continuous native collinear track covering a virtual contact supplies its
+actual width, rather than a duplicate zero-width shortcut. Thin or detouring
+paths and pad-interior-only edges cannot certify a wider bridge.
 The pinned router runs width-homogeneous non-ground groups widest first, then
 configured plane-ground groups at their original widths. Each pass has an
 explicit base width. This prevents router cleanup from silently replacing
@@ -180,6 +191,11 @@ requirements whose owners are present are also checked before pinning. Both
 ground faces are refilled; a nearby via on a separate island does not qualify.
 External ground owners defer to composition, where all canonical current,
 ground and thermal requirements are checked again.
+Parent ground finishing must preserve all incoming routed copper. This proof
+ends before guarded geometry and signal repairs, which may intentionally
+replace illegal or dangling copper and retain their full native re-DRC
+accept-or-revert policy. Final current, ground and thermal audits still inspect
+the repaired board.
 
 Contracted ordinary ground witnesses are constructed and protected before leaf
 signal escapes can fragment them. Signal exits then precede remaining ground

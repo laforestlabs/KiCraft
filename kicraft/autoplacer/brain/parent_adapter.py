@@ -240,6 +240,37 @@ def infer_interconnect_nets_pre_placement(
     return rewritten
 
 
+def usb_affinity_groups(
+    artifacts: list[LoadedSubcircuitArtifact],
+    synthetic_refs_by_index: dict[int, str],
+    contracts: list[dict],
+) -> dict[str, list[str]]:
+    """Carry exact USB terminal affinity across rigid child boundaries."""
+    from kicraft.design.models import USBRoutingContract
+
+    leaf_to_block = {
+        ref: synthetic_refs_by_index[index]
+        for index, artifact in enumerate(artifacts)
+        if index in synthetic_refs_by_index
+        for ref in artifact.layout.components
+    }
+    groups: dict[str, set[str]] = {}
+    for raw in contracts:
+        contract = USBRoutingContract.model_validate(raw)
+        blocks = sorted({
+            leaf_to_block.get(endpoint.ref, endpoint.ref)
+            for segment in contract.segments
+            for terminals in (
+                segment.positive_from, segment.positive_to,
+                segment.negative_from, segment.negative_to,
+            )
+            for endpoint in terminals
+        })
+        if len(blocks) > 1:
+            groups.setdefault(blocks[0], set()).update(blocks[1:])
+    return {owner: sorted(members) for owner, members in groups.items()}
+
+
 def attachment_constraints_to_zones(
     derived: DerivedAttachmentConstraints,
     synthetic_refs_by_index: dict[int, str],

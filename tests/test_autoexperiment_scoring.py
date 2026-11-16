@@ -20,8 +20,37 @@ from kicraft.cli.autoexperiment import (
     _write_round_detail,
     _extract_parent_board_dimensions,
     _read_composer_quality_score,
+    _routed_pareto_choice,
     _score_round,
 )
+
+
+def test_routed_selection_reconsiders_earlier_tradeoffs():
+    def candidate(number, score, area, vias, length):
+        return {
+            "round": HierarchyRound(number, 0, "hierarchical", score, False, 0),
+            "metrics": {
+                "board_area_mm2": area, "via_count": vias,
+                "copper_length_mm": length,
+            },
+        }
+
+    candidates = [
+        candidate(1, 90, 100, 10, 100),
+        candidate(2, 80, 90, 20, 100),
+        candidate(3, 70, 99, 9, 99),
+    ]
+    winner, receipt = _routed_pareto_choice(candidates)
+    assert winner["round"].round_num == 2
+    assert receipt[0]["dominated_by"] == [3]
+    assert receipt[1]["reason"] == "non_dominated"
+
+    # Missing routed measurements cannot turn a candidate into a zero-cost
+    # dominator or justify rejecting it from the comparison.
+    candidates.append(candidate(4, 95, None, 0, 0))
+    winner, receipt = _routed_pareto_choice(candidates)
+    assert winner["round"].round_num == 4
+    assert receipt[3]["reason"] == "incomparable_missing_measurement"
 
 
 def _write_parent_pipeline(

@@ -589,6 +589,7 @@ def _parse_traces(canonical: dict[str, Any]) -> list[TraceSegment]:
                     layer=_layer_from_value(item.get("layer")),
                     net=str(item.get("net", "")),
                     width_mm=float(item.get("width_mm", 0.127)),
+                    escape_ownership=item.get("escape_ownership"),
                 )
             )
         except Exception:
@@ -612,6 +613,7 @@ def _parse_vias(canonical: dict[str, Any]) -> list[Via]:
                     net=str(item.get("net", "")),
                     drill_mm=float(item.get("drill_mm", 0.3)),
                     size_mm=float(item.get("size_mm", 0.6)),
+                    escape_ownership=item.get("escape_ownership"),
                 )
             )
         except Exception:

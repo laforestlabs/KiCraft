@@ -18,6 +18,7 @@ from .models import (
     RecipePort as Port,
     RecipeSourceDocument as SourceDocument,
     ResolvedRecipeSelection,
+    usb_pair_placement,
 )
 from .registry import expand_static_definition
 
@@ -239,11 +240,7 @@ ESP32_S3_MINI_1_MINIMAL = RecipeDefinition(
             role="local_decoupling",
             parameters={"anchor_role": "mcu", "max_mm": 3.0},
         ),
-        PlacementConstraint(
-            kind="usb_differential_pair",
-            role="mcu",
-            parameters={"impedance_ohm": 90.0, "max_skew_mm": 0.5},
-        ),
+        usb_pair_placement("mcu"),
     ),
     electrical_assertions=(
         Assertion(

@@ -35,7 +35,9 @@ from ..models import (
     is_power_or_ground_name,
 )
 from .placement import PlacedPart
-from .sch_geometry import pin_abs_position, pin_exit_direction, step
+from .sch_geometry import (
+    pin_abs_position, pin_exit_direction, placed_graphics_bounds, step, text_width_mm,
+)
 from .symbol_pinout import SymbolNotFoundError, lookup_pins
 
 GRID_MM = 2.54
@@ -141,6 +143,8 @@ class PowerSymbol:
     x_mm: float
     y_mm: float
     angle_deg: int  # oriented so the symbol points away from the wire
+    value_x_mm: float | None = None
+    value_y_mm: float | None = None
 
 
 @dataclass(frozen=True)
@@ -371,28 +375,6 @@ def route_sheet(
                 routed.labels.append(NetLabel(
                     text=conn.net_name, x_mm=lx, y_mm=ly, angle_deg=angle))
 
-    # Everything stamped so far is signal copper the power pass must avoid;
-    # power-vs-power conflicts stay the job of the power_stubs ledger.
-    signal_wires = list(routed.wires)
-    flagged_nets: set[str] = set()
-    for conn in power_conns:
-        eps = _resolve_eps(conn)
-        if not eps:
-            continue
-        _route_power(
-            routed, conn.net_name, eps, flag_nets, all_pins, power_stubs,
-            signal_wires, flagged_nets,
-        )
-
-    # no_connect markers.
-    for ep in bom.no_connect_pins:
-        pin = _get_pin(ep.ref, ep.pin) if ep.ref in parts_by_ref else None
-        placed = _placed_for(ep.ref, pin) if pin is not None else None
-        if placed is None or pin is None:
-            continue
-        x, y = pin_abs_position(placed.x_mm, placed.y_mm, placed.rotation_deg, pin)
-        routed.no_connects.append(NoConnect(x_mm=x, y_mm=y))
-
     # Estimated obstacle rects for the label de-collision pass: part bodies
     # (pin extents shrunk by the pin length, so the rect tracks the actual
     # body outline) and power-symbol graphics+text. A collapsed axis (2-pin
@@ -412,6 +394,11 @@ def route_sheet(
             p for p in _pins(ref) if int(p.get("unit", 1) or 1) == unit
         ]
         placed = placed_by_unit[(ref, unit)]
+        graphic = placed_graphics_bounds(parts_by_ref[ref].symbol, unit,
+                                         placed.x_mm, placed.y_mm, placed.rotation_deg)
+        if graphic is not None:
+            body_rects.append(graphic)
+            continue
         pts = [
             pin_abs_position(placed.x_mm, placed.y_mm, placed.rotation_deg, p)
             for p in unit_pins
@@ -431,10 +418,27 @@ def route_sheet(
             cy = (min(ys2) + max(ys2)) / 2.0
             y1, y2 = cy - 1.2, cy + 1.2
         body_rects.append((x1, y1, x2, y2))
-    for ps in routed.power_symbols:
-        body_rects.append((ps.x_mm - 3.0, ps.y_mm - 4.0, ps.x_mm + 3.0, ps.y_mm + 4.0))
+    # Everything stamped so far is signal copper the power pass must avoid;
+    # power-vs-power conflicts stay the job of the power_stubs ledger.
+    signal_wires = list(routed.wires)
+    flagged_nets: set[str] = set()
+    for conn in power_conns:
+        eps = _resolve_eps(conn)
+        if not eps:
+            continue
+        _route_power(
+            routed, conn.net_name, eps, flag_nets, all_pins, power_stubs,
+            signal_wires, flagged_nets, body_rects,
+        )
 
-    _resolve_label_collisions(routed, body_rects, all_pins)
+    # no_connect markers.
+    for ep in bom.no_connect_pins:
+        pin = _get_pin(ep.ref, ep.pin) if ep.ref in parts_by_ref else None
+        placed = _placed_for(ep.ref, pin) if pin is not None else None
+        if placed is None or pin is None:
+            continue
+        x, y = pin_abs_position(placed.x_mm, placed.y_mm, placed.rotation_deg, pin)
+        routed.no_connects.append(NoConnect(x_mm=x, y_mm=y))
 
     # Flag-net placement sweep: every net in flag_nets must carry exactly one
     # PWR_FLAG so ERC sees it driven. _route_power already stamped the
@@ -469,12 +473,14 @@ def route_sheet(
             routed.power_symbols.append(PowerSymbol(
                 lib_id="power:PWR_FLAG", x_mm=ax, y_mm=ay, angle_deg=0))
             flagged_nets.add(net)
+    # Power flags are now all present. Reserve their actual graphics and every
+    # visible power value before the final net-label collision pass.
+    power_obstacles = _place_power_values(routed, body_rects)
+    _resolve_label_collisions(routed, body_rects + power_obstacles, all_pins)
 
     return routed
 
 
-# Estimated text metrics for the default 1.27 mm schematic font.
-_CHAR_W_MM = 1.1
 _TEXT_H_MM = 1.9
 
 
@@ -482,7 +488,7 @@ def _label_rect(
     text: str, x: float, y: float, angle: int
 ) -> tuple[float, float, float, float]:
     """Estimated bbox (x1, y1, x2, y2) of a label's rendered text."""
-    length = len(text) * _CHAR_W_MM + 1.5
+    length = text_width_mm(text) + 1.5
     half_h = _TEXT_H_MM / 2.0
     if angle == 0:
         return (x + 0.5, y - half_h, x + 0.5 + length, y + half_h)
@@ -497,6 +503,64 @@ def _rects_overlap(
     a: tuple[float, float, float, float], b: tuple[float, float, float, float]
 ) -> bool:
     return not (a[2] <= b[0] or b[2] <= a[0] or a[3] <= b[1] or b[3] <= a[1])
+
+
+def _power_value_rect(ps: PowerSymbol) -> tuple[float, float, float, float] | None:
+    value = ps.lib_id.split(":", 1)[-1]
+    if value == "PWR_FLAG":
+        return None
+    x = ps.value_x_mm if ps.value_x_mm is not None else ps.x_mm
+    y = ps.value_y_mm if ps.value_y_mm is not None else ps.y_mm + 3.0
+    half_width = (text_width_mm(value) + 0.5) / 2
+    return (x - half_width, y - 0.95, x + half_width, y + 0.95)
+
+
+def _place_power_values(
+    routed: RoutedSheet, body_rects: list[tuple[float, float, float, float]],
+) -> list[tuple[float, float, float, float]]:
+    """Choose horizontal power-value lanes clear of symbols, wires and labels."""
+    graphics = []
+    for ps in routed.power_symbols:
+        bounds = placed_graphics_bounds(ps.lib_id, 1, ps.x_mm, ps.y_mm, ps.angle_deg)
+        if bounds is None:
+            raise ValueError(f"no graphics for power symbol {ps.lib_id!r}")
+        graphics.append((bounds[0] - 0.2, bounds[1] - 0.2,
+                         bounds[2] + 0.2, bounds[3] + 0.2))
+    occupied = list(body_rects) + graphics
+    for wire in routed.wires:
+        occupied.append((min(wire.x1_mm, wire.x2_mm) - 0.15,
+                         min(wire.y1_mm, wire.y2_mm) - 0.15,
+                         max(wire.x1_mm, wire.x2_mm) + 0.15,
+                         max(wire.y1_mm, wire.y2_mm) + 0.15))
+    for store in (routed.labels, routed.global_labels, routed.hier_labels):
+        for lab in store:
+            text = lab.name if isinstance(lab, HierLabelPlacement) else lab.text
+            occupied.append(_label_rect(text, lab.x_mm, lab.y_mm, lab.angle_deg))
+    value_rects = []
+    for index, ps in enumerate(routed.power_symbols):
+        if ps.lib_id.split(":", 1)[-1] == "PWR_FLAG":
+            continue
+        # Search increasingly distant grid lanes. Value placement is graphical:
+        # the connected power symbol and every electrical anchor remain fixed.
+        found = None
+        for radius in range(2, 129):
+            offsets = ((0, -radius), (0, radius), (-radius, 0), (radius, 0))
+            for dx, dy in offsets:
+                candidate = replace(ps, value_x_mm=ps.x_mm + dx * GRID_MM / 2,
+                                    value_y_mm=ps.y_mm + dy * GRID_MM / 2)
+                rect = _power_value_rect(candidate)
+                if rect is not None and not any(_rects_overlap(rect, ob) for ob in occupied):
+                    found = candidate, rect
+                    break
+            if found:
+                break
+        if found is None:
+            raise ValueError(f"no collision-free power value lane for {ps.lib_id} at "
+                             f"({ps.x_mm}, {ps.y_mm})")
+        routed.power_symbols[index], rect = found
+        occupied.append(rect)
+        value_rects.append(rect)
+    return graphics + value_rects
 
 
 _LABEL_OUTWARD = {0: "right", 90: "up", 180: "left", 270: "down"}
@@ -560,12 +624,34 @@ def _resolve_label_collisions(
     """
     wires = routed.wires
 
-    def collides(rect: tuple[float, float, float, float]) -> bool:
-        return any(_rects_overlap(rect, body) for body in body_rects)
+    def collides(rect: tuple[float, float, float, float], lab) -> bool:
+        if any(_rects_overlap(rect, body) for body in body_rects):
+            return True
+        for store in (routed.labels, routed.global_labels, routed.hier_labels):
+            for other in store:
+                if other is lab:
+                    continue
+                text = other.name if isinstance(other, HierLabelPlacement) else other.text
+                if _rects_overlap(rect, _label_rect(text, other.x_mm, other.y_mm, other.angle_deg)):
+                    return True
+        return False
 
     def seg_hits_pin(x1: float, y1: float, x2: float, y2: float) -> bool:
+        start_pins = sum(abs(px - x1) < EPS and abs(py - y1) < EPS
+                         for px, py, _r, _p in all_pins)
+        if start_pins > 1:
+            return True
         return any(
-            _pt_on_axis_seg(px, py, x1, y1, x2, y2) for (px, py, _r, _p) in all_pins
+            (abs(px - x1) >= EPS or abs(py - y1) >= EPS)
+            and _pt_on_axis_seg(px, py, x1, y1, x2, y2)
+            for (px, py, _r, _p) in all_pins
+        )
+
+    def seg_hits_body(x1: float, y1: float, x2: float, y2: float) -> bool:
+        return any(
+            max(min(x1, x2), a) < min(max(x1, x2), c) + EPS
+            and max(min(y1, y2), b) < min(max(y1, y2), d) + EPS
+            for a, b, c, d in body_rects
         )
 
     def on_wire(x: float, y: float) -> bool:
@@ -576,7 +662,7 @@ def _resolve_label_collisions(
     def other_label_anchors(lab) -> set[tuple[float, float]]:
         return {
             (round(l2.x_mm, 2), round(l2.y_mm, 2))
-            for s2 in (routed.labels, routed.global_labels)
+            for s2 in (routed.labels, routed.global_labels, routed.hier_labels)
             for l2 in s2
             if l2 is not lab
         }
@@ -586,12 +672,13 @@ def _resolve_label_collisions(
         (2 * GRID_MM, 0.0), (-2 * GRID_MM, 0.0), (0.0, 2 * GRID_MM), (0.0, -2 * GRID_MM),
     )
 
-    for store in (routed.labels, routed.global_labels):
+    for store in (routed.labels, routed.global_labels, routed.hier_labels):
         for i, lab in enumerate(store):
-            if not collides(_label_rect(lab.text, lab.x_mm, lab.y_mm, lab.angle_deg)):
+            text = lab.name if isinstance(lab, HierLabelPlacement) else lab.text
+            if not collides(_label_rect(text, lab.x_mm, lab.y_mm, lab.angle_deg), lab):
                 continue
             flipped = (lab.angle_deg + 180) % 360
-            if not collides(_label_rect(lab.text, lab.x_mm, lab.y_mm, flipped)):
+            if not collides(_label_rect(text, lab.x_mm, lab.y_mm, flipped), lab):
                 store[i] = replace(lab, angle_deg=flipped)
                 continue
             own_wires = _wire_component(lab.x_mm, lab.y_mm, wires)
@@ -609,7 +696,7 @@ def _resolve_label_collisions(
                 if not on_own_wire(sx, sy) or (round(sx, 2), round(sy, 2)) in taken:
                     continue
                 for angle in (lab.angle_deg, flipped):
-                    if not collides(_label_rect(lab.text, sx, sy, angle)):
+                    if not collides(_label_rect(text, sx, sy, angle), lab):
                         store[i] = replace(lab, x_mm=sx, y_mm=sy, angle_deg=angle)
                         slid = True
                         break
@@ -617,15 +704,78 @@ def _resolve_label_collisions(
                     break
             if slid:
                 continue
-            outward = _LABEL_OUTWARD[lab.angle_deg % 360]
-            nx, ny = step(lab.x_mm, lab.y_mm, outward, GRID_MM)
-            if (
-                not collides(_label_rect(lab.text, nx, ny, lab.angle_deg))
-                and not seg_hits_pin(lab.x_mm, lab.y_mm, nx, ny)
-                and not on_wire(nx, ny)
+            # A new branch at an unsplit wire's midpoint may not connect in
+            # KiCad; extend only from a wire endpoint or directly from a pin.
+            if own_wires and not any(
+                abs(x - lab.x_mm) < EPS and abs(y - lab.y_mm) < EPS
+                for wire in own_wires
+                for x, y in ((wire.x1_mm, wire.y1_mm), (wire.x2_mm, wire.y2_mm))
             ):
-                wires.append(WireSegment(lab.x_mm, lab.y_mm, nx, ny))
-                store[i] = replace(lab, x_mm=nx, y_mm=ny)
+                continue
+            outward = _LABEL_OUTWARD[lab.angle_deg % 360]
+            # Only extend from the end of the connected component, and reject
+            # any new segment touching foreign copper or a foreign label.
+            for distance in range(1, 33):
+                nx, ny = step(lab.x_mm, lab.y_mm, outward, GRID_MM * distance)
+                if (seg_hits_pin(lab.x_mm, lab.y_mm, nx, ny)
+                        or seg_hits_body(lab.x_mm, lab.y_mm, nx, ny)):
+                    break
+                if any(_segs_touch(lab.x_mm, lab.y_mm, nx, ny,
+                                   w.x1_mm, w.y1_mm, w.x2_mm, w.y2_mm)
+                       for w in wires if w not in own_wires):
+                    break
+                if any(_pt_on_axis_seg(x, y, lab.x_mm, lab.y_mm, nx, ny)
+                       for x, y in taken):
+                    break
+                if on_wire(nx, ny):
+                    continue
+                if not collides(_label_rect(text, nx, ny, lab.angle_deg), lab):
+                    wires.append(WireSegment(lab.x_mm, lab.y_mm, nx, ny))
+                    store[i] = replace(lab, x_mm=nx, y_mm=ny)
+                    slid = True
+                    break
+            if slid:
+                continue
+            # When neighbouring pin stubs occupy the preferred lane, leave
+            # the pin's own wire outward first and fan out orthogonally beyond
+            # the obstacles. Never touch foreign wires, pins or label anchors.
+            side_dirs = ("up", "down") if outward in ("left", "right") else ("left", "right")
+            foreign = [wire for wire in wires if wire not in own_wires]
+
+            def clear_segment(x1: float, y1: float, x2: float, y2: float) -> bool:
+                return (
+                    not seg_hits_pin(x1, y1, x2, y2)
+                    and not seg_hits_body(x1, y1, x2, y2)
+                    and not any(_segs_touch(x1, y1, x2, y2,
+                                            w.x1_mm, w.y1_mm, w.x2_mm, w.y2_mm)
+                                for w in foreign)
+                    and not any(_pt_on_axis_seg(x, y, x1, y1, x2, y2)
+                                for x, y in taken)
+                )
+
+            for outward_steps in range(1, 65):
+                ex, ey = step(lab.x_mm, lab.y_mm, outward, GRID_MM * outward_steps)
+                if not clear_segment(lab.x_mm, lab.y_mm, ex, ey):
+                    break
+                if on_wire(ex, ey):
+                    continue
+                for side in side_dirs:
+                    for side_steps in range(1, 65):
+                        nx, ny = step(ex, ey, side, GRID_MM * side_steps)
+                        if not clear_segment(ex, ey, nx, ny):
+                            break
+                        if on_wire(nx, ny):
+                            continue
+                        if not collides(_label_rect(text, nx, ny, lab.angle_deg), lab):
+                            wires.extend((WireSegment(lab.x_mm, lab.y_mm, ex, ey),
+                                          WireSegment(ex, ey, nx, ny)))
+                            store[i] = replace(lab, x_mm=nx, y_mm=ny)
+                            slid = True
+                            break
+                    if slid:
+                        break
+                if slid:
+                    break
 
 
 def _pt_on_axis_seg(
@@ -719,6 +869,7 @@ def _route_power(
     power_stubs: list[tuple[str, float, float, float, float]],
     signal_wires: list[WireSegment] = (),
     flagged_nets: set[str] | None = None,
+    body_rects: list[tuple[float, float, float, float]] | None = None,
 ) -> None:
     """A stub + power symbol (or global label) at every pin of a power net.
 
@@ -744,22 +895,37 @@ def _route_power(
         routed, net_name, eps, power_lib, own_pins, all_pins, power_stubs,
         signal_wires,
     )
+    def symbol_spot_free(x: float, y: float, angle: int) -> bool:
+        if power_lib is None or body_rects is None:
+            return True
+        bounds = placed_graphics_bounds(power_lib, 1, x, y, angle)
+        if bounds is None:
+            return True
+        return not any(_rects_overlap(bounds, body) for body in body_rects)
+
     for e in eps:
         sym_xy: tuple[float, float] | None = None
         sym_angle = 0
         corner: tuple[float, float] | None = None
         if e.exit in ("left", "right") and power_lib is not None:
-            ex, ey = step(e.x, e.y, e.exit, GRID_MM)
+            # Move upright rail symbols clear of densely spaced pin names and
+            # neighbouring power graphics. If a longer lead would touch a pin
+            # or wire, retreat to the original short elbow.
             vdir = "down" if is_gnd else "up"
-            vx, vy = step(ex, ey, vdir, GRID_MM)
-            corner_ep = _Endpoint(ex, ey, vdir, e.ref, e.pin)
-            if _power_stub_clear(
-                net_name, e, ex, ey, own_pins, all_pins, power_stubs,
-                signal_wires,
-            ) and _power_stub_clear(
-                net_name, corner_ep, vx, vy, own_pins, all_pins, power_stubs,
-                signal_wires,
-            ):
+            for lead in (4 * GRID_MM, 3 * GRID_MM, 2 * GRID_MM, GRID_MM):
+                ex, ey = step(e.x, e.y, e.exit, lead)
+                vx, vy = step(ex, ey, vdir, GRID_MM)
+                corner_ep = _Endpoint(ex, ey, vdir, e.ref, e.pin)
+                if not symbol_spot_free(vx, vy, angle_table[vdir]):
+                    continue
+                if not (_power_stub_clear(
+                    net_name, e, ex, ey, own_pins, all_pins, power_stubs,
+                    signal_wires,
+                ) and _power_stub_clear(
+                    net_name, corner_ep, vx, vy, own_pins, all_pins, power_stubs,
+                    signal_wires,
+                )):
+                    continue
                 routed.wires.append(WireSegment(e.x, e.y, ex, ey))
                 routed.wires.append(WireSegment(ex, ey, vx, vy))
                 power_stubs.append((net_name, e.x, e.y, ex, ey))
@@ -767,6 +933,7 @@ def _route_power(
                 sym_xy = (vx, vy)
                 sym_angle = angle_table[vdir]
                 corner = (ex, ey)
+                break
         if sym_xy is None:
             ex, ey = step(e.x, e.y, e.exit, GRID_MM)
             if not _power_stub_clear(
@@ -786,7 +953,7 @@ def _route_power(
             power_stubs.append((net_name, e.x, e.y, ex, ey))
             sym_xy = (ex, ey)
             sym_angle = angle_table[e.exit]
-        if power_lib is not None:
+        if power_lib is not None and symbol_spot_free(*sym_xy, sym_angle):
             routed.power_symbols.append(PowerSymbol(
                 lib_id=power_lib, x_mm=sym_xy[0], y_mm=sym_xy[1],
                 angle_deg=sym_angle))

@@ -25,12 +25,19 @@ class _Fake:
 
 
 def _state():
-    return ConversationState(bom=BOM(
-        parts=[BomPart(ref="U1", value="x", symbol="Fake:X",
-                       footprint="Package_SO:SOIC-8", sheet="A")],
-        connections=[NetConnection(net_name="+3V3", sheet="A",
-                                   endpoints=[PinEndpoint(ref="U1", pin="1")])],
-    ))
+    return ConversationState.model_validate({
+        "intent": {"goal": "Review a resistor circuit"},
+        "functional_spec": {"blocks": []},
+        "architecture": {"sheets": [{"name": "A", "stem": "A", "function": "circuit"}],
+                         "power_nets": ["+3V3"], "inter_sheet_nets": []},
+        "bom": {
+            "parts": [{"ref": "U1", "value": "10k", "symbol": "Device:R",
+                       "footprint": "Resistor_SMD:R_0603_1608Metric", "sheet": "A"}],
+            "connections": [{"net_name": "+3V3", "sheet": "A",
+                             "endpoints": [{"ref": "U1", "pin": "1"}]}],
+            "no_connect_pins": [{"ref": "U1", "pin": "2"}],
+        },
+    })
 
 
 def _enable(monkeypatch, reply):
@@ -122,6 +129,28 @@ def test_gate_fail_soft_on_bad_model_output(monkeypatch, tmp_path):
     _enable(monkeypatch, "not json at all")   # review_design fails closed (ok=False)
     r = _maybe_electrical_review(_state(), tmp_path)
     assert r["ran"] is False and r["blocked"] is False
+
+
+def test_incomplete_evidence_never_calls_provider(monkeypatch, tmp_path):
+    _enable(monkeypatch, '{"findings":[]}')
+    state = _state()
+    state.architecture = None
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Provider must not see incomplete evidence")
+    monkeypatch.setattr(_client_mod, "make_client", forbidden)
+    result = _maybe_electrical_review(state, tmp_path)
+    assert result["ran"] is False
+    assert result["semantic_clean"] is None
+    assert state.review_coverage.complete is False
+    assert "ARCHITECTURE" in " ".join(state.review_coverage.omitted_mandatory)
+
+
+def test_schema_failure_is_not_a_clean_review(monkeypatch, tmp_path):
+    _enable(monkeypatch, "not json")
+    result = _maybe_electrical_review(_state(), tmp_path)
+    assert result["provider_ok"] is True
+    assert result["schema_ok"] is False
+    assert result["semantic_clean"] is None
 
 
 # --------------------------------------------------------------------------- #

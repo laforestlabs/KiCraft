@@ -9,6 +9,7 @@ from .models import (
     RecipePlacementConstraint as PlacementConstraint,
     RecipePort as Port,
     RecipeSourceDocument as SourceDocument,
+    usb_pair_placement,
 )
 from .rp2040_minimal import RP2040_CORE
 
@@ -96,6 +97,7 @@ RP2040_MINIMAL_V3: RecipeDefinition = RP2040_CORE.model_copy(
             for pin in RP2040_CORE.pins
         ),
         "placement_constraints": (
+            usb_pair_placement("mcu"),
             PlacementConstraint(
                 kind="decoupling_proximity",
                 role="io_decoupling",

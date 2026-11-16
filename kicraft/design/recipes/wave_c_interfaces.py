@@ -11,6 +11,7 @@ from .models import (
     RecipePlacementConstraint as Placement,
     RecipePort as Port,
     RecipeSourceDocument as Source,
+    usb_pair_placement,
 )
 from .wave_b_power import _catalog_cap
 
@@ -797,6 +798,9 @@ CH340C_USB_UART = _recipe(
     ),
     assertions=(Assertion(code="usb_uart_complete_device", message="The USB-C receptacle has both Rd pulldowns, connector-side USBLC6 protection, direct data paths without added series resistors, and one CH340C PHY. VBUS is a 5 V USB rail; VCC/V3 define the UART domain. USB compliance, host interoperability, and regulator/current margin remain unmeasured."),),
 )
+CH340C_USB_UART = CH340C_USB_UART.model_copy(update={
+    "placement_constraints": (*CH340C_USB_UART.placement_constraints, usb_pair_placement("bridge")),
+})
 
 
 def expand_ch340c_usb_uart(resolved):

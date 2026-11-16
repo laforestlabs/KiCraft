@@ -291,6 +291,7 @@ class TraceSegment:
     layer: Layer
     net: str
     width_mm: float
+    escape_ownership: dict[str, str] | None = None
 
     @property
     def length(self) -> float:
@@ -303,6 +304,7 @@ class Via:
     net: str
     drill_mm: float = 0.3
     size_mm: float = 0.6
+    escape_ownership: dict[str, str] | None = None
 
 
 @dataclass(slots=True)

@@ -25,10 +25,12 @@ then returns ``ok=False`` with no findings rather than inventing a verdict.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 
-from kicraft.evidence_digest import EvidenceSection, render_bounded_evidence
+from kicraft.design.models import ReviewCoverage, ReviewEvidence
+from kicraft.evidence_digest import EvidenceSection, render_evidence_with_status
 
 _SEVERITIES = ("blocker", "warning", "note")
 _REVIEW_RESPONSE_FORMAT = {
@@ -280,102 +282,105 @@ def _json_evidence(value) -> str:
     def _default(item):
         return item.model_dump(mode="json") if hasattr(item, "model_dump") else str(item)
 
-    return json.dumps(value, indent=2, sort_keys=True, default=_default)
+    return json.dumps(value, sort_keys=True, default=_default)
 
 
-def build_design_digest(state, *, project_root=None, budget: int = 14000) -> str:
-    """Render structured review evidence without slicing BOM or netlist records."""
+def build_design_evidence(state, *, project_root=None, budget: int = 96000) -> ReviewEvidence:
+    """Project committed electrical facts and account for every mandatory section."""
     sections: list[EvidenceSection] = []
 
-    intent = state.intent
-    if intent is None:
-        sections.append(
-            EvidenceSection("BRIEF AND INTENT", "No committed intent.", complete=False)
-        )
-    else:
-        sections.append(EvidenceSection("BRIEF AND INTENT", _json_evidence(intent)))
+    def add(name, value, *, available=True):
+        sections.append(EvidenceSection(name, _json_evidence(value), complete=available))
 
-    sections.append(
-        EvidenceSection(
-            "FUNCTIONAL REQUIREMENTS",
-            _json_evidence(state.functional_spec),
-            complete=state.functional_spec is not None,
-        )
+    add("BRIEF AND INTENT", state.intent, available=state.intent is not None)
+    add("FUNCTIONAL REQUIREMENTS", state.functional_spec, available=state.functional_spec is not None)
+    architecture = (
+        state.architecture.model_dump(mode="json", exclude={"protected_identities"})
+        if state.architecture is not None else None
     )
-    sections.append(
-        EvidenceSection(
-            "ARCHITECTURE REQUIREMENTS",
-            _json_evidence(state.architecture),
-            complete=state.architecture is not None,
-        )
-    )
-
+    add("ARCHITECTURE REQUIREMENTS", architecture, available=architecture is not None)
     bom = state.bom
+    expected_refs = [part.ref for part in bom.parts] if bom is not None else []
+    expected_nets = list(dict.fromkeys(c.net_name for c in bom.connections)) if bom is not None else []
     if bom is None:
-        sections.append(
-            EvidenceSection(
-                "BOM / PINS / NETS",
-                "No committed BOM. Part, pin, net, and delivered-MCU absence is unverified; "
-                "do not report missing or unprogrammable delivered hardware.",
-                complete=False,
-            )
-        )
+        sections.append(EvidenceSection(
+            "BOM / PINS / NETS",
+            "No committed BOM. Part, pin, net, and delivered-MCU absence is unverified; "
+            "do not report missing or unprogrammable delivered hardware.",
+            complete=False,
+        ))
     else:
-        rows = []
-        for part in bom.parts:
-            mpn = getattr(part, "mpn", None) or getattr(part, "lcsc", None) or ""
-            rows.append(
-                f"  {part.ref}: value={part.value!r}; symbol={part.symbol!r}; "
-                f"footprint={part.footprint!r}"
-                + (f"; identity={mpn!r}" if mpn else "")
-                + (f"; sheet={part.sheet!r}" if getattr(part, "sheet", None) else "")
-            )
-        sections.append(
-            EvidenceSection(
-                f"BOM PARTS ({len(bom.parts)})",
-                "\n".join(rows) or "No committed parts.",
-            )
-        )
+        rows = [
+            f"  {p.ref}: value={p.value!r}; symbol={p.symbol!r}; footprint={p.footprint!r}; "
+            f"identity={p.mpn!r}; catalog={p.lcsc!r}; sheet={p.sheet!r}; recipe={p.recipe_id!r}; "
+            f"role={p.recipe_role!r}"
+            for p in bom.parts
+        ]
+        sections.append(EvidenceSection("BOM PARTS", "\n".join(rows) or "No committed parts."))
+        names_by_ref = {p.ref: _pin_names(p.symbol, project_root) for p in bom.parts}
+        unresolved = []
 
-        names_by_ref = {part.ref: _pin_names(part.symbol, project_root) for part in bom.parts}
-        net_lines = []
-        for connection in bom.connections:
-            endpoints = []
-            for endpoint in connection.endpoints:
-                function = names_by_ref.get(endpoint.ref, {}).get(endpoint.pin)
-                endpoints.append(
-                    f"{endpoint.ref}.{endpoint.pin}" + (f"({function})" if function else "")
-                )
-            sheet = f" [sheet={connection.sheet!r}]" if connection.sheet else ""
-            net_lines.append(f"  {connection.net_name}{sheet}: " + ", ".join(endpoints))
-        if bom.no_connect_pins:
-            net_lines.append(
-                "  no-connect: "
-                + ", ".join(
-                    f"{endpoint.ref}.{endpoint.pin}"
-                    + (
-                        f"({names_by_ref.get(endpoint.ref, {}).get(endpoint.pin)})"
-                        if names_by_ref.get(endpoint.ref, {}).get(endpoint.pin)
-                        else ""
-                    )
-                    for endpoint in bom.no_connect_pins
-                )
-            )
-        sections.append(
-            EvidenceSection(
-                f"NETS AND PINS ({len(bom.connections)})",
-                "\n".join(net_lines) or "No committed nets.",
-            )
-        )
+        def endpoint_text(endpoint):
+            names = names_by_ref.get(endpoint.ref, {})
+            if endpoint.pin not in names:
+                unresolved.append(f"{endpoint.ref}.{endpoint.pin}")
+                return f"{endpoint.ref}.{endpoint.pin}(function unresolved)"
+            return f"{endpoint.ref}.{endpoint.pin}({names[endpoint.pin] or 'unnamed'})"
 
-    sections.append(EvidenceSection("OPEN QUESTIONS", _json_evidence(state.open_questions)))
-    terminal = {
-        "stage_status": state.stage_status,
-        "artifacts": state.artifacts,
-        "review_findings": state.review_findings,
-    }
-    sections.append(EvidenceSection("TERMINAL STATE", _json_evidence(terminal)))
-    return render_bounded_evidence("STRUCTURED ELECTRICAL-REVIEW EVIDENCE", sections, budget=budget)
+        lines = [
+            f"  {c.net_name} [sheet={c.sheet!r}]: "
+            + ", ".join(endpoint_text(e) for e in c.endpoints)
+            for c in bom.connections
+        ]
+        nc = ", ".join(endpoint_text(e) for e in bom.no_connect_pins) or "None declared."
+        sections.append(EvidenceSection("NETS AND PINS", "\n".join(lines) or "No committed nets."))
+        sections.append(EvidenceSection("EXPLICIT NC PINS", nc))
+        add("RECIPE ASSERTIONS", [
+            {"recipe": m.recipe, "instance": m.instance, "refs": m.refs,
+             "port_bindings": m.port_bindings, "pin_allocations": m.pin_allocations,
+             "assertions": m.assertions}
+            for m in bom.recipe_ownership
+        ])
+        add("BOM ENGINEERING FACTS", {
+            "assumptions": [a for a in bom.assumptions if not a.startswith("electrical review (")],
+            "substitutions": bom.substitutions,
+            "edge_interfaces": bom.edge_interfaces,
+        })
+        if unresolved:
+            sections.append(EvidenceSection(
+                "PIN FUNCTIONS", "Unresolved: " + ", ".join(dict.fromkeys(unresolved)),
+                complete=False,
+            ))
+        else:
+            sections.append(EvidenceSection("PIN FUNCTIONS", "All endpoint pin functions resolved."))
+    add("OPEN QUESTIONS", [q for q in state.open_questions if q.stage != "review"])
+
+    # Fingerprint the task-specific source projection, not the bounded rendering;
+    # changing the budget or review/status/history/silk must not invalidate it.
+    source = [{"name": s.name, "content": s.content, "available": s.complete} for s in sections]
+    fingerprint = hashlib.sha256(
+        json.dumps(source, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+    ).hexdigest()
+    digest, statuses = render_evidence_with_status(
+        "STRUCTURED ELECTRICAL-REVIEW EVIDENCE", sections, budget=budget
+    )
+    by_name = dict(zip((s.name for s in sections), statuses))
+    omitted = [s.name for s, status in zip(sections, statuses) if status != "COMPLETE"]
+    coverage = ReviewCoverage(
+        source_fingerprint=fingerprint,
+        expected_refs=expected_refs,
+        included_refs=expected_refs if by_name.get("BOM PARTS") == "COMPLETE" else [],
+        expected_nets=expected_nets,
+        included_nets=expected_nets if by_name.get("NETS AND PINS") == "COMPLETE" else [],
+        omitted_mandatory=omitted,
+        complete=not omitted,
+    )
+    return ReviewEvidence(digest=digest, coverage=coverage)
+
+
+def build_design_digest(state, *, project_root=None, budget: int = 96000) -> str:
+    """Compatibility wrapper for consumers that only need the rendered text."""
+    return build_design_evidence(state, project_root=project_root, budget=budget).digest
 
 
 # --------------------------------------------------------------------------- #
@@ -541,26 +546,34 @@ def review_design(
     guard_factory = getattr(getattr(client, "s", None), "review_reasoning_guard", None)
     reasoning_guard = guard_factory() if callable(guard_factory) else None
     for attempt in range(max_attempts):
-        res = client.chat(
-            messages,
-            model=model,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            reasoning=reasoning,
-            reasoning_guard=reasoning_guard,
-            response_format=_REVIEW_RESPONSE_FORMAT,
-            meta_ctx={
-                "phase": "electrical_review",
-                "stage": "review",
-                "attempt": attempt,
-            },
-        )
+        try:
+            res = client.chat(
+                messages,
+                model=model,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                reasoning=reasoning,
+                reasoning_guard=reasoning_guard,
+                response_format=_REVIEW_RESPONSE_FORMAT,
+                meta_ctx={
+                    "phase": "electrical_review",
+                    "stage": "review",
+                    "attempt": attempt,
+                },
+            )
+        except Exception as exc:
+            return {
+                "ok": False, "provider_ok": False, "schema_ok": False,
+                "findings": [], "cost_usd": total_cost, "error": str(exc), "raw": last_text,
+            }
         last_text = res.get("text") or ""
         total_cost += float(res.get("cost_usd") or 0.0)
         ok, findings, error = _validate(_extract_json(last_text))
         if ok:
             return {
                 "ok": True,
+                "provider_ok": True,
+                "schema_ok": True,
                 "findings": clamp_findings(findings),
                 "cost_usd": total_cost,
                 "error": None,
@@ -578,6 +591,8 @@ def review_design(
 
     return {
         "ok": False,
+        "provider_ok": bool(max_attempts),
+        "schema_ok": False,
         "findings": [],
         "cost_usd": total_cost,
         "error": error or "review produced no valid verdict",
@@ -628,9 +643,9 @@ def review_design_corroborated(
     warning-only designs therefore cost exactly one pass. ``corroboration<=1`` is the
     legacy single-pass gate.
 
-    Returns ``{ok, findings, blocked, cost_usd, error}``. Fail-soft: an unparseable
-    pass 1 -> ``ok=False`` (gate skips, never blocks); an unparseable later pass ->
-    the candidate cannot corroborate and demotes (fail-open toward shipping)."""
+    Returns provider/schema status for all required passes. A failed later pass
+    makes the review incomplete while retaining and demoting uncorroborated
+    candidate findings; it cannot silently turn them into a clean verdict."""
 
     def _run(temp):
         return review_design(
@@ -648,6 +663,8 @@ def review_design_corroborated(
     if not p1["ok"]:
         return {
             "ok": False,
+            "provider_ok": p1["provider_ok"],
+            "schema_ok": p1["schema_ok"],
             "findings": [],
             "blocked": False,
             "cost_usd": cost,
@@ -659,6 +676,8 @@ def review_design_corroborated(
     if not candidates or corroboration <= 1:
         return {
             "ok": True,
+            "provider_ok": True,
+            "schema_ok": True,
             "findings": findings,
             "blocked": bool(candidates),
             "cost_usd": cost,
@@ -673,11 +692,13 @@ def review_design_corroborated(
         if k not in votes:
             votes[k] = 1  # seen once, in pass 1
             uniq.append(c)
+    failure = None
     for _ in range(corroboration - 1):
         p = _run(temperature)
         cost += p["cost_usd"]
         if not p["ok"]:
-            break  # can't corroborate -> demote (fail-open)
+            failure = p
+            break  # can't corroborate -> demote, preserving the original finding
         pblk = [f for f in p["findings"] if f.get("severity") == "blocker"]
         for c in uniq:
             if any(_findings_agree(c, o) for o in pblk):
@@ -692,7 +713,12 @@ def review_design_corroborated(
             f["severity"] = "warning"
             f["demoted_from"] = "blocker"
             f["corroborated"] = False
-    return {"ok": True, "findings": findings, "blocked": blocked, "cost_usd": cost, "error": None}
+    return {
+        "ok": failure is None, "findings": findings, "blocked": blocked, "cost_usd": cost,
+        "provider_ok": failure["provider_ok"] if failure else True,
+        "schema_ok": failure["schema_ok"] if failure else True,
+        "error": failure["error"] if failure else None,
+    }
 
 
 def has_blocker(findings) -> bool:

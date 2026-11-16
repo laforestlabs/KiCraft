@@ -295,3 +295,33 @@ def test_two_ounce_export_rejects_actual_undersized_component_land(tmp_path, run
     with pytest.raises(ValueError, match="component PTH annulus"):
         fe.export_fab(str(path), str(tmp_path), "WIDGET", include_3d=False)
     assert not runner.calls
+
+
+def test_bom_uses_validated_selection_not_note(tmp_path):
+    import csv
+    path = tmp_path / "bom.csv"
+    fe._write_bom_csv(path, [
+        {"ref": "U1", "lcsc": "C123456", "sourcing_note": ""},
+        {"ref": "U2", "sourcing_note": "LCSC C234567"},
+    ])
+    rows = list(csv.DictReader(path.open()))
+    assert rows[0]["lcsc"] == "C123456"
+    assert rows[1]["lcsc"] == ""
+    with pytest.raises(ValueError, match="conflicting LCSC"):
+        fe._write_bom_csv(path, [{"ref": "U1", "lcsc": "C123456",
+                                 "sourcing_note": "LCSC C234567"}])
+
+
+
+
+def test_speaker_estimate_is_explicitly_unavailable_without_owner_proof(tmp_path, monkeypatch):
+    from kicraft.design.synthesis import interface_facts
+    fact = {"ref": "J3", "kind": "speaker", "title": "Speaker", "lines": [],
+            "pins": [], "notes": [], "source": {}}
+    monkeypatch.setattr(interface_facts, "reviewed_interface_facts", lambda *a, **kw: [fact])
+    path = tmp_path / "operating.txt"
+    fe._write_operating_sheet(path, {}, None, {"missing_refs": ["J3"]})
+    text = path.read_text()
+    assert "Audio output estimate unavailable" in text
+    assert "0.087" not in text
+    assert "Missing 3D model references: J3" in text

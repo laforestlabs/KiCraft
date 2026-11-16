@@ -310,6 +310,34 @@ def test_offset_via_annulus_carries_full_bootstrap_track(tmp_path, angle, revers
     assert not audit_local_copper(board, [contract])
 
 
+@pytest.mark.parametrize("layer", [pcbnew.F_Cu, pcbnew.B_Cu])
+@pytest.mark.parametrize("bridge_width", [0.5, 0.2, None, "split", "detour"])
+def test_current_net_offset_via_duplicate_requires_same_physical_edge(
+        tmp_path, layer, bridge_width):
+    board = _board(tmp_path)
+    center, landing = (0, 0), (0, 0.4)
+    _via(board, center)
+    _pad(board, "L1", (-3, 0), pth=True)
+    _pad(board, "C1", (5, 0.4), pth=True)
+    _track(board, (-3, 0), center, layer=layer)
+    if bridge_width == "split":
+        _track(board, center, (0, 0.2), layer=layer)
+        _track(board, (0, 0.2), landing, layer=layer)
+    elif bridge_width == "detour":
+        _track(board, center, (-1, 0), layer=layer)
+        _track(board, (-1, 0), (-1, 0.4), layer=layer)
+        _track(board, (-1, 0.4), landing, layer=layer)
+    elif bridge_width is not None:
+        _track(board, center, landing, width=bridge_width, layer=layer)
+    _track(board, landing, (5, 0.4), layer=layer)
+
+    errors = audit_local_copper(board, [{"current_carrying_net": "PWR"}])
+    if bridge_width in (0.5, "split"):
+        assert not errors
+    else:
+        assert any("narrow copper" in error for error in errors)
+
+
 @pytest.mark.parametrize("start,end", [
     ((-0.04, 0), (0.04, 0)),  # Entire segment inside drill.
     ((-1, 0.4), (1, 0.4)),  # Outer edge tangency.

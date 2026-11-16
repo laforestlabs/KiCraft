@@ -431,6 +431,8 @@ def _pour_nets(board: "pcbnew.BOARD", cfg: dict[str, Any]) -> set[str]:
     for n in cfg.get("signal_repair_extra_nets") or []:
         if str(n) != gnd and str(n) not in power:
             skip.discard(str(n))
+    from kicraft.autoplacer.brain.signal_escape import declared_usb_nets
+    skip.update(declared_usb_nets(cfg))
     return skip
 
 
@@ -480,6 +482,11 @@ def repair_unconnected_signals(
     board = pcbnew.LoadBoard(pcb_path)
     max_tie_mm = _gap_cap_mm(board, cfg)
     pour = _pour_nets(board, cfg)
+    from kicraft.autoplacer.brain.signal_escape import declared_usb_nets
+    paired = declared_usb_nets(cfg)
+    summary["skipped"].extend(
+        f"{a.net}:USB differential owner required" for a, _ in edges if a.net in paired
+    )
     # In-memory copper map for the candidate pre-filter: without it the
     # attempt budget dies inside the first escape direction's path family
     # (each stamping attempt reloads the board), which the 20260713 batch

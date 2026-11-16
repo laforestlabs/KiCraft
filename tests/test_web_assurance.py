@@ -35,6 +35,14 @@ from kicraft.server.config import LEGAL_VERSION
 STATE_FIXTURE = Path(__file__).parent / "fixtures" / "bmp280_reader_state.json"
 
 _FULL_STAGE_STATUS = {stage: {"ok": True} for stage in web.DESIGN_STAGES}
+_FULL_STAGE_STATUS["electrical_review"] = {
+    "ok": True, "provider_ok": True, "schema_ok": True, "semantic_clean": True,
+}
+_COMPLETE_REVIEW = {
+    "source_fingerprint": "test", "expected_refs": ["U1"], "included_refs": ["U1"],
+    "expected_nets": ["VCC"], "included_nets": ["VCC"],
+    "omitted_mandatory": [], "complete": True,
+}
 _CLEAN_GATE = {"fab_acceptable": True, "shorts": 0, "unconnected": 0,
                "courtyard": 0, "keepout": 0}
 
@@ -73,6 +81,7 @@ def _clean_state(**over) -> dict:
     state = {
         "project_stem": "X",
         "stage_status": {k: v for k, v in _FULL_STAGE_STATUS.items()},
+        "review_coverage": dict(_COMPLETE_REVIEW),
         "intent": {"named_parts": ["TP4056"], "assumptions": []},
         "architecture": {"requirements": [{"id": "charger", "exact_part": "TP4056"}],
                          "assumptions": [], "advisories": []},
@@ -91,6 +100,71 @@ def _assurance(state, *, status="complete", derived=None, gate=None, synth=None,
         signals=_signals(state, gate=gate if gate is not None else _CLEAN_GATE,
                          synth=synth if synth is not None else {"status": "ok"},
                          flow=flow, artifacts_present=artifacts))
+
+
+@pytest.mark.parametrize("coverage,expected", [
+    (None, "coverage unknown"),
+    ({**_COMPLETE_REVIEW, "complete": False}, "Electrical review incomplete"),
+    ({**_COMPLETE_REVIEW, "included_refs": []}, "Electrical review incomplete"),
+    ({**_COMPLETE_REVIEW, "included_nets": []}, "Electrical review incomplete"),
+    ({**_COMPLETE_REVIEW, "omitted_mandatory": ["assumptions"]}, "Electrical review incomplete"),
+    ({**_COMPLETE_REVIEW, "expected_refs": [None]}, "Electrical review incomplete"),
+    (_COMPLETE_REVIEW, "Complete — no findings"),
+])
+def test_review_inspector_and_handoff_survive_reopen(coverage, expected):
+    state = _clean_state(review_coverage=coverage)
+    for current in (state, json.loads(json.dumps(state))):
+        sections = web._inspector_spec("electrical_review", current, {}, None, [])
+        outcome = next(section for section in sections if section["title"] == "Review outcome")
+        assert expected in dict(outcome["rows"])["status"]
+        assurance = _assurance(current)
+        if coverage == _COMPLETE_REVIEW:
+            assert assurance["level"] == "generated"
+            assert not any("Electrical review incomplete" in line for line in assurance["limitations"])
+        else:
+            assert assurance["level"] == "review_required"
+            assert any("Electrical review incomplete" in line for line in assurance["limitations"])
+
+
+@pytest.mark.parametrize("dimension", ["ok", "provider_ok", "schema_ok", "semantic_clean"])
+def test_review_status_dimensions_are_independent(dimension):
+    state = _clean_state()
+    state["stage_status"] = {**state["stage_status"],
+                             "electrical_review": {**_FULL_STAGE_STATUS["electrical_review"],
+                                                   dimension: None}}
+    outcome = web._inspector_spec("electrical_review", state, {}, None, [])[0]
+    assert "incomplete" in dict(outcome["rows"])["status"]
+    assert _assurance(state)["level"] == "review_required"
+
+
+def test_incomplete_review_is_not_reported_as_circuit_failure():
+    state = _clean_state(review_coverage={**_COMPLETE_REVIEW, "complete": False})
+    state["stage_status"] = {**state["stage_status"], "electrical_review": {
+        "ok": False, "provider_ok": False, "schema_ok": False, "semantic_clean": False,
+        "diagnostics": [{"severity": "fab_gate", "code": "electrical_review_incomplete",
+                         "message": "Review evidence omitted"}],
+    }}
+    issues = web._durable_issues(_signals(state), _derived(electrical_review="failed"))
+    assert [(issue["code"], issue["severity"]) for issue in issues] == [
+        ("electrical_review_incomplete", "warning")]
+    assert "Electrical review incomplete" in _assurance(state)["summary"]
+
+
+def test_reopened_review_stage_shows_warning_not_failure():
+    state = _clean_state(review_coverage=None)
+    state["stage_status"] = {**state["stage_status"], "electrical_review": {"ok": False}}
+    derived = web._derived_statuses(None, state, "ok", True, signals=_signals(state))
+    assert derived["electrical_review"] == "warning"
+
+
+def test_complete_review_with_findings_is_not_clean():
+    state = _clean_state(review_findings=[{"severity": "warning", "issue": "Check power"}])
+    state["stage_status"] = {**state["stage_status"],
+                             "electrical_review": {**_FULL_STAGE_STATUS["electrical_review"],
+                                                   "semantic_clean": False}}
+    outcome = web._inspector_spec("electrical_review", state, {}, None, [])[0]
+    assert dict(outcome["rows"])["status"] == "Complete — findings require review"
+    assert _assurance(state)["level"] == "review_required"
 
 
 # ---- 1. straightforward delivery --------------------------------------------
@@ -415,7 +489,8 @@ def _write_durable_project(store, user_id: int, brief: str) -> tuple[int, Path]:
     state = json.loads(STATE_FIXTURE.read_text(encoding="utf-8"))
     state["project_stem"] = "board"
     state["obligations"] = {}
-    state["stage_status"] = {stage: {"ok": True} for stage in web.DESIGN_STAGES}
+    state["stage_status"] = dict(_FULL_STAGE_STATUS)
+    state["review_coverage"] = dict(_COMPLETE_REVIEW)
     (root / ".kicraft" / "state.json").write_text(json.dumps(state), encoding="utf-8")
     # A genuinely clean build's own verdicts: these are the durable evidence the
     # assurance reading derives from (never a second store).
@@ -707,3 +782,18 @@ async def test_stale_preview_is_labelled_and_withholds_the_download(page_harness
     await u.should_see("Stale preview")
     await u.should_not_see("Download KiCad project (.zip)")
     await u.should_see("Continue design")
+
+
+def test_complete_clean_review_does_not_resurrect_legacy_artifact_findings():
+    state = _clean_state(
+        review_findings=[],
+        artifacts={"status": "ok", "review_findings": [
+            {"severity": "blocker", "issue": "obsolete circuit finding"},
+        ]},
+    )
+    sections = web._inspector_spec("electrical_review", state, {}, None, [
+        "[build]     review BLOCKER: [power] obsolete circuit finding",
+    ])
+    outcome = next(section for section in sections if section["title"] == "Review outcome")
+    assert ("status", "Complete — no findings") in outcome["rows"]
+    assert not any(section.get("type") == "findings" for section in sections)

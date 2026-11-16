@@ -99,6 +99,63 @@ The overall deadline, per-leaf limit, configured search-round count, routing
 checks, and fabrication gates are unchanged. If the combined search deadline
 is already exhausted, parent composition does not start.
 
+## Engineering review without fabrication approval
+
+**Experimental:** the bounded-launch native path has not completed a full
+`good`/seed-0 replay. Its current USB smoke is blocked. Do not deploy the native
+patch or interpret passing contract tests as board-routing qualification.
+
+`build` and `replay` accept `--engineering-review`. This is an explicit routing
+mode, not manufacturing approval:
+
+```sh
+.venv/bin/python -m kicraft.design.cli_app replay STATE.json OUT_DIR \
+  --quality good --seed 0 --engineering-review --no-fab --no-archive
+```
+
+Declared USB routing requires the strict-coupled Python frontend patch on the
+pinned source, without replacing the native binary. Apply it to a separate
+checkout and scope the configured backend path to that checkout:
+
+```sh
+patch -d "$KRT_REVIEW_CHECKOUT" -p1 \
+  < deploy/tuning-i7/kicad-routing-tools-strict-coupled.patch
+export KICRAFT_KICAD_ROUTING_TOOLS_PATH="$KRT_REVIEW_CHECKOUT"
+```
+
+The adapter rejects a frontend lacking `--require-coupled`. This policy attempts
+short links as coupled routes instead of automatically deferring them to
+independent member routing; physically unroutable copper remains a failure.
+
+The derived sidecar records `usb_geometry_mode: engineering_review`; subsequent
+invocations must repeat the flag. USB width/gap come from the pinned nominal
+stackup solver on the actual board, with `calculated_unconfirmed` provenance.
+The model excludes outer soldermask and fabrication tolerances. It does not
+substitute a different layer count, thickness, or copper weight.
+
+`--usb-bounded-launches` additionally permits explicitly uncontrolled local pad
+launches and same-component duplicate-contact joins in engineering review only.
+The generated sidecar records `usb_review_allow_bounded_launches: true`; ordinary
+fabrication mode rejects that policy. Narrow copper uses the real fabrication
+floor, not a fictitious 90 Ω rating. Endpoint launches are bounded by two calculated
+main-pair pitches; a short local link may consume both endpoint allowances and is
+reported as `bounded_local`, not coupled 90 Ω copper. Contact joins have separate
+length/envelope bounds derived from the declared contact pads, clearance and
+launch width. The complete USB chain must still contain genuinely coupled,
+full-profile main copper. Verification lists uncontrolled copper, including alias
+branches, and retains reference, skew, transition, connectivity and clearance
+checks. The bounded policy does not enable whole-net independent routing fallback
+or fabrication release.
+
+Coupled routing, copper custody, physical connectivity, skew, reference copper,
+return transitions, thermal and ordinary DRC checks remain required. Independent
+USB-member fallback is not accepted. A routed review candidate is still
+unapproved: the final verification gate blocks fabrication acceptance and export,
+writes an engineering-review receipt, and returns `7`. Inspect that receipt and
+the full verification receipt to distinguish the intentional release block from
+real physical failures. An ordinary fabrication invocation still requires genuine,
+stackup-bound fabrication approval.
+
 ## Verification
 
 The production verifier is the `replay` CLI against a cold scratch copy, followed by the `artifacts` resolver and a fresh `kicad-cli pcb drc` on the promoted board. The verdict must show a fresh routed parent and promoted board from one run, zero shorts/unconnected, and zero missing authoritative input traces or vias.

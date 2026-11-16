@@ -13,6 +13,7 @@ import math
 import os
 import random
 import time
+from collections import OrderedDict
 from contextlib import contextmanager
 from typing import NamedTuple
 
@@ -1052,16 +1053,26 @@ class PlacementSolver:
         gap = max(self.legality_clearance,
                   float(self.cfg.get("courtyard_overlap_min_gap_mm", 0.15)))
 
+        ordered_groups = _ordered_local_groups(groups)
+        for owner_ref, specs in ordered_groups:
+            if len({s["bypass_ref"] for s in specs}) != len(specs):
+                raise ValueError(f"{owner_ref}: duplicate local bypass ownership")
 
-        for owner_ref, specs in _ordered_local_groups(groups):
+        # The same candidate builder serves anchor enumeration and the joint
+        # fixed-domain search. Only already selected anchors are obstacles;
+        # unselected movable members instead compete in the joint search.
+        active_members = set()
+        selected_anchors = set()
+        roots = set()
+
+        def search_group(owner_ref, specs, *, check_only=False, domains=None):
             owner = comps[owner_ref]
             owner_pads = {p.pad_id: p for p in owner.pads}
             cap_refs = {s["bypass_ref"] for s in specs}
-            if len(cap_refs) != len(specs):
-                raise ValueError(f"{owner_ref}: duplicate local bypass ownership")
             def obstacle(ref, component):
-                return (not reserve or ref == owner_ref or ref in cap_refs
-                        or self._locality_fixed(ref, component))
+                return (check_only or ref in roots or ref in selected_anchors
+                        or self._locality_fixed(ref, component)
+                        or not reserve and ref not in active_members)
 
             # Components in comps do not move during a group search: selected
             # poses are installed only after assignment, at the end of the
@@ -1132,8 +1143,8 @@ class PlacementSolver:
                             return False
                 return True
 
-            if all(current_is_valid(spec) for spec in specs):
-                continue
+            if check_only:
+                return all(current_is_valid(spec) for spec in specs)
             options = []
             for spec in specs:
                 cap_ref = spec["bypass_ref"]
@@ -1167,7 +1178,7 @@ class PlacementSolver:
                         return False
                     candidate_bounds = {}
                     if any(overlaps(candidate, other, candidate_bounds) for ref, other in comps.items()
-                           if ref not in cap_refs and obstacle(ref, other)):
+                           if ref != cap_ref and obstacle(ref, other)):
                         return False
                     for keepout in getattr(self.state, "keepout_rects", None) or []:
                         if keepout.owner_ref != cap_ref:
@@ -1212,10 +1223,15 @@ class PlacementSolver:
                             for iy in range(-steps, steps + 1):
                                 if math.hypot(ix * pitch, iy * pitch) > limit:
                                     continue
-                                old = Point(candidate.pos.x, candidate.pos.y)
                                 candidate.pos = Point(anchor.x + ix * pitch - offset.x,
                                                       anchor.y + iy * pitch - offset.y)
-                                _update_pad_positions(candidate, old, candidate.rotation)
+                                # Start from immutable geometry; incremental
+                                # grid steps drift outside exact board margins.
+                                candidate.body_center = prototype.body_center
+                                for pad, original_pad in zip(
+                                        candidate.pads, prototype.pads, strict=True):
+                                    pad.pos = original_pad.pos
+                                _update_pad_positions(candidate, prototype.pos, prototype.rotation)
                                 ds = distances(candidate)
                                 if max(ds) <= limit and legal(candidate):
                                     score = (max(ds), sum(ds), cap.pos.dist(candidate.pos))
@@ -1250,7 +1266,7 @@ class PlacementSolver:
                     candidate_bounds = {}
                     blockers = [
                         component_evidence(other) for ref, other in comps.items()
-                        if ref not in cap_refs and obstacle(ref, other)
+                        if ref != cap_ref and obstacle(ref, other)
                         and overlaps(cap, other, candidate_bounds)
                     ]
                     keepout_blockers = []
@@ -1288,14 +1304,64 @@ class PlacementSolver:
                 candidates.sort(key=lambda row: row[0])
                 options.append((cap_ref, candidates))
 
+            if domains is None:
+                return options
+            options = domains
             # Propagate courtyard conflicts before descending. Fixed-order
             # permutation search over large identical capacitor banks can
             # revisit the same impossible free-space state for hours.
             options.sort(key=lambda row: len(row[1]))
             chosen: list[tuple[str, _LocalPlacementPose]] = []
             compatible_masks: dict[tuple[int, int, int], int] = {}
-            failed_states: set[tuple[tuple[int, int], ...]] = set()
+            # A forgotten failure is recomputed, never treated as a result.
+            # Bound the cache by the size of this finite-domain problem.
+            failed_states: OrderedDict[tuple[tuple[int, int], ...], None] = OrderedDict()
+            failed_limit = sum(len(poses) for _, poses in options)
             option_bounds = [[pose.bounds for _, pose in poses] for _, poses in options]
+            protected_refs = {
+                keepout.owner_ref for keepout in
+                (getattr(self.state, "keepout_rects", None) or [])
+            } | {entry.get("ref") for entry in self.cfg.get("parent_keep_in_rects", [])}
+            symmetry_groups = {}
+            symmetry_index = {}
+            for index, (ref, poses) in enumerate(options):
+                component = comps[ref]
+                if (self._locality_fixed(ref, component) or ref in protected_refs
+                        or component.block_blocker_set is not None
+                        or component.block_rotation_geometry is not None
+                        or component.block_artifact_origin_offset is not None
+                        or component.block_side is not None
+                        or component.block_force_back_only
+                        or component.block_stacked_anchor is not None
+                        or component.block_nested_anchor is not None
+                        or component.array_member):
+                    continue
+                # Exchange reference labels only when complete physical and
+                # electrical pose alternatives match exactly, not merely boxes.
+                signature = (
+                    component.value, component.kind, component.layer,
+                    tuple(sorted(json.dumps({k: v for k, v in spec.items()
+                                             if k != "bypass_ref"}, sort_keys=True)
+                                 for _, spec in contracts[ref])),
+                    frozenset((
+                        pose.bounds, pose.rotation, pose.width_mm, pose.height_mm,
+                        (pose.pos.x, pose.pos.y),
+                        None if pose.body_center is None else
+                        (pose.body_center.x, pose.body_center.y),
+                        tuple((pad.pad_id, pad.net, pad.layer, position.x, position.y,
+                               None if pad.size_mm is None else
+                               (pad.size_mm.x, pad.size_mm.y))
+                              for pad, position in zip(
+                                  pose.prototype.pads, pose.pad_positions, strict=True)),
+                    ) for _, pose in poses),
+                )
+                symmetry_index[index] = symmetry_groups.setdefault(signature, index)
+
+            def symmetry_ordered(index, bounds, other_index, other_bounds):
+                group = symmetry_index.get(index)
+                if group is None or group != symmetry_index.get(other_index):
+                    return True
+                return bounds <= other_bounds if index < other_index else bounds >= other_bounds
             posed_components: dict[tuple[int, int], Component] = {}
 
             def posed_component(index, candidate_index):
@@ -1315,6 +1381,9 @@ class PlacementSolver:
                 ax0, ay0, ax1, ay1 = option_bounds[index][candidate_index]
                 mask = 0
                 for n, (_, other) in enumerate(options[other_index][1]):
+                    if not symmetry_ordered(index, option_bounds[index][candidate_index],
+                                            other_index, option_bounds[other_index][n]):
+                        continue
                     if (candidate.prototype.block_blocker_set is not None
                             and other.prototype.block_blocker_set is not None):
                         a = posed_component(index, candidate_index)
@@ -1354,7 +1423,9 @@ class PlacementSolver:
                         if assign(rest, next_available):
                             return True
                         chosen.pop()
-                failed_states.add(key)
+                if len(failed_states) >= failed_limit:
+                    failed_states.popitem(last=False)
+                failed_states[key] = None
                 return False
 
             available = [(1 << len(candidates)) - 1 for _, candidates in options]
@@ -1383,8 +1454,120 @@ class PlacementSolver:
                         sort_keys=True, separators=(",", ":"),
                     )
                 )
-            for ref, component in chosen:
-                comps[ref] = component.materialize()
+            return chosen
+
+        if not reserve and all(search_group(ref, specs, check_only=True)
+                               for ref, specs in ordered_groups):
+            return
+
+        families = {}
+        for owner_ref, specs in ordered_groups:
+            family = self._local_bypass_group_by_ref.get(owner_ref, owner_ref)
+            families.setdefault(family, []).append((owner_ref, specs))
+
+        for family_groups in families.values():
+            contracts = {}
+            for owner_ref, specs in family_groups:
+                for spec in specs:
+                    contracts.setdefault(spec["bypass_ref"], []).append((owner_ref, spec))
+            active_members = set(contracts)
+            roots = {ref for ref, _ in family_groups if ref not in active_members}
+            anchors = [ref for ref, _ in family_groups if ref in active_members]
+            anchor_set = set(anchors)
+            leaves = [ref for ref in contracts if ref not in anchor_set]
+            # Reject impossible fixed/tight members before building large bulk
+            # domains for an anchor pose that cannot satisfy them.
+            leaves.sort(key=lambda ref: (
+                not self._locality_fixed(ref, comps[ref]),
+                min(float(spec["max_distance_mm"]) for _, spec in contracts[ref]),
+            ))
+            selected_anchors = set()
+            failure = None
+
+            def domain(ref):
+                # Retain every contract's original lattice, then intersect
+                # physical pad-distance constraints rather than overwriting
+                # one owner's contract with another's.
+                candidates = []
+                seen = set()
+                last_error = None
+                for owner_ref, spec in contracts[ref]:
+                    try:
+                        rows = search_group(owner_ref, [spec])[0][1]
+                    except LocalBypassPlacementError as exc:
+                        last_error = exc
+                        continue
+                    for score, pose in rows:
+                        key = (pose.pos.x, pose.pos.y, pose.rotation)
+                        if key not in seen:
+                            seen.add(key)
+                            candidates.append((score, pose))
+                if not candidates:
+                    raise last_error
+                candidates.sort(key=lambda row: row[0])
+                for other_owner, other_spec in contracts[ref]:
+                    owner_pads = {p.pad_id: p for p in comps[other_owner].pads}
+                    member_pads = {p.pad_id: (i, p) for i, p in enumerate(comps[ref].pads)}
+                    pairs = (other_spec["power_pins"], other_spec["ground_pins"])
+                    for owner_ids, member_id in pairs:
+                        owner_ids = [owner_ids] if isinstance(owner_ids, str) else list(owner_ids)
+                        if (not owner_ids or member_id not in member_pads
+                                or any(pin not in owner_pads for pin in owner_ids)):
+                            raise ValueError(f"local bypass {other_owner}/{ref} missing pads")
+                        member_pad = member_pads[member_id][1]
+                        if (not member_pad.net
+                                or any(owner_pads[pin].net != member_pad.net for pin in owner_ids)):
+                            raise ValueError(f"local bypass {other_owner}/{ref} has mismatched nets")
+                    limit = float(other_spec["max_distance_mm"])
+                    def satisfies(pose):
+                        for owner_ids, member_id in pairs:
+                            owner_ids = [owner_ids] if isinstance(owner_ids, str) else owner_ids
+                            position = pose.pad_positions[member_pads[member_id][0]]
+                            if min(owner_pads[pin].pos.dist(position) for pin in owner_ids) > limit:
+                                return False
+                        return True
+                    candidates = [(score, pose) for score, pose in candidates if satisfies(pose)]
+                    if not candidates:
+                        raise LocalBypassPlacementError(
+                            f"local bypass {other_owner}/{ref}: no pose satisfies all ownership contracts")
+                return (ref, candidates)
+
+            def solve_anchors(index):
+                nonlocal failure
+                if index == len(anchors):
+                    try:
+                        domains = [domain(ref) for ref in leaves]
+                        return dict(search_group(family_groups[0][0], [], domains=domains))
+                    except LocalBypassPlacementError as exc:
+                        failure = exc
+                        return None
+                ref = anchors[index]
+                try:
+                    _, candidates = domain(ref)
+                except LocalBypassPlacementError as exc:
+                    failure = exc
+                    return None
+                original = comps[ref]
+                try:
+                    for _, pose in candidates:
+                        comps[ref] = pose.materialize()
+                        comps[ref].locked = True
+                        selected_anchors.add(ref)
+                        result = solve_anchors(index + 1)
+                        if result is not None:
+                            result[ref] = pose
+                            return result
+                    return None
+                finally:
+                    selected_anchors.discard(ref)
+                    comps[ref] = original
+
+            solution = solve_anchors(0)
+            if solution is None:
+                raise failure or LocalBypassPlacementError(
+                    f"local bypasses for {family_groups[0][0]}: no joint legal placement")
+            for ref, pose in solution.items():
+                comps[ref] = pose.materialize()
 
     def _locality_fixed(self, ref: str, component: Component) -> bool:
         """Explicit/pinned geometry must never be moved to satisfy locality."""
@@ -1424,8 +1607,15 @@ class PlacementSolver:
                 for ref in (ref, *(spec["bypass_ref"] for spec in groups[ref]))
             ))
             ordered = _ordered_local_groups(groups, preferred)
+            reserved_families = set()
             for owner_ref, specs in ordered:
-                self.cfg["local_bypasses"] = specs
+                family = self._local_bypass_group_by_ref[owner_ref]
+                if family in reserved_families:
+                    continue
+                family_groups = [(ref, items) for ref, items in ordered
+                                 if self._local_bypass_group_by_ref[ref] == family]
+                family_specs = [spec for _, items in family_groups for spec in items]
+                self.cfg["local_bypasses"] = family_specs
                 owner = comps[owner_ref]
                 original_pos = Point(owner.pos.x, owner.pos.y)
                 fixed = self._locality_fixed(owner_ref, owner)
@@ -1441,7 +1631,26 @@ class PlacementSolver:
                     angles = sorted({angle % 360 for angle in (
                         owner.allowed_rotations or (0, 90, 180, 270)
                     )})
-                    for angle in angles:
+                    nested_pins = {
+                        (spec["pin_pairs"][0][0] if "pin_pairs" in spec
+                         else spec["power_pins"][0])
+                        for spec in specs if spec["bypass_ref"] in groups
+                    }
+                    if nested_pins:
+                        def inward_angle(angle):
+                            rotated = copy.deepcopy(owner)
+                            rotate_component_in_place(rotated, angle - rotated.rotation)
+                            center = rotated.body_center or rotated.pos
+                            vectors = [(pad.pos.x - center.x, pad.pos.y - center.y)
+                                       for pad in rotated.pads if pad.pad_id in nested_pins]
+                            # The reservation lattice starts at the top left.
+                            return (-sum(y for _, y in vectors),
+                                    -sum(x for x, _ in vectors), angle)
+                        angles.sort(key=inward_angle)
+                    # Try coarse bank hints for every rotation before any
+                    # full grid. The second pass retains the complete grid.
+                    for hints, angle in ((hints, angle) for hints in (True, False)
+                                         for angle in angles):
                         old = Point(owner.pos.x, owner.pos.y)
                         owner.pos = Point(original_pos.x, original_pos.y)
                         _update_pad_positions(owner, old, owner.rotation)
@@ -1456,6 +1665,39 @@ class PlacementSolver:
                         inset_y = min(_PAD_INSET_ROUNDOFF_MM, max(0.0, bottom - top) / 2)
                         left, right = left + inset_x, right - inset_x
                         top, bottom = top + inset_y, bottom - inset_y
+                        if hints and len(family_specs) > 1 and (not single_family or nested_pins):
+                            # Pack joint banks on a coarse envelope lattice,
+                            # rather than jumping across a wide fallback canvas.
+                            # Retain stable orientations, all hard checks and
+                            # the exhaustive owner grid below.
+                            # Descendants are checked jointly, not projected
+                            # into an oversized circular owner envelope.
+                            reach = max(float(spec["max_distance_mm"]) for spec in specs)
+                            low_x, high_x = left + reach, right - reach
+                            low_y, high_y = top + reach, bottom - reach
+                            if low_x > high_x:
+                                low_x = high_x = (left + right) / 2
+                            if low_y > high_y:
+                                low_y = high_y = (top + bottom) / 2
+                            pitch_x = 2 * reach + (high.x - low.x) + self.clearance
+                            pitch_y = 2 * reach + (high.y - low.y) + self.clearance
+                            hint_xs = [
+                                low_x + n * pitch_x
+                                for n in range(math.floor((high_x - low_x) / pitch_x) + 1)
+                            ]
+                            hint_ys = [
+                                low_y + n * pitch_y
+                                for n in range(math.floor((high_y - low_y) / pitch_y) + 1)
+                            ]
+                            if hint_xs[-1] < high_x - 1e-9:
+                                hint_xs.append(high_x)
+                            if hint_ys[-1] < high_y - 1e-9:
+                                hint_ys.append(high_y)
+                            for hint_y in hint_ys:
+                                for hint_x in hint_xs:
+                                    yield hint_x - original_pos.x, hint_y - original_pos.y
+                        if hints:
+                            continue
                         xs = [left + x for x in range(math.floor(right - left) + 1)]
                         ys = [top + y for y in range(math.floor(bottom - top) + 1)]
                         if xs and xs[-1] < right - 1e-9:
@@ -1497,8 +1739,15 @@ class PlacementSolver:
                             failure_reason = "antenna_pad_inset"
                             continue
                     elif owner_ref not in getattr(self, "_fabricated_edge_refs", set()):
-                        if (tl.x < board_tl.x + margin or tl.y < board_tl.y + margin
-                                or br.x > board_br.x - margin or br.y > board_br.y - margin):
+                        # Match the edge pinning policy, including its authored
+                        # connector inset; general components retain the margin.
+                        edge = (self.cfg.get("component_zones") or {}).get(owner_ref, {}).get("edge")
+                        inset = float(self.cfg.get("connector_edge_inset_mm", 1.0))
+                        epsilon = _PAD_INSET_ROUNDOFF_MM
+                        if (tl.x < board_tl.x + (inset if edge == "left" else margin) - epsilon
+                                or tl.y < board_tl.y + (inset if edge == "top" else margin) - epsilon
+                                or br.x > board_br.x - (inset if edge == "right" else margin) + epsilon
+                                or br.y > board_br.y - (inset if edge == "bottom" else margin) + epsilon):
                             failure_reason = "owner_board_margin"
                             continue
                     blocked = False
@@ -1552,8 +1801,16 @@ class PlacementSolver:
                     except LocalBypassPlacementError as exc:
                         failure = exc
                         continue
-                    for ref in (owner_ref, *(spec["bypass_ref"] for spec in specs)):
-                        comps[ref].locked = True
+                    except BaseException:
+                        rotate_component_in_place(owner, original_rotation - owner.rotation)
+                        old = Point(owner.pos.x, owner.pos.y)
+                        owner.pos = original_pos
+                        _update_pad_positions(owner, old, owner.rotation)
+                        raise
+                    for ref, member_family in self._local_bypass_group_by_ref.items():
+                        if member_family == family:
+                            comps[ref].locked = True
+                    reserved_families.add(family)
                     break
                 else:
                     def box(rect):
@@ -2124,8 +2381,10 @@ class PlacementSolver:
             """Occupied parallel-axis span and its center offset from ``pos``."""
             intent = self._antenna_intents_by_ref.get(comp.ref)
             if intent is None or not intent.local_polygon:
-                size = comp.height_mm if edge in ("left", "right") else comp.width_mm
-                return size, 0.0
+                low, high = comp.physical_bbox()
+                if edge in ("left", "right"):
+                    return high.y - low.y, (high.y + low.y) / 2 - comp.pos.y
+                return high.x - low.x, (high.x + low.x) / 2 - comp.pos.x
             body_tl, body_br = comp.bbox()
             if edge in ("left", "right"):
                 lows = [body_tl.y - comp.pos.y]

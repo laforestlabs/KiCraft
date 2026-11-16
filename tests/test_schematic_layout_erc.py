@@ -236,3 +236,59 @@ def test_intermediate_input_bus_is_erc_clean(tmp_path) -> None:
     emit_schematic(tmp_path, "PDBUCK", arch, bom, title="PDBUCK")
     result = check_erc(tmp_path, "PDBUCK")
     assert result.ok, f"PDBUCK ERC: {result.message}\n" + "\n".join(result.offenders)
+
+
+def test_large_rail_bank_wraps_without_changing_connectivity(tmp_path) -> None:
+    from collections import Counter
+    from kicraft.design.synthesis.placement import place_sheet
+
+    arch, bom = _ldo()
+    bom.group_labels["U1"] = "3V3 regulator"
+    template = next(part for part in bom.parts if part.ref == "C1")
+    vbus = next(conn for conn in bom.connections if conn.net_name == "VBUS")
+    ground = next(conn for conn in bom.connections if conn.net_name == "GND")
+    for index in range(3, 10):
+        ref = f"C{index}"
+        bom.parts.append(template.model_copy(update={"ref": ref}))
+        bom.ic_groups["U1"].append(ref)
+        vbus.endpoints.append(_P(ref, "1"))
+        ground.endpoints.append(_P(ref, "2"))
+    positions = {p.ref: p for p in place_sheet(arch.sheets[0], bom.parts, bom)}
+    bank_rows = Counter(positions[f"C{index}"].y_mm for index in [1, *range(3, 10)])
+    assert len(bank_rows) == 2 and max(bank_rows.values()) <= 6
+
+    emit_schematic(tmp_path, "BANK", arch, bom, title="BANK")
+    drawing = (tmp_path / "LDO_3V3.kicad_sch").read_text()
+    assert '(text "U1: 3V3 regulator (AP2112K-3.3)"' in drawing
+    erc = check_erc(tmp_path, "BANK")
+    assert erc.ok, f"{erc.message}\n" + "\n".join(erc.offenders)
+    faith = check_netlist_faithfulness(tmp_path, "BANK", bom)
+    assert faith.ok, f"{faith.message}\n" + "\n".join(faith.offenders)
+
+
+def test_shared_input_capacitors_stay_with_own_converter():
+    from kicraft.design.synthesis.placement import place_sheet
+
+    arch, bom = _ldo()
+    converter = bom.parts[0]
+    converter.recipe_id = "example@1"
+    converter.recipe_instance = "first"
+    converter.recipe_role = "converter"
+    second = converter.model_copy(update={"ref": "U2", "recipe_instance": "second"})
+    bom.parts.append(second)
+    input_net = next(conn for conn in bom.connections if conn.net_name == "VBUS")
+    ground = next(conn for conn in bom.connections if conn.net_name == "GND")
+    input_net.net_name = "PROTECTED_INPUT"
+    input_net.endpoints.append(_P("U2", "1"))
+    template = next(part for part in bom.parts if part.ref == "C1")
+    for index in range(3, 11):
+        ref = f"C{index}"
+        bom.parts.append(template.model_copy(update={
+            "ref": ref, "recipe_id": "example@1",
+            "recipe_instance": "second", "recipe_role": "input_cap",
+        }))
+        input_net.endpoints.append(_P(ref, "1"))
+        ground.endpoints.append(_P(ref, "2"))
+    positions = {p.ref: p for p in place_sheet(arch.sheets[0], bom.parts, bom)}
+    assert len({positions[f"C{i}"].y_mm for i in range(3, 11)}) == 2
+    assert min(positions[f"C{i}"].x_mm for i in range(3, 11)) > positions["U1"].x_mm

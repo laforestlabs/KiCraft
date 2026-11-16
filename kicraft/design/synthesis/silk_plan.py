@@ -24,6 +24,115 @@ import unicodedata
 from kicraft.design.models import SilkAnchor, SilkLabel, SilkPinText
 
 from .electrical_review import _extract_json
+from kicraft.evidence_digest import EvidenceSection, render_bounded_evidence
+from .interface_facts import reviewed_interface_facts
+
+
+def required_labels(state, project_root=None) -> list[SilkLabel]:
+    labels = []
+    for fact in reviewed_interface_facts(state, project_root):
+        ref = fact["ref"]
+        base = fact["required_label_ids"][0]
+        labels.append(SilkLabel(id=base, kind="io", text="\n".join(fact["lines"]),
+                                anchor=SilkAnchor(ref=ref, prefer="above"), priority=1, required=True))
+        if fact["pins"]:
+            labels.append(SilkLabel(id=f"{base}:pins", kind="pinout", text="",
+                                    anchor=SilkAnchor(ref=ref), priority=1, required=True,
+                                    pins=[SilkPinText(pin=p["pin"], text=p["text"])
+                                          for p in fact["pins"]]))
+    return labels
+
+
+def merge_required_labels(state, optional, project_root=None) -> list[SilkLabel]:
+    required = required_labels(state, project_root)
+    return required + [label for label in optional if not label.required
+                       and not label.id.startswith("required:")]
+
+
+def required_silk_defects(state, placed_ids=None, project_root=None) -> list[str]:
+    expected = required_labels(state, project_root)
+    plan = getattr(state, "silk_plan", None)
+    present = {label.id: label for label in (plan.labels if plan else [])}
+    defects = [f"required silk {label.id}: missing or changed"
+               for label in expected if present.get(label.id) != label]
+    facts = reviewed_interface_facts(state, project_root)
+    known = {fact["ref"] for fact in facts}
+    bom = getattr(state, "bom", None)
+    if bom:
+        wired = {ep.ref for net in bom.connections for ep in net.endpoints}
+        for part in bom.parts:
+            if part.ref in wired and part.ref not in known and any(
+                    part.ref.startswith(prefix) for prefix in _CONNECTOR_PREFIXES):
+                defects.append(f"required silk {part.ref}: interface function not verified")
+            if (part.ref in wired and part.ref not in known
+                    and part.recipe_role in {"boot_button", "reset_button"}):
+                defects.append(f"required silk {part.ref}: control function not verified")
+    if placed_ids is not None:
+        placed = set(placed_ids)
+        for fact in facts:
+            for label_id in fact["required_label_ids"]:
+                if label_id not in placed:
+                    defects.append(f"required silk {label_id}: not placed")
+    return defects
+
+
+def build_interface_digest(state, *, project_root=None, budget: int = 96000) -> str:
+    """Project connector/control circuits independently of the review prompt."""
+    from .electrical_review import _pin_names
+
+    bom = state.bom
+    if bom is None:
+        sections = [EvidenceSection("INTERFACES", "No committed BOM.", complete=False)]
+    else:
+        sections = []
+        parts = {part.ref: part for part in bom.parts}
+        interfaces = [
+            part for part in bom.parts
+            if any(part.ref.startswith(prefix) for prefix in _CONNECTOR_PREFIXES)
+            or part.ref.startswith("SW")
+            or part.symbol.startswith("Switch:")
+        ]
+        arch = state.architecture
+        for part in interfaces:
+            owners = [owner for owner in bom.recipe_ownership if part.ref in owner.refs]
+            refs = {part.ref} | {ref for owner in owners for ref in owner.refs}
+            nets = [
+                net for net in bom.connections
+                if any(endpoint.ref in refs for endpoint in net.endpoints)
+            ]
+            refs.update(endpoint.ref for net in nets for endpoint in net.endpoints)
+            names = {ref: _pin_names(parts[ref].symbol, project_root) for ref in refs}
+            requirement_ids = {rid for owner in owners for rid in owner.requirement_ids}
+            facts = {
+                "anchor": part.ref,
+                "parts": [
+                    {"ref": ref, "value": parts[ref].value, "symbol": parts[ref].symbol,
+                     "mpn": parts[ref].mpn, "recipe_role": parts[ref].recipe_role}
+                    for ref in sorted(refs)
+                ],
+                "nets": [
+                    {"net": net.net_name, "pins": [
+                        {"ref": ep.ref, "pin": ep.pin, "function": names[ep.ref].get(ep.pin)}
+                        for ep in net.endpoints
+                    ]}
+                    for net in nets
+                ],
+                "owners": [
+                    {"recipe": owner.recipe, "instance": owner.instance,
+                     "requirements": owner.requirement_ids, "assertions": owner.assertions}
+                    for owner in owners
+                ],
+                "requirements": [
+                    req.model_dump(mode="json") for req in (arch.requirements if arch else [])
+                    if req.id in requirement_ids
+                ],
+                "rail_voltages": arch.rail_voltages if arch else {},
+            }
+            sections.append(EvidenceSection(
+                f"INTERFACE {part.ref}", json.dumps(facts, separators=(",", ":"), sort_keys=True),
+            ))
+    return render_bounded_evidence("CONNECTOR / CONTROL EVIDENCE", sections, budget=budget)
+
 
 _MAX_LABELS = 10
 _MAX_LINES = 5
@@ -180,7 +289,9 @@ def lint_labels(
     """
     bom = getattr(state, "bom", None)
     parts_by_ref = {p.ref: p for p in (bom.parts if bom else [])}
-    corpus = build_corroboration_corpus(state)
+    fact_corpora = {fact["ref"]: _claim_tokens(" ".join(fact["lines"] + [
+        pin["text"] for pin in fact["pins"]]))
+        for fact in reviewed_interface_facts(state, project_root)}
 
     kept: list[SilkLabel] = []
     dropped: list[str] = []
@@ -215,6 +326,8 @@ def lint_labels(
         prefer = anchor_raw.get("prefer")
         if prefer not in ("above", "below", "left", "right"):
             prefer = None
+        corpus = fact_corpora.get(ref, set())
+
 
         claims = _claim_tokens(text)
         unbacked = sorted(f"{n}{u}" for n, u in claims - corpus)
@@ -349,6 +462,9 @@ def uncovered_connectors(kept: list[SilkLabel], state) -> list[str]:
     anchored_refs = {
         lb.anchor.ref for lb in kept
         if lb.anchor is not None and lb.anchor.ref is not None
+        and ((lb.kind == "pinout" and bool(lb.pins)) or
+             (lb.kind != "pinout" and lb.text.strip()
+              and lb.text.strip().upper() != lb.anchor.ref.upper()))
     }
     return sorted(connector_refs & wired_refs - anchored_refs)
 
@@ -400,6 +516,9 @@ def author_labels(
 
 
 __all__ = [
+    "required_labels",
+    "merge_required_labels",
+    "required_silk_defects",
     "author_labels",
     "lint_labels",
     "build_corroboration_corpus",

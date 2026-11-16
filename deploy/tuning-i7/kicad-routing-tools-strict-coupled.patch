@@ -1,0 +1,707 @@
+EXPERIMENTAL: bounded local USB routing has not completed a full good/seed0 replay.
+The current native USB smoke is blocked; do not deploy this patch as qualified routing.
+Against pinned commit 8eeee55fd4ba4ed600b11bd8214de9994e8f5396; native binary0.20.1 unchanged.
+Apply only to a separate checkout:
+  patch -d "$KRT_REVIEW_CHECKOUT" -p1 < deploy/tuning-i7/kicad-routing-tools-strict-coupled.patch
+Point kicad_routing_tools_path or the scoped KICRAFT_KICAD_ROUTING_TOOLS_PATH
+to that checkout. Strict mode forbids whole-member fallback. Local launch
+bundles are explicitly uncontrolled, not coupled90ohm routes. Independently
+verify real copper, skew, reference, DRC, custody and fabrication approval.
+
+--- a/py_router/routing_config.py
++++ b/py_router/routing_config.py
+@@ -125,6 +125,8 @@
+     direction_order: str = "forward"
+     # Differential pair routing parameters
+     diff_pair_gap: float = 0.101  # mm - gap between P and N traces (center-to-center = track_width + gap)
++    require_coupled: bool = False  # Never defer pair members to single-ended routing.
++    usb_bounded_launch_policy: Optional[dict] = None  # Explicit review-only terminal contract.
+     diff_pair_centerline_setback: float = None  # mm - distance in front of stubs to start centerline route (None = 2 * spacing)
+     diff_pair_setback_no_ladder: bool = False  # when True, _setback_ladder yields ONLY
+     # the configured setback (no 0.75/0.5/floor/1.5/2x expansion) -- used by the pinch
+--- a/py_router/diff_pair_loop.py
++++ b/py_router/diff_pair_loop.py
+@@ -125,6 +125,253 @@
+     return result
+ 
+ 
++def _route_usb_bounded(state, pair, config):
++    """Compose declared local joins and a coupled route without committing either alone."""
++    import math
++    import numpy as np
++    from routing_config import GridCoord
++    from obstacle_map import build_base_obstacle_map
++    from diff_pair_routing import (_route_hybrid_leg, _pad_obstacle_segments,
++        _connector_grazes_foreign_copper, _hybrid_route_connects, _pn_tracks_cross_full,
++        _usb_launch_config)
++
++    policy = config.usb_bounded_launch_policy
++    segment = policy['segment']
++    pcb = state.pcb_data
++    coord = GridCoord(config.grid_step)
++    limit = policy['max_length_mm']
++    nets = (pair.p_net_id, pair.n_net_id)
++    names = (pair.p_net_name, pair.n_net_name)
++    if (not config.require_coupled or segment['positive_net'] != names[0]
++            or segment['negative_net'] != names[1]):
++        raise ValueError("bounded USB policy requires the declared strict pair")
++    if (not all(isinstance(policy.get(k), (int, float)) and not isinstance(policy[k], bool)
++                and math.isfinite(policy[k]) and policy[k] > 0
++                for k in ('width_mm', 'gap_mm', 'max_length_mm'))
++            or policy['width_mm'] > config.track_width
++            or policy['gap_mm'] < config.clearance
++            or limit > 2 * (config.track_width + config.diff_pair_gap) + 1e-9):
++        raise ValueError("invalid bounded USB launch geometry")
++    narrow = _usb_launch_config(config, *nets)
++
++    groups = {}
++    for polarity, nid in zip(('positive', 'negative'), nets):
++        for side in ('from', 'to'):
++            declared = segment.get(polarity + '_' + side)
++            if not isinstance(declared, list) or not declared:
++                raise ValueError("missing bounded USB terminal group")
++            if len({ep['ref'] for ep in declared}) != 1:
++                raise ValueError("USB alias joins must stay on one component")
++            pads = []
++            for ep in declared:
++                matches = [p for p in pcb.pads_by_net.get(nid, [])
++                           if p.component_ref == ep['ref'] and str(p.pad_number) == str(ep['pin'])]
++                if len(matches) != 1 or matches[0] in pads:
++                    raise ValueError("USB terminal is missing or ambiguous")
++                pads.append(matches[0])
++            groups[(nid, side)] = pads
++
++    def layer(pad):
++        for i, name in enumerate(config.layers):
++            if name in pad.layers or '*.Cu' in pad.layers:
++                return i
++        raise ValueError("USB terminal has no routable copper layer")
++
++    # Select one declared P/N pad pair at each end. Every other declared alias
++    # is separately joined to that pad, never inferred from net proximity.
++    choices = {}
++    for side in ('from', 'to'):
++        choices[side] = [(p, n)
++                         for p in groups[(nets[0], side)] for n in groups[(nets[1], side)]
++                         if layer(p) == layer(n)]
++        if not choices[side]:
++            return None
++    def endpoint_cost(candidate):
++        start, end = candidate
++        lengths = [math.hypot(a.global_x-b.global_x, a.global_y-b.global_y)
++                   for a, b in zip(start, end)]
++        return sum(lengths), max(lengths), lengths[0]
++    source, target = min(((a, b) for a in choices['from'] for b in choices['to']),
++                         key=endpoint_cost)
++    primary = {(nid, side): pad
++               for side, pads in (('from', source), ('to', target))
++               for nid, pad in zip(nets, pads)}
++
++    narrow_base = build_base_obstacle_map(
++        pcb, narrow, nets, net_clearances=narrow.net_clearances)
++    leg_obstacles = build_diff_pair_leg_obstacles(
++        narrow_base, pcb, narrow, state.routed_net_ids, state.remaining_net_ids,
++        state.all_unrouted_net_ids, nets[0], nets[1], state.gnd_net_id,
++        state.track_proximity_cache, state.layer_map)
++    joins, spans = [], []
++    join_iterations = 0
++
++    def segment_rows(segs):
++        return [{'start': [s.start_x, s.start_y], 'end': [s.end_x, s.end_y],
++                 'layer': s.layer, 'width_mm': s.width} for s in segs]
++
++    # These staged segments are not committed to routing state or the board
++    # writer. The final candidate carries both polarities and is committed once.
++    original_count = len(pcb.segments)
++    try:
++        for nid, name in zip(nets, names):
++            partner = nets[1] if nid == nets[0] else nets[0]
++            partner_pads = pcb.pads_by_net.get(partner, [])
++            for side in ('from', 'to'):
++                target = primary[(nid, side)]
++                alias_group = groups[(nid, side)]
++                if len(alias_group) < 2:
++                    continue
++                polarity = 'positive' if nid == nets[0] else 'negative'
++                matching = [b for b in policy.get('contact_join_bounds', [])
++                            if b.get('segment_id') == segment['id']
++                            and b.get('polarity') == polarity and b.get('side') == side
++                            and b.get('ref') == target.component_ref
++                            and set(map(str, b.get('pins', []))) ==
++                                {str(p.pad_number) for p in alias_group}]
++                if len(matching) != 1:
++                    raise ValueError("missing or ambiguous component contact-join bound")
++                join_limit = matching[0]['max_length_mm']
++                envelope = matching[0]['envelope_mm']
++                if (isinstance(join_limit, bool) or not isinstance(join_limit, (int, float))
++                        or not math.isfinite(join_limit) or join_limit <= 0
++                        or len(envelope) != 4
++                        or any(isinstance(v, bool) or not isinstance(v, (int, float))
++                               or not math.isfinite(v) for v in envelope)
++                        or envelope[0] > envelope[2] or envelope[1] > envelope[3]):
++                    raise ValueError("invalid component contact-join bound")
++                gx0, gy0 = math.ceil(envelope[0]/config.grid_step), math.ceil(envelope[1]/config.grid_step)
++                gx1, gy1 = math.floor(envelope[2]/config.grid_step), math.floor(envelope[3]/config.grid_step)
++                if gx0 > gx1 or gy0 > gy1:
++                    return None
++                border = [(x, y) for x in range(gx0-1, gx1+2) for y in (gy0-1, gy1+1)]
++                border += [(x, y) for y in range(gy0, gy1+1) for x in (gx0-1, gx1+1)]
++                boundary = np.array([(x, y, layer_id) for x, y in border
++                                     for layer_id in range(len(config.layers))], dtype=np.int32)
++                for pad in groups[(nid, side)]:
++                    if pad is target:
++                        continue
++                    if layer(pad) != layer(target):
++                        return None
++                    partner_segs = [s for s in pcb.segments if s.net_id == partner]
++                    partner_segs += [s for p in partner_pads for s in _pad_obstacle_segments(p, config.layers)]
++                    partner_vias = [v for v in pcb.vias if v.net_id == partner]
++                    pair_vias = [v for v in pcb.vias if v.net_id in nets]
++                    join_obstacles = leg_obstacles.clone_fresh()
++                    join_obstacles.add_blocked_cells_batch(boundary)
++                    segs, vias, join_iters, _ = _route_hybrid_leg(
++                        pcb, nid, narrow, join_obstacles, config.layers, coord,
++                        (target.global_x, target.global_y, layer(target)),
++                        (pad.global_x, pad.global_y, layer(pad)), partner_segs,
++                        partner_vias, pair_vias, partner_pads=partner_pads)
++                    if segs is None or vias:
++                        return None
++                    length = sum(math.hypot(s.end_x-s.start_x, s.end_y-s.start_y) for s in segs)
++                    if length > join_limit + 1e-6 or _connector_grazes_foreign_copper(segs, pcb, *nets, narrow):
++                        return None
++                    if any(not (envelope[0]-1e-6 <= x <= envelope[2]+1e-6
++                                and envelope[1]-1e-6 <= y <= envelope[3]+1e-6)
++                           for s in segs for x, y in ((s.start_x, s.start_y), (s.end_x, s.end_y))):
++                        return None
++                    join_iterations += join_iters
++                    joins.extend(segs)
++                    pcb.segments.extend(segs)
++                    spans.append({'kind': 'alias_join', 'net': name, 'side': side,
++                                  'from': {'ref': pad.component_ref, 'pin': str(pad.pad_number)},
++                                  'to': {'ref': target.component_ref, 'pin': str(target.pad_number)},
++                                  'length_mm': length, 'max_length_mm': join_limit,
++                                  'envelope_mm': envelope, 'segments': segment_rows(segs),
++                                  'provenance': 'uncontrolled_launch'})
++
++        def endpoint(side):
++            p, n = primary[(nets[0], side)], primary[(nets[1], side)]
++            pg, ng = coord.to_grid(p.global_x, p.global_y), coord.to_grid(n.global_x, n.global_y)
++            return (*pg, *ng, layer(p), p.global_x, p.global_y, n.global_x, n.global_y)
++
++        endpoints = (endpoint('from'), endpoint('to'))
++        terminals = {nid: [primary[(nid, 'from')], primary[(nid, 'to')]] for nid in nets}
++        # A whole narrow local link is permitted only when the actual copper
++        # on each member fits in the two endpoint launch budgets.
++        local_possible = (segment.get('id') in ('connector_esd', 'series_mcu') and
++                          all(math.hypot(terminals[n][0].global_x-terminals[n][1].global_x,
++                                         terminals[n][0].global_y-terminals[n][1].global_y) <= 2*limit
++                              for n in nets))
++        candidate = None
++        local = False
++        if local_possible:
++            local_segments, local_iterations = [], 0
++            for nid in nets:
++                partner = nets[1] if nid == nets[0] else nets[0]
++                partner_pads = pcb.pads_by_net.get(partner, [])
++                partner_segments = [s for s in pcb.segments + local_segments if s.net_id == partner]
++                partner_segments += [s for p in partner_pads
++                                     for s in _pad_obstacle_segments(p, config.layers)]
++                start, finish = primary[(nid, 'from')], primary[(nid, 'to')]
++                member, vias, iterations, _ = _route_hybrid_leg(
++                    pcb, nid, narrow, leg_obstacles, config.layers, coord,
++                    (finish.global_x, finish.global_y, layer(finish)),
++                    (start.global_x, start.global_y, layer(start)), partner_segments,
++                    [v for v in pcb.vias if v.net_id == partner],
++                    [v for v in pcb.vias if v.net_id in nets], partner_pads=partner_pads)
++                if member is None or vias:
++                    return None
++                length = sum(math.hypot(s.end_x-s.start_x, s.end_y-s.start_y) for s in member)
++                if length > 2*limit + 1e-6 or _connector_grazes_foreign_copper(member, pcb, *nets, narrow):
++                    return None
++                local_segments.extend(member)
++                local_iterations += iterations
++            candidate = {'new_segments': local_segments, 'new_vias': [],
++                         'iterations': local_iterations, 'path_length': len(local_segments)}
++            local = True
++        if candidate is None:
++            obstacles, _ = build_diff_pair_obstacles(
++                state.diff_pair_base_obstacles, pcb, config, state.routed_net_ids,
++                state.remaining_net_ids, state.all_unrouted_net_ids, nets[0], nets[1],
++                state.gnd_net_id, state.track_proximity_cache, state.layer_map,
++                state.diff_pair_extra_clearance, add_own_stubs_func=add_own_stubs_as_obstacles_for_diff_pair)
++            candidate = _route_direct_coupled_middle(
++                pcb, pair, config, obstacles, config.layers, leg_obstacles=leg_obstacles,
++                endpoints=endpoints, terminal_pads=terminals)
++        if not candidate:
++            return None
++        segs = candidate['new_segments']
++        if _pn_tracks_cross_full(segs + joins, pcb, *nets):
++            return None
++        if _count_pn_overlaps([s for s in segs + joins if s.net_id == nets[0]],
++                              [s for s in segs + joins if s.net_id == nets[1]], config):
++            return None
++        if not _hybrid_route_connects(pcb, *nets, segs, candidate['new_vias'],
++                                      terminal_pads={n: groups[(n, 'from')] + groups[(n, 'to')] for n in nets}):
++            return None
++        if local:
++            for nid, name in zip(nets, names):
++                member = [s for s in segs if s.net_id == nid]
++                spans.append({'kind': 'local_link', 'net': name,
++                              'length_mm': sum(math.hypot(s.end_x-s.start_x, s.end_y-s.start_y) for s in member),
++                              'segments': segment_rows(member), 'provenance': 'uncontrolled_launch'})
++        else:
++            launch_ids = set()
++            for nid, side, length, launch in candidate.pop('usb_launch_spans', []):
++                launch_ids.update(map(id, launch))
++                spans.append({'kind': 'terminal_launch', 'net': names[nets.index(nid)],
++                              'side': side, 'length_mm': length, 'segments': segment_rows(launch),
++                              'provenance': 'uncontrolled_launch'})
++            if any(abs(s.width-config.track_width) > 1e-6 for s in segs if id(s) not in launch_ids):
++                return None
++            if not all(any(id(s) not in launch_ids and s.net_id == nid for s in segs) for nid in nets):
++                return None
++        candidate.pop('usb_launch_spans', None)
++        candidate['new_segments'] = joins + segs
++        candidate['is_diff_pair'] = not local
++        candidate['iterations'] += join_iterations
++        candidate['usb_bounded_receipt'] = {
++            'mode': 'bounded_uncontrolled', 'main_geometry': 'local_uncontrolled' if local else 'coupled',
++            'impedance_status': 'not_90_ohm_controlled_at_spans', 'spans': spans}
++        return candidate
++    finally:
++        del pcb.segments[original_count:]
++
++
+ def route_diff_pairs(
+     state: RoutingState,
+     diff_pair_ids_to_route: List[Tuple[str, DiffPairNet]],
+@@ -238,6 +485,41 @@
+                   f"track_proximity_cache: {prox_cache_mb:.1f} MB ({len(track_proximity_cache)} nets)")
+ 
+         start_time = time.time()
++        if config.usb_bounded_launch_policy:
++            result = _route_usb_bounded(state, pair, config)
++            total_time += time.time() - start_time
++            if not result:
++                failed += 1
++                record_pair_diag(state, pair_name, outcome='failed',
++                                 reason='bounded-launch-unroutable', stage='bounded-launch')
++                continue
++            def geometry(s):
++                return (s.net_id, s.layer, s.width, s.start_x, s.start_y, s.end_x, s.end_y)
++            expected = sorted(geometry(s) for s in result['new_segments'])
++            old_segments, old_vias = len(pcb_data.segments), len(pcb_data.vias)
++            add_route_to_pcb_data(pcb_data, result, debug_lines=config.debug_lines)
++            if sorted(geometry(s) for s in result['new_segments']) != expected:
++                del pcb_data.segments[old_segments:]
++                del pcb_data.vias[old_vias:]
++                failed += 1
++                record_pair_diag(state, pair_name, outcome='failed',
++                                 reason='bounded-copper-changed-on-commit', stage='bounded-launch')
++                continue
++            results.append(result)
++            successful += 1
++            total_iterations += result['iterations']
++            for nid in (pair.p_net_id, pair.n_net_id):
++                if nid in remaining_net_ids:
++                    remaining_net_ids.remove(nid)
++                routed_net_ids.append(nid)
++                routed_results[nid] = result
++                diff_pair_by_net_id[nid] = (pair_name, pair)
++                track_proximity_cache[nid] = compute_track_proximity_for_net(
++                    pcb_data, nid, config, layer_map)
++            if not hasattr(state, 'usb_bounded_launch_receipts'):
++                state.usb_bounded_launch_receipts = []
++            state.usb_bounded_launch_receipts.append(result['usb_bounded_receipt'])
++            continue
+ 
+         # Multi-point pairs (3+ pad-pair terminals) are routed as a chain of
+         # legs - a pair cannot tap mid-track without P/N crossing
+@@ -246,7 +528,8 @@
+         # A 2-terminal pair is a single leg: if it is electrically short, coupling
+         # gains nothing (and tangles through clustered connector pads), so leave
+         # the whole pair for the single-ended follow-up pass.
+-        if len(terminals) == 2 and leg_electrically_short(terminals[0], terminals[1], config):
++        if (not config.require_coupled and len(terminals) == 2
++                and leg_electrically_short(terminals[0], terminals[1], config)):
+             print(f"  Electrically short ({diff_pair_min_coupled_length(config):.1f}mm "
+                   f"coupled floor) - routing single-ended instead of coupled")
+             state.diff_pair_single_ended_nets[pair.p_net_id] = pair.p_net_name
+--- a/py_router/diff_pair_multipoint.py
++++ b/py_router/diff_pair_multipoint.py
+@@ -814,7 +814,7 @@
+     # differential connection, peel them off and route only the coupled
+     # terminals as a pair; the peeled pads are connected single-ended afterward.
+     coupled, uncoupled = classify_terminals(terminals, config)
+-    if uncoupled and len(coupled) >= 2:
++    if not config.require_coupled and uncoupled and len(coupled) >= 2:
+         far = min(terminal_separation(t) for t in uncoupled)
+         print(f"  Coupled chain failed; peeling {len(uncoupled)} far-apart terminal(s) "
+               f"(P/N >= {far:.1f}mm apart) to route single-ended, retrying "
+@@ -856,6 +856,10 @@
+             revert_stub_layer_switch(pcb_data, mods, vias)
+         print(f"  Stub layer switch bought nothing - reverted")
+ 
++    if config.require_coupled:
++        print("  Coupled routing failed; strict policy prohibits single-ended deferral")
++        return None, None, []
++
+     # No coupled chain could be routed and relocation didn't help (e.g. a dense
+     # connector fan-out whose pads are too tightly pitched to drop relocation
+     # vias - tigard /USB_D on a congested F.Cu). Rather than leave the pair
+@@ -1040,7 +1044,7 @@
+         # the pair through clustered pads - defer it to single-ended routing. The
+         # chain breaks here (next leg starts fresh); the deferred terminals are
+         # reconnected by the single-ended follow-up pass.
+-        if leg_electrically_short(term_a, term_b, config):
++        if not config.require_coupled and leg_electrically_short(term_a, term_b, config):
+             print(f"    electrically short (< {diff_pair_min_coupled_length(config):.1f}mm "
+                   f"coupled) - deferring leg to single-ended")
+             se_terminals.extend([chain[i], chain[i + 1]])
+--- a/py_router/diff_pair_routing.py
++++ b/py_router/diff_pair_routing.py
+@@ -1292,7 +1292,7 @@
+     # single-ended terminals get (#212); only segments touching a route
+     # terminal are considered, so the coupled middle (which keeps the pair
+     # gap >= clearance by construction) is never touched.
+-    if pcb_data is not None and float_path:
++    if pcb_data is not None and float_path and not getattr(config, 'usb_bounded_launch_policy', None):
+         from single_ended_routing import _neck_terminal_grazes
+         term_pts = [(float_path[0][0], float_path[0][1]),
+                     (float_path[-1][0], float_path[-1][1])]
+@@ -2418,6 +2418,18 @@
+                     width=a[4], layer=L, net_id=pad.net_id) for L in cu]
+ 
+ 
++def _usb_launch_config(config, p_net_id, n_net_id):
++    """Use the approved local width, without netclass/impedance width overrides."""
++    from dataclasses import replace
++    policy = config.usb_bounded_launch_policy
++    ids = {p_net_id, n_net_id}
++    return replace(config, track_width=policy['width_mm'], diff_pair_gap=policy['gap_mm'],
++                   layer_widths={}, coplanar_net_ids=config.coplanar_net_ids - ids,
++                   net_layer_widths={k: v for k, v in config.net_layer_widths.items() if k not in ids},
++                   net_track_widths={k: v for k, v in config.net_track_widths.items() if k not in ids},
++                   power_net_widths={k: v for k, v in config.power_net_widths.items() if k not in ids})
++
++
+ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_names,
+                                  leg_obstacles=None, endpoints=None, terminal_pads=None):
+     """Hybrid coupled middle (last resort): route a clean parallel P/N pair
+@@ -2436,6 +2448,11 @@
+     coord = GridCoord(config.grid_step)
+     p_net_id, n_net_id = diff_pair.p_net_id, diff_pair.n_net_id
+     spacing_mm = (config.track_width + config.diff_pair_gap) / 2
++    review_policy = getattr(config, 'usb_bounded_launch_policy', None)
++    if review_policy:
++        launch_config = _usb_launch_config(config, p_net_id, n_net_id)
++    else:
++        launch_config = config
+ 
+     if endpoints is not None:
+         src, tgt = endpoints
+@@ -2943,6 +2960,7 @@
+                 leg_state['s'] = {p_net_id: [], n_net_id: []}
+                 leg_state['v'] = {p_net_id: [], n_net_id: []}
+                 leg_state['path'] = {}
++                leg_state['spans'] = []
+                 plan_iters = 0
+                 good = True
+                 for net_id, _side in plan:
+@@ -2951,7 +2969,7 @@
+                     _partner = n_net_id if net_id == p_net_id else p_net_id
+                     _apath = leg_state['path'].get((_partner, _side)) if _couple else None
+                     ls, lv, it, lpath = _route_hybrid_leg(
+-                        pcb_data, net_id, config, leg_obs, layer_names, coord,
++                        pcb_data, net_id, launch_config, leg_obs, layer_names, coord,
+                         mid_pt, term, pseg, pvia, pair_vias, partner_pads=ppads,
+                         mid_vias=mid_vias_by_net[net_id] + leg_state['v'][net_id],
+                         attract_path=_apath,
+@@ -2960,6 +2978,12 @@
+                     if ls is None:
+                         good = False
+                         break
++                    length = sum(math.hypot(s.end_x - s.start_x, s.end_y - s.start_y) for s in ls)
++                    if review_policy and (lv or length > review_policy['max_length_mm'] + 1e-9):
++                        good = False
++                        break
++                    if review_policy:
++                        leg_state['spans'].append((net_id, _side, length, ls))
+                     leg_state['s'][net_id] += ls
+                     leg_state['v'][net_id] += lv
+                     leg_state['path'][(net_id, _side)] = lpath or []
+@@ -2974,12 +2998,12 @@
+                 if best_plan is None or _score < best_plan[0]:
+                     best_plan = (_score, _lp + _ln,
+                                  leg_state['v'][p_net_id] + leg_state['v'][n_net_id],
+-                                 plan_iters, _split)
++                                 plan_iters, _split, list(leg_state['spans']))
+                 if not _couple or _split < 1.0:
+                     break  # fully coupled (or coupling off): no need to try more
+             if best_plan is not None:
+                 ok = True
+-                _score, leg_segs, leg_vias, leg_iters, _split = best_plan
++                _score, leg_segs, leg_vias, leg_iters, _split, leg_spans = best_plan
+                 if _couple and _split >= 1.0:
+                     print(f"      leg couple: best plan still ships "
+                           f"{_split:.1f}mm uncoupled leg copper")
+@@ -3013,7 +3037,7 @@
+             # handoff). Re-ask each net's WHOLE connection with ONE A* --
+             # partner's final copper as obstacle AND attractor -- and swap it
+             # in only when strictly better and every assembly gate passes.
+-            if env_knobs.SEAM_REASK:
++            if env_knobs.SEAM_REASK and not review_policy:
+                 def _reask_net(_net, _partner, _cur_segs, _cur_vias):
+                     """One whole-connection A* for _net against _partner's
+                     CURRENT copper (obstacle + attractor). Returns (segs,
+@@ -3103,7 +3127,8 @@
+                     all_vias = _best_joint[2]
+             length = sum(math.hypot(s.end_x - s.start_x, s.end_y - s.start_y) for s in all_segs)
+             return {'p_sign': ps, 'all_segs': all_segs, 'all_vias': all_vias,
+-                    'leg_segs': leg_segs, 'iters': iters + leg_iters,
++                    'leg_segs': leg_segs, 'leg_spans': leg_spans if review_policy else [],
++                    'iters': iters + leg_iters,
+                     'overlaps': _pn_overlap_count(all_segs),
+                     # #269: self-graze count of the coupled MIDDLE only (the parallel
+                     # ribbon), used to reject a layer whose middle pinches its own P/N
+@@ -3136,15 +3161,18 @@
+         best = min(cands, key=lambda c: (c['overlaps'], round(c['length'] + c['vias'] * via_mm, 3)))
+         leg_segs = best['leg_segs']
+         # #318: pairwise partner neck on the assembled candidate (see helper).
+-        _neck_pair_partner_grazes(
+-            [s for s in best['all_segs'] if s.net_id == p_net_id],
+-            [s for s in best['all_segs'] if s.net_id == n_net_id],
+-            config, pcb_data)
++        if not review_policy:
++            _neck_pair_partner_grazes(
++                [s for s in best['all_segs'] if s.net_id == p_net_id],
++                [s for s in best['all_segs'] if s.net_id == n_net_id],
++                config, pcb_data)
+         _mid_desc = (layer_names[a_layer] if a_layer == b_layer
+                      else f"{layer_names[a_layer]}->{layer_names[b_layer]}")
+         _pol_note = "" if best['p_sign'] == p_sign else " [polarity flipped: cleaner/shorter legs]"
+         _result = {'new_segments': best['all_segs'], 'new_vias': best['all_vias'],
+                    'iterations': best['iters'], 'path_length': len(simplified)}
++        if review_policy:
++            _result['usb_launch_spans'] = best['leg_spans']
+         _msg = (f"  DIRECT HYBRID: coupled middle on {_mid_desc} + "
+                 f"{len(leg_segs)} leg seg(s) ({best['iters']} iters){_pol_note}")
+         # #269: reject a coupled middle that self-grazes (its own P/N pinch below
+--- a/py_router/diff_pair_custody.py
++++ b/py_router/diff_pair_custody.py
+@@ -133,10 +133,10 @@
+                        skipped_fanout=()) -> List[Dict]:
+     """Assemble the per-pair JSON records (additive JSON_SUMMARY key).
+ 
+-    outcome: 'coupled' (both members routed coupled), 'partial' (coupled trunk
+-    with terminals peeled to the single-ended follow-up), 'deferred' (whole
+-    pair left for the single-ended follow-up), 'failed', 'skipped' (fanout
+-    pre-check, #242).
++    outcome: 'coupled' (both members routed coupled), 'bounded_local' (explicit
++    uncontrolled local launch bundle), 'partial' (coupled trunk with terminals
++    peeled to the single-ended follow-up), 'deferred' (whole pair left for that
++    follow-up), 'failed', 'skipped' (fanout pre-check, #242).
+     """
+     reports = []
+     routed_results = state.routed_results
+@@ -149,11 +149,17 @@
+         # connected single-ended would misreport outcome 'coupled'.
+         _rr_p = routed_results.get(pair.p_net_id)
+         _rr_n = routed_results.get(pair.n_net_id)
+-        coupled = (_rr_p is not None and _rr_n is not None
++        bounded_local = (
++            _rr_p is not None and _rr_p is _rr_n
++            and state.config.usb_bounded_launch_policy is not None
++            and _rr_p.get('usb_bounded_receipt', {}).get('main_geometry') == 'local_uncontrolled')
++        coupled = (_rr_p is not None and _rr_n is not None and not bounded_local
+                    and not (_rr_p.get('se_member_fallback')
+                             or _rr_n.get('se_member_fallback')))
+         deferred = pair.p_net_id in sing or pair.n_net_id in sing
+-        if coupled:
++        if bounded_local:
++            outcome = 'bounded_local'
++        elif coupled:
+             outcome = 'partial' if deferred else 'coupled'
+         elif deferred:
+             outcome = 'deferred'
+@@ -163,7 +169,7 @@
+                                          ('n', pair.n_net_name))
+                       if not aud.get(tag, True)]
+         # A COUPLED claim contradicted by actual pad connectivity (#514).
+-        mismatch = bool(outcome == 'coupled' and incomplete)
++        mismatch = bool(outcome in ('coupled', 'bounded_local') and incomplete)
+         if mismatch:
+             # #602: demote the OUTCOME as well, not just the summary bucket.
+             # route_diff already keeps such a pair out of routed_diff_pairs,
+--- a/py_router/route_diff.py
++++ b/py_router/route_diff.py
+@@ -19,6 +19,7 @@
+ import env_knobs
+ import sys
+ import os
++import json
+ from dataclasses import replace
+ 
+ # Run startup checks before other imports
+@@ -197,7 +198,9 @@
+                 pcb_data=None,
+                 net_clearances: dict = None,
+                 cancel_check=None,
+-                progress_callback=None) -> Tuple[int, int, float]:
++                progress_callback=None,
++                require_coupled: bool = False,
++                usb_bounded_launch_policy: dict = None) -> Tuple[int, int, float]:
+     """
+     Route differential pairs using the Rust router.
+ 
+@@ -228,6 +231,13 @@
+         If return_results=False: (successful_count, failed_count, total_time)
+         If return_results=True: (successful_count, failed_count, total_time, results_data)
+     """
++    if usb_bounded_launch_policy is not None:
++        if not require_coupled or not isinstance(usb_bounded_launch_policy, dict):
++            raise ValueError("bounded USB policy requires strict coupled routing")
++        enable_layer_switch = False
++        mps_layer_swap = False
++        swappable_net_patterns = None
++        ac_couple_match = False
+     # Diff-pair coupling gap may never sit below `clearance` (#441). KiCad grades a
+     # pair's P<->N coupling under the plain copper-clearance rule (P and N are
+     # different nets), so a gap tighter than clearance is flagged as a clearance
+@@ -470,6 +480,8 @@
+     # Add diff-pair specific config options
+     config_kwargs.update(
+         diff_pair_gap=diff_pair_gap,
++        require_coupled=require_coupled,
++        usb_bounded_launch_policy=usb_bounded_launch_policy,
+         diff_pair_centerline_setback=diff_pair_centerline_setback,
+         min_turning_radius=min_turning_radius,
+         max_setback_angle=max_setback_angle,
+@@ -788,6 +800,8 @@
+     diff_pair_ids_to_route, single_ended_nets = separate_nets_by_type(
+         net_ids, diff_pairs, diff_pair_net_ids
+     )
++    if usb_bounded_launch_policy is not None and len(diff_pair_ids_to_route) != 1:
++        raise ValueError("bounded USB policy requires exactly one declared differential pair")
+ 
+     # Warn if any single-ended nets were found (they won't be routed)
+     if single_ended_nets:
+@@ -1171,15 +1185,18 @@
+     # was silently dropped (ulx3s FPDI_D1+). Attempt BOTH members single-ended
+     # here (no rip-up; failures stay honestly listed for the downstream pass).
+     # Engine-side, so the GUI diff tab inherits it.
+-    se_fallback_summary = run_single_ended_member_fallback(
+-        state, diff_pair_ids_to_route)
++    if require_coupled:
++        se_fallback_summary = {'attempted': [], 'routed': [], 'partial': [], 'failed': []}
++    else:
++        se_fallback_summary = run_single_ended_member_fallback(
++            state, diff_pair_ids_to_route)
+ 
+     # Apply length matching if configured
+-    if length_match_groups:
++    if length_match_groups and not usb_bounded_launch_policy:
+         run_length_matching(routed_results, length_match_groups, config, pcb_data)
+ 
+     # Apply intra-pair P/N length matching if configured
+-    if config.diff_pair_intra_match:
++    if config.diff_pair_intra_match and not usb_bounded_launch_policy:
+         print("\n" + "=" * 60)
+         print("Intra-pair P/N length matching")
+         print("=" * 60)
+@@ -1280,18 +1297,23 @@
+                 continue
+         dp_scope.add(_pair.p_net_id)
+         dp_scope.add(_pair.n_net_id)
+-    _dp_cleanup = run_post_route_cleanup(
+-        results, pcb_data, dp_scope, config,
+-        label='Diff-pair ', snap=False, phantom=False, neck=False,
+-        keep_input_copper=keep_input_copper,
+-        progress_callback=progress_callback)
+-    cleanup_input_strip = _dp_cleanup.input_strip_segments
++    if usb_bounded_launch_policy:
++        # Receipt coordinates must describe the copper that is actually written.
++        cleanup_input_strip = []
++        cleanup_input_strip_vias = []
++    else:
++        _dp_cleanup = run_post_route_cleanup(
++            results, pcb_data, dp_scope, config,
++            label='Diff-pair ', snap=False, phantom=False, neck=False,
++            keep_input_copper=keep_input_copper,
++            progress_callback=progress_callback)
++        cleanup_input_strip = _dp_cleanup.input_strip_segments
+     # #508 finding 11: the pipeline's removed input VIAS were dropped on the
+     # floor here -- the orphan-island sweep deletes them from pcb_data, but
+     # neither the writer nor the GUI ever heard, so the output kept via
+     # barrels the router had withdrawn (firing: cm4_underwater step4_diff).
+-    cleanup_input_strip_vias = list(
+-        getattr(_dp_cleanup, 'input_strip_vias', None) or [])
++        cleanup_input_strip_vias = list(
++            getattr(_dp_cleanup, 'input_strip_vias', None) or [])
+ 
+     # Build summary data
+     import json
+@@ -1323,6 +1345,8 @@
+     failed_diff_pairs = []
+     single_ended_diff_pairs = []
+     partial_diff_pairs = []
++    bounded_local_pairs = sorted(r['pair'] for r in pair_reports
++                                 if r['outcome'] == 'bounded_local')
+     # #514 (-> #261): the MEMBER AUDIT already knows when a "routed" pair left
+     # member pads disconnected, but the summary lists ignored it -- so
+     # JSON_SUMMARY said successful while check_connected showed 0% members
+@@ -1331,6 +1355,8 @@
+     _partial_by_audit = {r['pair'] for r in pair_reports
+                          if r.get('member_audit_mismatch')}
+     for pair_name, pair in diff_pair_ids_to_route:
++        if pair_name in bounded_local_pairs:
++            continue
+         _rr_p = routed_results.get(pair.p_net_id)
+         _rr_n = routed_results.get(pair.n_net_id)
+         if (_rr_p is not None and _rr_n is not None
+@@ -1363,6 +1389,8 @@
+         print(f"  {RED}Diff pairs:    {len(routed_diff_pairs)}/{len(diff_pair_ids_to_route)} routed ({len(failed_diff_pairs)} FAILED){RESET}")
+     else:
+         print(f"  Diff pairs:    {len(routed_diff_pairs)}/{len(diff_pair_ids_to_route)} routed")
++    if bounded_local_pairs:
++        print(f"  Bounded local: {len(bounded_local_pairs)} uncontrolled launch bundle(s), not coupled 90-ohm routes")
+     if partial_diff_pairs:
+         print(f"  {RED}Partial:       {len(partial_diff_pairs)} pair(s) whose coupled "
+               f"route left member pads disconnected (see MEMBER AUDIT): "
+@@ -1400,6 +1428,7 @@
+     from target_swap import summarize_target_swaps  # cycle-safe swap list (#380)
+     summary = {
+         'routed_diff_pairs': routed_diff_pairs,
++        'bounded_local_pairs': bounded_local_pairs,
+         'failed_diff_pairs': failed_diff_pairs,
+         'partial_diff_pairs': sorted(partial_diff_pairs),
+         # #602: every pair the member audit found with a disconnected member
+@@ -1436,6 +1465,7 @@
+         # Single-ended member fallback tally (additive): members of non-coupled
+         # pairs attempted P->P / N->N in-run (Class 2 - both members owned).
+         'single_ended_fallback': se_fallback_summary,
++        'usb_bounded_launch_receipts': getattr(state, 'usb_bounded_launch_receipts', []),
+     }
+     if ac_coupled_summary:
+         summary['ac_coupled_xnets'] = ac_coupled_summary
+@@ -1738,6 +1768,10 @@
+                         help="Cost penalty near routed tracks (0 = disabled, default: 0.0)")
+ 
+     # Differential pair routing options
++    parser.add_argument("--require-coupled", action="store_true",
++                        help="Require coupled routing; never defer or route pair members single-ended.")
++    parser.add_argument("--usb-bounded-launch-policy", default=None,
++                        help="JSON review-only bounded launch geometry and declared terminals; requires --require-coupled.")
+     parser.add_argument("--diff-pair-gap", type=float, default=None,
+                         help="Gap between P and N traces of differential pairs in mm "
+                              "(default: the board Default net-class diff_pair_gap, else 0.101)")
+@@ -2082,6 +2116,9 @@
+                 track_proximity_distance=args.track_proximity_distance,
+                 track_proximity_cost=args.track_proximity_cost,
+                 diff_pair_gap=args.diff_pair_gap,
++                require_coupled=args.require_coupled,
++                usb_bounded_launch_policy=(json.loads(args.usb_bounded_launch_policy)
++                                           if args.usb_bounded_launch_policy else None),
+                 diff_pair_width_from_class=not _dp_width_explicit,
+                 diff_pair_gap_from_class=not _dp_gap_explicit,
+                 diff_pair_centerline_setback=args.diff_pair_centerline_setback,

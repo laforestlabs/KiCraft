@@ -598,3 +598,106 @@ def verify_copper_preservation(
             ],
         },
     }
+
+
+def attach_signal_escape_ownership(
+    copper: dict[str, Any], *summaries: dict[str, Any]
+) -> dict[str, Any]:
+    """Rebind explicit stamping receipts to uniquely matching imported copper.
+
+    Matching is exact to KiCad's nanometre grid and includes net and geometry.
+    Ambiguous or missing matches never acquire an owner.
+    """
+    def point(p):
+        return (round(float(p[0]), 6), round(float(p[1]), 6))
+
+    def record_key(item):
+        if item["kind"] == "track":
+            ends = sorted((point(item["start_mm"]), point(item["end_mm"])))
+            return ("track", item["net"], item["layer"], *ends,
+                    round(float(item["width_mm"]), 6))
+        return ("via", item["net"], point(item["position_mm"]),
+                round(float(item["size_mm"]), 6), round(float(item["drill_mm"]), 6))
+
+    def object_key(item, kind):
+        if kind == "track":
+            ends = sorted((point((item.start.x, item.start.y)),
+                           point((item.end.x, item.end.y))))
+            layer = "F.Cu" if getattr(item.layer, "value", item.layer) in (0, "F.Cu", "front") else "B.Cu"
+            return (kind, item.net, layer, *ends, round(float(item.width_mm), 6))
+        return (kind, item.net, point((item.pos.x, item.pos.y)),
+                round(float(item.size_mm), 6), round(float(item.drill_mm), 6))
+
+    records: dict[tuple, list] = {}
+    objects: dict[tuple, list] = {}
+    for summary in summaries:
+        for branch in summary.get("owned_signal_escapes", []):
+            items = branch.get("items", [])
+            if branch.get("owner") != "compiler.signal_escape" or not items:
+                continue
+            branch_id = items[0]["uuid"]
+            for item in items:
+                records.setdefault(record_key(item), []).append((branch, branch_id, item))
+    for kind, name in (("track", "traces"), ("via", "vias")):
+        for item in copper.get(name, []):
+            objects.setdefault(object_key(item, kind), []).append(item)
+    bound, unresolved = 0, []
+    for key, entries in records.items():
+        matches = objects.get(key, [])
+        if len(entries) != 1 or len(matches) != 1:
+            unresolved.extend(item["uuid"] for _, _, item in entries)
+            continue
+        branch, branch_id, record = entries[0]
+        matches[0].escape_ownership = {
+            "owner": "compiler.signal_escape", "branch_id": branch_id,
+            "source_uuid": record["uuid"], "ref": branch["ref"], "pad": branch["pad"],
+            "branch_item_count": str(len(branch["items"])),
+        }
+        bound += 1
+    return {"bound": bound, "unresolved_source_uuids": unresolved}
+
+
+def attach_stamped_escape_ownership(copper: dict[str, Any], receipt: dict) -> dict:
+    """Carry parent-stamp ownership across native routed-copper re-import."""
+    def pt(x, y):
+        return (round(float(x), 6), round(float(y), 6))
+
+    def key(kind, net, layer, points, width, drill=None):
+        if kind == "track":
+            return (kind, net, layer, *sorted(points), round(float(width), 6))
+        return (kind, net, points[0], round(float(width), 6), round(float(drill), 6))
+
+    sources: dict[tuple, list] = {}
+    targets: dict[tuple, list] = {}
+    for kind, name in (("track", "traces"), ("via", "vias")):
+        for row in receipt.get(name, []):
+            owner = row.get("escape_ownership") or {}
+            if owner.get("owner") != "compiler.signal_escape":
+                continue
+            if kind == "track":
+                k = key(kind, row["net_name"], row["layer"],
+                        [pt(row["start_x"], row["start_y"]), pt(row["end_x"], row["end_y"])],
+                        row["width"])
+            else:
+                k = key(kind, row["net_name"], None, [pt(row["x"], row["y"])],
+                        row["size"], row["drill"])
+            sources.setdefault(k, []).append(owner)
+        for item in copper.get(name, []):
+            if kind == "track":
+                layer = "F.Cu" if int(item.layer) == 0 else "B.Cu"
+                k = key(kind, item.net, layer,
+                        [pt(item.start.x, item.start.y), pt(item.end.x, item.end.y)], item.width_mm)
+            else:
+                k = key(kind, item.net, None, [pt(item.pos.x, item.pos.y)],
+                        item.size_mm, item.drill_mm)
+            targets.setdefault(k, []).append(item)
+    unresolved = []
+    bound = 0
+    for k, owners in sources.items():
+        matches = targets.get(k, [])
+        if len(owners) != 1 or len(matches) != 1:
+            unresolved.extend(owner.get("source_uuid") for owner in owners)
+        else:
+            matches[0].escape_ownership = dict(owners[0])
+            bound += 1
+    return {"bound": bound, "unresolved_source_uuids": unresolved}

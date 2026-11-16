@@ -5,15 +5,19 @@ import json
 
 import kicraft.design.synthesis.symbol_pinout as _sp
 from kicraft.design.models import (
+    Architecture,
     BOM,
     BomPart,
     ConversationState,
+    FunctionalSpec,
     IntentSlot,
     NetConnection,
     PinEndpoint,
+    Question,
 )
 from kicraft.design.synthesis.electrical_review import (
     _categorize,
+    build_design_evidence,
     build_design_digest,
     clamp_findings,
     has_blocker,
@@ -291,3 +295,75 @@ def test_corroborate_fails_closed_when_pass1_unparseable():
     r = review_design_corroborated(c, "digest", corroboration=2)
     assert r["ok"] is False and r["blocked"] is False
 
+
+
+def _complete_state():
+    state = _state()
+    state.functional_spec = FunctionalSpec(blocks=[])
+    state.architecture = Architecture(sheets=[], power_nets=[], inter_sheet_nets=[])
+    return state
+
+
+def test_evidence_complete_and_late_net_coverage(monkeypatch):
+    monkeypatch.setattr(_sp, "lookup_pins", _fake_lookup({"Fake:MAX31855": [
+        ("1", "VCC"), ("2", "GND"), ("5", "SCK")]}))
+    state = _complete_state()
+    state.bom.connections.append(NetConnection(
+        net_name="LATE_INTERFACE", sheet="AMP", endpoints=[PinEndpoint(ref="U1", pin="5")]
+    ))
+    evidence = build_design_evidence(state)
+    assert evidence.coverage.complete
+    assert evidence.coverage.expected_refs == evidence.coverage.included_refs == ["U1"]
+    assert evidence.coverage.expected_nets == evidence.coverage.included_nets
+    assert "LATE_INTERFACE" in evidence.digest
+    # A late record cannot be lost while the review is marked complete.
+    state.bom.connections[-1].net_name = "LATE_" + "x" * 100000
+    oversized = build_design_evidence(state)
+    assert not oversized.coverage.complete
+    assert "NETS AND PINS" in oversized.coverage.omitted_mandatory
+    assert not oversized.coverage.included_nets
+    assert oversized.coverage.expected_nets[-1].startswith("LATE_")
+    assert "NETS AND PINS — OMITTED" in oversized.digest
+
+
+def test_missing_evidence_and_unresolved_pin_cannot_be_complete(monkeypatch):
+    monkeypatch.setattr(_sp, "lookup_pins", _fake_lookup({}))
+    missing = build_design_evidence(ConversationState())
+    assert not missing.coverage.complete
+    assert "BRIEF AND INTENT" in missing.coverage.omitted_mandatory
+    assert "BOM / PINS / NETS" in missing.coverage.omitted_mandatory
+    unresolved = build_design_evidence(_complete_state())
+    assert not unresolved.coverage.complete
+    assert "PIN FUNCTIONS" in unresolved.coverage.omitted_mandatory
+
+
+def test_evidence_fingerprint_relevant_and_stable(monkeypatch):
+    monkeypatch.setattr(_sp, "lookup_pins", _fake_lookup({"Fake:MAX31855": [
+        ("1", "VCC"), ("2", "GND"), ("5", "SCK")]}))
+    state = _complete_state()
+    original = build_design_evidence(state).coverage.source_fingerprint
+    assert build_design_evidence(state, budget=200).coverage.source_fingerprint == original
+    state.bom.assumptions.append("electrical review (warning): surfaced finding")
+    state.open_questions.append(Question(text="surfaced", stage="review"))
+    assert build_design_evidence(state).coverage.source_fingerprint == original
+    state.bom.assumptions.append("Supply assumes 3.3 V")
+    assert build_design_evidence(state).coverage.source_fingerprint != original
+    changed = build_design_evidence(state).coverage.source_fingerprint
+    state.bom.connections[-1].net_name = "NEW_NET"
+    assert build_design_evidence(state).coverage.source_fingerprint != changed
+
+
+def test_review_status_distinguishes_transport_schema_and_late_failure():
+    bad_schema = review_design(FakeClient("bad"), "digest", max_attempts=1)
+    assert bad_schema["provider_ok"] is True and bad_schema["schema_ok"] is False
+
+    class FailingClient(FakeClient):
+        def chat(self, messages, **kw):
+            if self.calls:
+                raise RuntimeError("provider unavailable")
+            return super().chat(messages, **kw)
+
+    result = review_design_corroborated(FailingClient(_blk()), "digest", max_attempts=1)
+    assert not result["ok"] and not result["provider_ok"] and not result["schema_ok"]
+    assert result["findings"] and result["findings"][0]["demoted_from"] == "blocker"
+    assert "provider unavailable" in result["error"]

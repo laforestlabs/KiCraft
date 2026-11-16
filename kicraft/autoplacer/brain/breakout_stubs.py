@@ -762,6 +762,7 @@ def add_breakout_stubs(
     *,
     cfg: dict[str, Any] | None = None,
     lock: bool = True,
+    signal_escape_owner: bool = False,
 ) -> dict[str, Any]:
     """Lay each spec as locked track(s) (+ optional via) on the board, save.
 
@@ -776,6 +777,7 @@ def add_breakout_stubs(
         "segments": 0,
         "vias": 0,
         "skipped": [],
+        "owned_signal_escapes": [],
     }
     if not specs:
         return summary
@@ -1103,6 +1105,7 @@ def add_breakout_stubs(
             summary["skipped"].append(f"{spec.ref}.{spec.pad}:off_board")
             continue
 
+        owned_items = []
         for a, b in zip(points, points[1:]):
             track = pcbnew.PCB_TRACK(board)
             track.SetStart(_pt(a))
@@ -1113,6 +1116,13 @@ def add_breakout_stubs(
             if lock:
                 track.SetLocked(True)
             board.Add(track)
+            if signal_escape_owner:
+                owned_items.append({
+                    "uuid": track.m_Uuid.AsString(), "kind": "track",
+                    "net": pad.GetNetname(), "layer": spec.layer,
+                    "start_mm": list(a), "end_mm": list(b),
+                    "width_mm": pcbnew.ToMM(width),
+                })
             summary["segments"] += 1
             stamped.append((net_code, a, b, half_width_mm, src_cl_mm, layer))
 
@@ -1128,6 +1138,12 @@ def add_breakout_stubs(
             if lock:
                 via.SetLocked(True)
             board.Add(via)
+            if signal_escape_owner:
+                owned_items.append({
+                    "uuid": via.m_Uuid.AsString(), "kind": "via",
+                    "net": pad.GetNetname(), "position_mm": list(points[-1]),
+                    "size_mm": via_size_mm, "drill_mm": via_drill_size_mm,
+                })
             summary["vias"] += 1
             # Later specs must respect this via: its hole (hole-to-hole), its
             # barrel (a zero-length all-layer segment for copper checks), and
@@ -1136,6 +1152,11 @@ def add_breakout_stubs(
             stamped.append((net_code, points[-1], points[-1], via_r_mm, src_cl_mm, None))
             via_pts.append((net_code, points[-1][0], points[-1][1]))
 
+        if signal_escape_owner:
+            summary["owned_signal_escapes"].append({
+                "owner": "compiler.signal_escape", "ref": spec.ref,
+                "pad": str(spec.pad), "items": owned_items,
+            })
         summary["stubs"] += 1
 
     board.Save(pcb_path)

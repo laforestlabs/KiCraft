@@ -85,6 +85,7 @@ def build_label_payload(state) -> list[dict]:
                 "ref": getattr(anchor, "ref", None) if anchor else None,
                 "pins": [{"pin": p.pin, "text": _ascii(p.text)} for p in lb.pins],
                 "priority": lb.priority,
+                "required": lb.required,
                 "heights_mm": [0.8],
             })
             continue
@@ -94,6 +95,7 @@ def build_label_payload(state) -> list[dict]:
             "ref": getattr(anchor, "ref", None) if anchor else None,
             "prefer": getattr(anchor, "prefer", None) if anchor else None,
             "priority": lb.priority,
+            "required": lb.required,
             "heights_mm": [1.0, 0.9, 0.8],
         })
     return out

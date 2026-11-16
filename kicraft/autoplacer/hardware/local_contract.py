@@ -326,9 +326,48 @@ def _copper_graph(board, net):
             # -2 preserves physical length without adding exposed neck length.
             width = -2.0 if covered else pcbnew.ToMM(track.GetWidth())
             connect((left, layer), (right, layer), length, width)
+    def has_straight_track(first, second, min_width):
+        """Prove the entire contact is covered by native, collinear track."""
+        (x, y), layer = first
+        (end_x, end_y), end_layer = second
+        if layer != end_layer:
+            return False
+        dx, dy = end_x - x, end_y - y
+        span = dx * dx + dy * dy
+        pending = [first]
+        seen = {first}
+        while pending:
+            node = pending.pop()
+            for other, _, native_width in graph.get(node, ()):
+                if native_width < 0:
+                    if native_width != -2.0 or min_width > 0:
+                        continue
+                elif native_width < min_width:
+                    continue
+                if other == second:
+                    return True
+                if other in seen:
+                    continue
+                (px, py), other_layer = other
+                ox, oy = px - x, py - y
+                projection = ox * dx + oy * dy
+                if (other_layer == layer and ox * dy == oy * dx
+                        and 0 < projection < span):
+                    seen.add(other)
+                    pending.append(other)
+        return False
+
+    # Check against track edges only, before adding any virtual contacts.
+    # A collinear chain preserves real narrow edges and pad-covered segments;
+    # skipped hole segments cannot establish coverage.
+    # A finite-width contact remains unless the same physical centreline is
+    # already covered by equally wide native track copper.
+    contacts = [(first, second, distance, width)
+                for first, second, distance, width in contacts
+                if first != second
+                and not has_straight_track(first, second, pcbnew.ToMM(width))]
     for first, second, distance, width in contacts:
-        if first != second:
-            connect(first, second, pcbnew.ToMM(round(distance)), pcbnew.ToMM(width))
+        connect(first, second, pcbnew.ToMM(round(distance)), pcbnew.ToMM(width))
     nodes = list(graph)
     for via in vias:
         pos = _position(via.GetPosition())

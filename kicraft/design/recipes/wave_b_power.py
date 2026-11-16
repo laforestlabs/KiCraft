@@ -1142,7 +1142,7 @@ AP63203_3V3 = _power_recipe(
         ),
         _part(
             "inductor", "L", "4.7uH FXL0630-4R7-M", "Device:L",
-            "inductor-15uh-3a:IND-SMD_L7.0-W6.6_FXL0630",
+            "cjiang-fxl0630-4r7-m:IND-SMD_L7.0-W6.6_FXL0630",
             mpn="FXL0630-4R7-M",
             datasheet="https://xonstorage.z8.web.core.windows.net/pdf/changjiangmicroelectronics_fxl10501r0m_apr22_xonlink.pdf",
         ),

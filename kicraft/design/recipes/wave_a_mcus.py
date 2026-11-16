@@ -12,6 +12,7 @@ from .models import (
     RecipePlacementConstraint as PlacementConstraint,
     RecipePort as Port,
     RecipeSourceDocument as SourceDocument,
+    usb_pair_placement,
 )
 
 _PASSIVE_CAP = ("Device:C", "Capacitor_SMD:C_0603_1608Metric")
@@ -270,7 +271,7 @@ def _module_recipe(
             for gpio, pin in sorted(gpio_to_pin.items())
             if gpio not in fixed
         ),
-        placement_constraints=(
+        placement_constraints=((usb_pair_placement("mcu"),) if usb_pins else ()) + (
             PlacementConstraint(
                 kind="antenna_keepout",
                 role="mcu",

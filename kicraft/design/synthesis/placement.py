@@ -38,6 +38,9 @@ from dataclasses import dataclass, field, replace
 from ..models import BOM, BomPart, Sheet, is_power_or_ground_name
 from .sch_geometry import (
     pin_abs_position,
+    placed_graphics_bounds,
+    prepare_text_metrics,
+    text_width_mm,
     pin_exit_direction,
     rotate_vec,
     rotation_for_exit,
@@ -198,6 +201,10 @@ def place_sheet(
     unit of any multi-section symbol (``unit`` >= 2, same ``ref``)."""
     if not sheet_parts:
         return []
+    prepare_text_metrics(
+        [p.value for p in sheet_parts] + [p.ref for p in sheet_parts]
+        + [c.net_name for c in bom.connections if c.sheet == sheet.name]
+    )
 
     parts_by_ref = {p.ref: p for p in sheet_parts}
 
@@ -322,14 +329,46 @@ def place_sheet(
         ),
     )
 
-    cluster_bottom = anchor_base_y
+    # Full canonical net names are rendered on pin stubs. Reserve their
+    # complete extents around each cluster before routing, rather than hoping
+    # a later label slide can find room among neighbouring circuits.
+    cluster_padding: dict[str, float] = {}
+    for anchor in ordered:
+        refs = {anchor.ref, *(m.ref for m in anchor.members)}
+        names = [net for net, endpoints in net_endpoints.items()
+                 if any(ref in refs for ref, _ in endpoints)]
+        cluster_padding[anchor.ref] = _snap(max(
+            (text_width_mm(name) + 5.08 for name in names), default=0.0
+        ) + HALF_GRID_MM)
+    max_padding = max(cluster_padding.values(), default=0.0)
+    max_bank_rows = max((
+        sum((sum(1 for m in a.members
+                 if m.role in ("decoupling", "bulk")
+                 and pin_net.get((m.ref, m.outer_pin or m.far_pin), "") == net) + 5) // 6
+            for net in {pin_net.get((m.ref, m.outer_pin or m.far_pin), "")
+                        for m in a.members if m.role in ("decoupling", "bulk")})
+        for a in ordered
+    ), default=0)
+    top_reserve = 2 * max_padding + max_bank_rows * ROW_GAP_MM
+    row_base_y = _snap(anchor_base_y + top_reserve)
+    cluster_bottom = row_base_y
+    row_bottom = row_base_y
     cursor_x = USABLE_LEFT_MM
     for anchor in ordered:
+        padding = cluster_padding[anchor.ref]
         width, bottom = _place_cluster(
-            anchor, cursor_x, placed, pin_net, base_y=anchor_base_y
+            anchor, cursor_x + padding, placed, pin_net, base_y=row_base_y
         )
-        cursor_x += width + ANCHOR_GAP_MM
-        cluster_bottom = max(cluster_bottom, bottom)
+        if cursor_x > USABLE_LEFT_MM and cursor_x + width + 2 * padding > 1200.0:
+            cursor_x = USABLE_LEFT_MM
+            row_base_y = _snap(row_bottom + ROW_GAP_MM + top_reserve)
+            width, bottom = _place_cluster(
+                anchor, cursor_x + padding, placed, pin_net, base_y=row_base_y
+            )
+            row_bottom = row_base_y
+        cursor_x += width + 2 * padding + ANCHOR_GAP_MM
+        row_bottom = max(row_bottom, bottom + padding)
+        cluster_bottom = max(cluster_bottom, row_bottom)
 
     # --- free parts: a spaced row below every cluster (label-connected) ---
     free_y = _snap(cluster_bottom + ROW_GAP_MM + GRID_MM)
@@ -406,6 +445,23 @@ def _assign_member(
             gnd_pin = pn
         elif kind == "signal" and sig_pin is None:
             sig_pin = pn
+    # Recipe-owned converter bypass banks can use private rail names whose
+    # pins are not marked power_in/out in the library. Their committed roles
+    # and common recipe instance identify both the bank and its converter;
+    # treating these as signal pulldowns creates a very tall column and can
+    # attach one converter's capacitors to a different converter on the rail.
+    recipe_bypass = (
+        part.recipe_instance is not None
+        and part.recipe_role in {
+            "input_cap", "input_hf_cap", "output_cap",
+            "input_bypass", "output_bypass",
+        }
+        and gnd_pin is not None
+    )
+    if recipe_bypass:
+        rail_pin = _other_pin(pins, gnd_pin)
+        sig_pin = None
+        role = "decoupling"
 
     if role is None:
         if kind_a in ("rail", "gnd") and kind_b in ("rail", "gnd"):
@@ -455,11 +511,24 @@ def _assign_member(
         far_pin = _other_pin(pins, near_pin)
 
     anchor_ref = None
-    if hint and hint.anchor_ref in anchors:
+    if recipe_bypass:
+        owner = next((
+            ref for ref, anchor in anchors.items()
+            if anchor.part.recipe_instance == part.recipe_instance
+            and anchor.part.recipe_id == part.recipe_id
+            and anchor.part.recipe_role in ("converter", "efuse")
+        ), None)
+        if owner:
+            anchor_ref = owner
+            served = next(((ref, pn) for ref, pn in net_endpoints.get(net_of(rail_pin), [])
+                           if ref == owner), None)
+            if served is None:
+                served = (owner, None)
+    if anchor_ref is None and hint and hint.anchor_ref in anchors:
         anchor_ref = hint.anchor_ref
-    elif served is not None:
+    elif anchor_ref is None and served is not None:
         anchor_ref = served[0]
-    elif part.ref in member_to_group_anchor:
+    elif anchor_ref is None and part.ref in member_to_group_anchor:
         anchor_ref = member_to_group_anchor[part.ref]
     if anchor_ref is None or anchor_ref not in anchors:
         return None
@@ -499,6 +568,10 @@ def _place_cluster(
     # Anchor body top (rotation 0, sheet +y down) — the rail row hangs above it.
     pins = list(anchor.pins.by_number.values())
     body_top = min((-p["position"]["y"] for p in pins), default=0.0)
+    unit = int(anchor.ref.rsplit("#u", 1)[1]) if "#u" in anchor.ref else 1
+    graphic = placed_graphics_bounds(anchor.part.symbol, unit, 0, 0, 0)
+    if graphic is not None:
+        body_top = min(body_top, graphic[1])
 
     # Provisional origin; the cluster is shifted into place afterwards.
     anchor.x = _snap(left_x + LEFT_RESERVE_MM)
@@ -514,13 +587,25 @@ def _place_cluster(
 
     if rail_row:
         row_y = _snap(anchor.y + body_top - ROW_GAP_MM)
-        _place_rail_row(rail_row, anchor, row_y, placed)
+        # Keep each rail's capacitors together and wrap large banks above the
+        # converter rather than extending a single unbounded row.
+        banks: dict[str, list[_Member]] = {}
+        for member in rail_row:
+            net = pin_net.get((member.ref, member.outer_pin or member.far_pin), "")
+            banks.setdefault(net, []).append(member)
+        bank_row = 0
+        for net in sorted(banks):
+            members = sorted(banks[net], key=lambda m: m.ref)
+            for start in range(0, len(members), 6):
+                _place_rail_row(members[start:start + 6], anchor,
+                                row_y - bank_row * ROW_GAP_MM, placed)
+                bank_row += 1
 
     by_side: dict[str, list[_Member]] = {}
     for m in attached:
         by_side.setdefault(_served_dir(m, anchor), []).append(m)
     for side, members in by_side.items():
-        _place_side_group(members, anchor, side, placed)
+        _place_side_group(members, anchor, side, placed, pin_net)
 
     # Shift the whole cluster so its leftmost pin clears left_x by the margin.
     refs = [anchor.ref] + [m.ref for m in anchor.members if m.ref in placed]
@@ -548,6 +633,7 @@ def _cluster_bounds(
     pins_by_ref = {anchor.ref: anchor.pins}
     for m in anchor.members:
         pins_by_ref[m.ref] = m.pins
+    parts_by_ref = {anchor.ref: anchor.part, **{m.ref: m.part for m in anchor.members}}
     xs: list[float] = []
     ys: list[float] = []
     for ref in refs:
@@ -556,6 +642,12 @@ def _cluster_bounds(
             x, y = pin_abs_position(pp.x_mm, pp.y_mm, pp.rotation_deg, pin)
             xs.append(x)
             ys.append(y)
+        unit = int(ref.rsplit("#u", 1)[1]) if "#u" in ref else 1
+        bounds = placed_graphics_bounds(parts_by_ref[ref].symbol, unit,
+                                        pp.x_mm, pp.y_mm, pp.rotation_deg)
+        if bounds:
+            xs.extend((bounds[0], bounds[2]))
+            ys.extend((bounds[1], bounds[3]))
     if not xs:
         return (anchor.x, anchor.x, anchor.y)
     return (min(xs), max(xs), max(ys))
@@ -578,10 +670,14 @@ def _place_rail_row(
         return anchor.x
 
     prev_x = None
+    previous_width = 0.0
     for m in sorted(members, key=lambda m: (desired_x(m), m.ref)):
         want = desired_x(m)
-        ox = want if prev_x is None else max(want, prev_x + MEMBER_PITCH_MM)
+        ox = want if prev_x is None else max(
+            want, prev_x + max(MEMBER_PITCH_MM, previous_width + 8.89)
+        )
         prev_x = ox
+        previous_width = text_width_mm(m.part.value)
         outer = m.pins.by_number.get(m.outer_pin or m.far_pin)
         rot = rotation_for_exit(outer, "up") if outer else 0
         placed[m.ref] = PlacedPart(
@@ -602,6 +698,7 @@ def _place_side_group(
     anchor: _Anchor,
     side: str,
     placed: dict[str, PlacedPart],
+    pin_net: dict[tuple[str, str], str],
 ) -> None:
     """Place all attached members on one side of the anchor (the pull-ups,
     pull-downs, and series parts whose served pins exit that way).
@@ -614,6 +711,14 @@ def _place_side_group(
     short offset wire back to each pin is drawn by the router.
     """
     stack_y = side in ("left", "right")
+    # Both endpoints may carry the full canonical name; leave room for the
+    # two labels even if the router cannot safely join them with a wire.
+    label_width = max(
+        (text_width_mm(pin_net.get((m.ref, pin), ""))
+         for m in members for pin in m.pins.by_number),
+        default=0.0,
+    )
+    link_gap = _snap(PIN_LINK_GAP_MM + 2 * label_width)
 
     def served_xy(m: _Member) -> tuple[float, float]:
         if m.served_pin and m.served_pin in anchor.pins.by_number:
@@ -628,11 +733,11 @@ def _place_side_group(
     for m in ordered:
         sx, sy = served_xy(m)
         if stack_y:
-            nx = sx + (PIN_LINK_GAP_MM if side == "right" else -PIN_LINK_GAP_MM)
+            nx = sx + (link_gap if side == "right" else -link_gap)
             ny = sy if prev is None else max(sy, prev + SIDE_PITCH_MM)
             prev, ntx, nty = ny, nx, ny
         else:
-            ny = sy + (PIN_LINK_GAP_MM if side == "down" else -PIN_LINK_GAP_MM)
+            ny = sy + (link_gap if side == "down" else -link_gap)
             nx = sx if prev is None else max(sx, prev + SIDE_PITCH_MM)
             prev, ntx, nty = nx, nx, ny
         near = (m.pins.by_number.get(m.near_pin)

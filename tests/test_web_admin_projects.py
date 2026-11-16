@@ -115,6 +115,53 @@ async def test_admin_can_browse_and_view_private_project(harness):
     await u.should_not_see("Continue design")
 
 
+async def test_workspace_link_does_not_substitute_default_for_private_project(harness):
+    u, web, store, admin, owner = harness
+    source_id, _ = _persisted_private_project(store, owner.id)
+    viewer = store.create_user(USER_EMAIL, PASSWORD)
+    store.consume_verification_token(store.create_verification_token(viewer.id))
+    store.record_consent(viewer.id, LEGAL_VERSION)
+    own_id = seed_project(store, viewer.id, "my unrelated running design")
+    live = web._fresh_run_state()
+    live.update(running=True, user_id=viewer.id, project_id=own_id,
+                brief="my unrelated running design")
+    web._LIVE_RUNS[own_id] = live
+
+    await _login(u, USER_EMAIL)
+    await u.should_see("my unrelated running design")
+    await u.open(f"/?project={source_id}")
+    await u.should_see("This project isn't available.")
+    await u.should_not_see("my unrelated running design")
+    await u.should_not_see("private USB-C environmental sensor")
+    await u.should_not_see(OWNER_EMAIL)
+
+
+async def test_workspace_link_opens_public_project_read_only_for_non_owner(harness):
+    u, web, store, admin, owner = harness
+    source_id, _ = _persisted_private_project(store, owner.id)
+    store.set_visibility(source_id, True)
+    viewer = store.create_user(USER_EMAIL, PASSWORD)
+    store.consume_verification_token(store.create_verification_token(viewer.id))
+    store.record_consent(viewer.id, LEGAL_VERSION)
+
+    await _login(u, USER_EMAIL)
+    await u.open(f"/?project={source_id}")
+    await u.should_see("Community project")
+    await u.should_see("PRIVATE_SENSOR")
+    await u.should_see("ESP32-S3")
+    await u.should_not_see("Edit board layout")
+    await u.should_not_see("Rebuild board")
+
+
+@pytest.mark.parametrize("project", ["9999999", "not-a-project", "9" * 30])
+async def test_invalid_workspace_link_reports_unavailable(harness, project):
+    u, web, store, admin, owner = harness
+    await _login(u, ADMIN_EMAIL)
+    await u.open(f"/?project={project}")
+    await u.should_see("This project isn't available.")
+    await u.should_not_see("Describe your board")
+
+
 async def test_non_admin_cannot_open_admin_project_browser(harness):
     u, web, store, admin, owner = harness
     _persisted_private_project(store, owner.id)
@@ -137,10 +184,12 @@ async def test_admin_clone_rechecks_source_and_opens_owned_copy(harness):
     source_events = (source_dir / "events.jsonl").read_bytes()
 
     await _login(u, ADMIN_EMAIL)
-    # The existing workspace ownership guard must reject the foreign source.
+    # A foreign workspace link opens read-only; editing requires an owned clone.
     await u.open(f"/?project={source_id}")
-    await u.should_see("Welcome to KiCraft")
-    await u.should_not_see("PRIVATE_SENSOR")
+    await u.should_see("Source project id")
+    await u.should_see("PRIVATE_SENSOR")
+    await u.should_not_see("Edit board layout")
+    await u.should_not_see("Rebuild board")
 
     await u.open("/admin/projects")
     u.find(marker="admin-project-view").click()

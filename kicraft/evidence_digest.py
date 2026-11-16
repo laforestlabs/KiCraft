@@ -30,8 +30,13 @@ def _short_incomplete(budget: int) -> str:
 def render_bounded_evidence(
     title: str, sections: Iterable[EvidenceSection], *, budget: int
 ) -> str:
-    """Render whole evidence sections within ``budget`` characters.
+    return render_evidence_with_status(title, sections, budget=budget)[0]
 
+
+def render_evidence_with_status(
+    title: str, sections: Iterable[EvidenceSection], *, budget: int
+) -> tuple[str, list[str]]:
+    """Render whole sections and return their exact inclusion statuses.
     A section is never character-sliced.  If it cannot fit, its named omission
     marker explains that it cannot support an absence conclusion.  The compact
     fallback for an impractically small budget contains no source evidence, so
@@ -47,7 +52,7 @@ def render_bounded_evidence(
         "OMITTED or INCOMPLETE sections are unverified; NEVER infer absence from them."
     )
     if len(rule) > budget:
-        return _short_incomplete(budget)
+        return _short_incomplete(budget), ["OMITTED"] * len(section_list)
 
     # Reserve a named omission for every category before including any source.
     # Otherwise a large early section can leave later categories silently absent.
@@ -57,7 +62,8 @@ def render_bounded_evidence(
     ]
     used = len(rule) + sum(map(len, rendered_sections))
     if used > budget:
-        return _short_incomplete(budget)
+        return _short_incomplete(budget), ["OMITTED"] * len(section_list)
+    statuses = ["OMITTED"] * len(section_list)
     for index, section in enumerate(section_list):
         content = section.content.strip() or "No source records."
         status = "COMPLETE" if section.complete else "INCOMPLETE"
@@ -65,5 +71,6 @@ def render_bounded_evidence(
         delta = len(candidate) - len(rendered_sections[index])
         if used + delta <= budget:
             rendered_sections[index] = candidate
+            statuses[index] = status
             used += delta
-    return rule + "".join(rendered_sections)
+    return rule + "".join(rendered_sections), statuses

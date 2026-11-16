@@ -71,18 +71,23 @@ def test_uncorroborated_claim_dropped_corroborated_kept():
         {"id": "amps", "text": "OUT 5A MAX", "anchor": {"ref": "J2"}},
         {"id": "volts", "text": "OUT 9/12/20V", "anchor": {"ref": "J2"}},
     ])
-    assert [lb.id for lb in kept] == ["volts"]
+    assert kept == []
     assert any("5A" in d for d in dropped)
+    assert any("9V" in d for d in dropped)
 
-
-def test_slash_voltage_list_shares_unit():
+def test_slash_voltage_list_is_not_backed_by_unrelated_intent():
     kept, dropped = _lint([
         {"id": "v", "text": "9/12/20V OUT", "anchor": {"ref": "J2"}},
     ])
-    assert [lb.id for lb in kept] == ["v"]
+    assert kept == []
+    assert any("uncorroborated" in d for d in dropped)
 
 
-def test_table_position_guard_uses_switch_pin_count():
+def test_table_position_guard_uses_switch_pin_count(monkeypatch):
+    import kicraft.design.synthesis.silk_plan as silk
+    monkeypatch.setattr(silk, "reviewed_interface_facts", lambda *args: [
+        {"ref": "SW1", "lines": ["9V 12V 20V"], "pins": []},
+    ])
     # dip-switch-3pos is a vendored bundle: 6 pins -> 3 positions. A table
     # header naming position 4 is impossible on this switch.
     kept, dropped = _lint([
@@ -194,3 +199,156 @@ def test_uncovered_connectors_reports_unlabeled_wired_connector():
     # No kept label anchors to J1 -> it is reported. J2 is also a connector
     # but is not wired, so it is not reported.
     assert uncovered_connectors([], state) == ["J1"]
+
+
+def test_interface_projection_preserves_late_connector_and_control_facts(monkeypatch):
+    from kicraft.design.synthesis.silk_plan import build_interface_digest
+    import kicraft.design.synthesis.electrical_review as review
+
+    state = _state()
+    state.architecture.protected_identities = ["duplicated prose " * 20000]
+    state.bom.connections = [
+        NetConnection(net_name="VBUS", sheet="PD",
+                      endpoints=[PinEndpoint(ref="J1", pin="1")]),
+        NetConnection(net_name="VOUT", sheet="PD",
+                      endpoints=[PinEndpoint(ref="J2", pin="1")]),
+        NetConnection(net_name="CFG", sheet="PD",
+                      endpoints=[PinEndpoint(ref="SW1", pin="1")]),
+    ]
+    monkeypatch.setattr(review, "_pin_names", lambda symbol, root: {"1": "CONTACT"})
+    digest = build_interface_digest(state)
+    assert "duplicated prose" not in digest
+    for ref in ("J1", "J2", "SW1"):
+        assert f"INTERFACE {ref} — COMPLETE" in digest
+    assert '"net":"VOUT"' in digest
+    assert '"function":"CONTACT"' in digest
+
+
+def test_five_unlabeled_connectors_are_defects():
+    from kicraft.design.synthesis.silk_plan import required_silk_defects
+    state = _state()
+    for i in range(3, 6):
+        state.bom.parts.append(BomPart(ref=f"J{i}", value="UNKNOWN",
+                                      symbol="Connector:Conn_01x02",
+                                      footprint="lib:fp", sheet="PD"))
+    state.bom.connections = [
+        NetConnection(net_name=f"N{i}", sheet="PD",
+                      endpoints=[PinEndpoint(ref=f"J{i}", pin="1")])
+        for i in range(1, 6)
+    ]
+    assert len(required_silk_defects(state)) == 5
+
+
+def test_numeric_claim_is_bound_to_interface(monkeypatch):
+    import kicraft.design.synthesis.silk_plan as silk
+    monkeypatch.setattr(silk, "reviewed_interface_facts", lambda *args: [
+        {"ref": "J1", "lines": ["9V INPUT"], "pins": []},
+        {"ref": "J2", "lines": ["5V OUTPUT"], "pins": []},
+    ])
+    kept, dropped = _lint([{"id": "bad", "text": "9V OUTPUT",
+                            "anchor": {"ref": "J2"}}])
+    assert not kept
+    assert any("9V" in item for item in dropped)
+
+
+def _reviewed_interfaces_state():
+    from kicraft.design.models import RecipeSelection, SilkPlan
+    from kicraft.design.recipes import expand_selections
+    from kicraft.design.recipes.registry import get_recipe
+
+    recipes = [
+        ("ch224k-pd-trigger@2", "pd"),
+        ("usb-c-usb2-device@1", "usb"),
+        ("hub75-sn74hct245-interface@2", "display"),
+        ("ws2812-external-strip-header-interface@1", "led"),
+        ("pam8302a-pwm-speaker@1", "audio"),
+        ("esp32-s3-wroom-1-n16r8-minimal@1", "mcu"),
+        ("ap63205-5v@2", "reg"),
+    ]
+    selections = []
+    for recipe, instance in recipes:
+        definition = get_recipe(recipe)
+        bindings = {port.name: f"{instance}_{port.name}" for port in definition.ports
+                    if port.required}
+        bindings.update({port.name: "GND" for port in definition.ports if port.name == "gnd"})
+        if "vdd_5v" in bindings:
+            bindings["vdd_5v"] = "LED_5V"
+        if recipe == "ap63205-5v@2":
+            bindings["output"] = "LED_5V"
+            bindings["enable"] = "REG_ENABLE"
+        if recipe in {"usb-c-usb2-device@1", "esp32-s3-wroom-1-n16r8-minimal@1"}:
+            bindings.update(usb_dm="USB_DM", usb_dp="USB_DP")
+        parameters = ({"series_resistors": False} if recipe == "usb-c-usb2-device@1"
+                      else {"native_usb": True} if recipe.startswith("esp32-s3-wroom-1-")
+                      else {})
+        selections.append(RecipeSelection(recipe=recipe, instance=instance,
+            sheets={role: instance.upper() for role in definition.required_sheet_roles},
+            parameters=parameters, port_bindings=bindings))
+    expansions = expand_selections(selections)
+    state = ConversationState(
+        architecture=Architecture(
+            sheets=[Sheet(name=instance.upper(), stem=instance.upper(), function=instance)
+                    for _, instance in recipes],
+            power_nets=[], inter_sheet_nets=[],
+                                  recipe_selections=[e.selection for e in expansions]),
+        bom=BOM(parts=[p for e in expansions for p in e.parts],
+                connections=[c for e in expansions for c in e.connections],
+                no_connect_pins=[p for e in expansions for p in e.no_connect_pins],
+                recipe_ownership=[e.ownership for e in expansions]),
+        silk_plan=SilkPlan(labels=[]))
+    return state
+
+
+def test_required_silk_lifecycle_survives_disabled_and_failed_provider(tmp_path, monkeypatch):
+    from kicraft.design.cli_app import run_silk_plan_authoring
+    import kicraft.design.cli_app as cli
+    from kicraft.design.synthesis.interface_facts import reviewed_interface_facts
+
+    state = _reviewed_interfaces_state()
+    path = tmp_path / "state.json"
+    path.write_text(state.model_dump_json())
+    monkeypatch.setenv("KICRAFT_SILK_PLAN", "0")
+    calls = []
+    def failed_provider(*args):
+        calls.append(True)
+        raise RuntimeError("optional provider unavailable")
+    monkeypatch.setattr(cli, "_review_client_and_settings", failed_provider)
+    run_silk_plan_authoring(path, tmp_path, lambda event: None)
+    assert not calls
+    saved = ConversationState.model_validate_json(path.read_text())
+    facts = reviewed_interface_facts(saved)
+    assert {f["kind"] for f in facts} == {
+        "pd_power", "usb_programming", "hub75", "led_output", "speaker", "boot", "reset"}
+    assert next(f for f in facts if f["kind"] == "led_output")["current_a"] == 0.25
+    assert next(f for f in facts if f["kind"] == "speaker")["impedance_ohm"] == 8
+    assert saved.stage_status["silk_plan"].semantic_clean
+    before = saved.silk_plan.labels
+    monkeypatch.setenv("KICRAFT_SILK_PLAN", "1")
+    run_silk_plan_authoring(path, tmp_path, lambda event: None)
+    assert calls == [True]
+    saved = ConversationState.model_validate_json(path.read_text())
+    assert saved.silk_plan.labels == before
+    assert saved.stage_status["silk_plan"].semantic_clean
+
+
+def test_required_pin_placement_receipt_is_checked():
+    from kicraft.design.models import SilkPlan
+    from kicraft.design.synthesis.silk_plan import (
+        required_labels, required_silk_defects,
+    )
+    state = _reviewed_interfaces_state()
+    state.silk_plan = SilkPlan(labels=required_labels(state))
+    assert not required_silk_defects(state)
+    defects = required_silk_defects(state, placed_ids=[])
+    assert any(":pins:1" in defect and "not placed" in defect for defect in defects)
+
+
+def test_changed_led_owned_wiring_does_not_produce_numeric_fact():
+    from kicraft.design.synthesis.interface_facts import reviewed_interface_facts
+    state = _reviewed_interfaces_state()
+    led = next(p for p in state.bom.parts
+               if p.recipe_instance == "led" and p.recipe_role == "connector")
+    net = next(c for c in state.bom.connections
+               if any(ep.ref == led.ref and ep.pin == "2" for ep in c.endpoints))
+    net.net_name = "UNREVIEWED_DATA"
+    assert not any(f["kind"] == "led_output" for f in reviewed_interface_facts(state))

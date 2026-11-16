@@ -143,6 +143,7 @@ def serialize_trace(trace: TraceSegment) -> dict[str, Any]:
         "layer": serialize_layer(trace.layer),
         "net": trace.net,
         "width_mm": float(trace.width_mm),
+        "escape_ownership": trace.escape_ownership,
         "length_mm": float(trace.length),
     }
 
@@ -154,6 +155,7 @@ def serialize_via(via: Via) -> dict[str, Any]:
         "net": via.net,
         "drill_mm": float(via.drill_mm),
         "size_mm": float(via.size_mm),
+        "escape_ownership": via.escape_ownership,
     }
 
 

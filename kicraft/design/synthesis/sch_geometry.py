@@ -23,6 +23,118 @@ the stub really lands on the pin. See tests/test_sch_geometry.py.
 """
 from __future__ import annotations
 
+import json
+import threading
+import re
+from functools import lru_cache
+
+from .parts_lookup import resolve_symbol_library_path
+from .symbol_library import _match_block, _resolve_extends_chain
+
+_NUM = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)"
+_POINT = re.compile(rf"\((?:start|mid|end|center|xy)\s+({_NUM})\s+({_NUM})\)")
+_RADIUS = re.compile(rf"\(radius\s+({_NUM})\)")
+_SUBSYMBOL = re.compile(r'\(symbol\s+"[^"]+_(\d+)_(\d+)"')
+_GRAPHIC = re.compile(r"\((?:rectangle|circle|polyline|arc|bezier)\b")
+
+_TEXT_WIDTHS: dict[str, float] = {"": 0.0}
+_TEXT_WIDTH_LOCK = threading.Lock()
+
+
+def prepare_text_metrics(texts) -> None:
+    """Batch-measure exact strings in KiCad's stroke font at 1.27 mm.
+
+    pcbnew is isolated in the same subprocess mechanism as the silk placer.
+    A failed measurement is an error, not permission to use undersized text.
+    """
+    with _TEXT_WIDTH_LOCK:
+        missing = sorted({str(text) for text in texts if text} - _TEXT_WIDTHS.keys())
+        if not missing:
+            return
+        from kicraft.autoplacer.hardware.adapter import _run_pcbnew_subprocess
+
+        payload = json.dumps(missing, ensure_ascii=True)
+        script = (
+            "import json, pcbnew\n"
+            "from kicraft.autoplacer.hardware._silk_legend_subprocess import _make_text\n"
+            f"texts = json.loads({payload!r})\n"
+            "board = pcbnew.BOARD()\n"
+            "widths = []\n"
+            "for value in texts:\n"
+            "    text = _make_text(board, value, 1.27, pcbnew.F_SilkS, False)\n"
+            "    widths.append(pcbnew.ToMM(text.GetBoundingBox().GetWidth()))\n"
+            "print(json.dumps(widths))\n"
+        )
+        widths = json.loads(_run_pcbnew_subprocess(script))
+        if len(widths) != len(missing) or any(width <= 0 for width in widths):
+            raise RuntimeError("KiCad returned incomplete schematic text measurements")
+        _TEXT_WIDTHS.update(zip(missing, widths))
+
+
+def text_width_mm(text: str, height_mm: float = 1.27) -> float:
+    if text not in _TEXT_WIDTHS:
+        prepare_text_metrics((text,))
+    return _TEXT_WIDTHS[text] * height_mm / 1.27
+
+
+@lru_cache(maxsize=1024)
+def symbol_graphics_bounds(lib_id: str, unit: int = 1) -> tuple[float, float, float, float] | None:
+    """Bounds of the actual unit graphics in library coordinates (+y up).
+
+    Pin endpoints do not bound symbols: vendor modules frequently extend well
+    beyond their pin row. Common unit-zero graphics apply to every unit.
+    """
+    library, sep, name = lib_id.partition(":")
+    if not sep or not library or not name:
+        raise ValueError(f"invalid symbol id {lib_id!r}")
+    lib_path = resolve_symbol_library_path(library)
+    source = _resolve_extends_chain(lib_path.read_text(), name)
+    sub_blocks = []
+    for match in _SUBSYMBOL.finditer(source):
+        if int(match.group(1)) in (0, unit):
+            sub_blocks.append(_match_block(source, match.start()))
+    if not sub_blocks:
+        sub_blocks = [source]
+    points: list[tuple[float, float]] = []
+    for block in sub_blocks:
+        for match in _GRAPHIC.finditer(block):
+            graphic = _match_block(block, match.start())
+            coords = [(float(x), float(y)) for x, y in _POINT.findall(graphic)]
+            if graphic.startswith("(circle"):
+                radius = _RADIUS.search(graphic)
+                if coords and radius:
+                    x, y = coords[0]
+                    r = float(radius.group(1))
+                    coords.extend(((x - r, y - r), (x + r, y + r)))
+            elif graphic.startswith("(arc") and len(coords) >= 3:
+                # The full circumcircle is a conservative enclosure of an arc.
+                (ax, ay), (bx, by), (cx, cy) = coords[:3]
+                det = 2 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by))
+                if abs(det) > 1e-9:
+                    a2, b2, c2 = ax * ax + ay * ay, bx * bx + by * by, cx * cx + cy * cy
+                    ux = (a2 * (by - cy) + b2 * (cy - ay) + c2 * (ay - by)) / det
+                    uy = (a2 * (cx - bx) + b2 * (ax - cx) + c2 * (bx - ax)) / det
+                    r = ((ax - ux) ** 2 + (ay - uy) ** 2) ** 0.5
+                    coords.extend(((ux - r, uy - r), (ux + r, uy + r)))
+            points.extend(coords)
+    if not points:
+        return None
+    xs, ys = zip(*points)
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def placed_graphics_bounds(lib_id: str, unit: int, x: float, y: float,
+                           rotation: int) -> tuple[float, float, float, float] | None:
+    bounds = symbol_graphics_bounds(lib_id, unit)
+    if bounds is None:
+        return None
+    x1, y1, x2, y2 = bounds
+    corners = [rotate_vec(px, py, rotation)
+               for px, py in ((x1, y1), (x1, y2), (x2, y1), (x2, y2))]
+    xs = [x + px for px, _ in corners]
+    ys = [y - py for _, py in corners]
+    return min(xs), min(ys), max(xs), max(ys)
+
 ROTATIONS = (0, 90, 180, 270)
 
 # Unit step (schematic +y down) for each exit direction.

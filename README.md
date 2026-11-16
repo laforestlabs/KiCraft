@@ -35,6 +35,16 @@ amber for active or parked, green for complete, red for failure, and yellow for
 warning. Icons and accessible status names distinguish states independently of
 color, including on mobile.
 
+### Project links and account access
+
+For signed-in users, `/?project=<id>` opens the owner's workspace. Administrators
+following another owner's link go to `/admin/projects/view?project=<id>`, the
+existing read-only inspector. Other accounts use `/p/<id>`, whose visibility gate
+shows public results or a neutral unavailable page. Invalid or unresolved explicit
+project links never silently open an unrelated default design or blank composer.
+Opening a link does not change ownership or visibility, or create a clone;
+editing another owner's design requires an explicit clone into your workspace.
+
 ### What the page claims: assurance and export labels
 
 Every project carries one derived **assurance** reading, shown next to its status

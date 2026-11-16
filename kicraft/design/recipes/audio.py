@@ -34,6 +34,8 @@ PAM8302A_PWM_SPEAKER = RecipeDefinition(
     protected_aliases=("pwm-passive-speaker-driver", "PAM8302AADCR"),
     identity_aliases=("PAM8302AADCR",),
     required_sheet_roles=("interface",),
+    parameter_defaults={"speaker_impedance_ohm": 8, "estimated_low_frequency_output_w": 0.087},
+    allowed_parameters={"speaker_impedance_ohm": (8,), "estimated_low_frequency_output_w": (0.087,)},
     ports=(Port(name="vdd", direction="power"), Port(name="gnd", direction="power"),
            Port(name="pwm", direction="input")),
     # Conservative concurrent-load planning allocation, not a measured current.

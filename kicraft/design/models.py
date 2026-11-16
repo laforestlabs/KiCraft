@@ -1139,6 +1139,8 @@ class BomPart(BaseModel):
     mpn: str | None = None
     datasheet: str | None = None
     sourcing_note: str | None = None
+    # Canonical catalog selection, validated against part identity at sourcing commit.
+    lcsc: str | None = None
     # Quantity is per owning part; accessories are procured, not placed on the PCB.
     accessories: tuple[BOMAccessory, ...] = ()
     # Which copper side the part mounts on. "back" places it on B.Cu (the
@@ -1168,6 +1170,23 @@ class BomPart(BaseModel):
     # False means a routed/validated board-fabricated feature omitted from
     # assembly BOM and position exports.
     assembly: bool = True
+
+    @model_validator(mode="before")
+    @classmethod
+    def _read_legacy_lcsc_pin(cls, value):
+        if isinstance(value, dict) and "lcsc" not in value:
+            from kicraft.design.synthesis.fab_export import extract_lcsc_pin
+            pin = extract_lcsc_pin(value.get("sourcing_note") or "")
+            if pin:
+                value = {**value, "lcsc": pin}
+        return value
+
+    @field_validator("lcsc")
+    @classmethod
+    def _lcsc_shape(cls, value: str | None) -> str | None:
+        if value is not None and not re.fullmatch(r"C[1-9]\d*", value):
+            raise ValueError("LCSC selection must be a canonical C-number")
+        return value
 
     @field_validator("ref")
     @classmethod
@@ -1221,6 +1240,40 @@ class PinEndpoint(BaseModel):
         if not PIN_NUMBER_RE.match(v):
             raise ValueError(f"PinEndpoint.pin {v!r} must match {PIN_NUMBER_RE.pattern}")
         return v
+
+
+class USBPairSegment(BaseModel):
+    """One conductor pair between reviewed component terminals."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    positive_net: str
+    negative_net: str
+    positive_from: list[PinEndpoint] = Field(min_length=1)
+    positive_to: list[PinEndpoint] = Field(min_length=1)
+    negative_from: list[PinEndpoint] = Field(min_length=1)
+    negative_to: list[PinEndpoint] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _distinct_conductors(self):
+        if not self.id or not self.positive_net or not self.negative_net or self.positive_net == self.negative_net:
+            raise ValueError("USB pair requires an id and distinct conductor nets")
+        return self
+
+
+class USBRoutingContract(BaseModel):
+    """Ordered USB path; component continuity is established by its producer."""
+
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+
+    id: str
+    segments: list[USBPairSegment] = Field(min_length=1)
+    reference_net: str
+    impedance_ohm: float = Field(default=90, gt=0)
+    impedance_tolerance: float = Field(default=0.1, gt=0, lt=1)
+    max_skew_mm: float = Field(default=0.5, ge=0)
+    max_layer_transitions: int = Field(default=2, ge=0)
 
 
 class NetConnection(BaseModel):
@@ -1681,6 +1734,7 @@ class SilkLabel(BaseModel):
     anchor: SilkAnchor | None = None
     priority: int = Field(default=2, ge=1, le=3)  # 1 must-have .. 3 nice
     pins: list[SilkPinText] = Field(default_factory=list)
+    required: bool = False
 
 
 class SilkPlan(BaseModel):
@@ -1926,6 +1980,23 @@ class StageStatus(BaseModel):
     failure_kind: str | None = None
 
 
+class ReviewCoverage(BaseModel):
+    """Evidence actually delivered to an electrical reviewer."""
+
+    source_fingerprint: str
+    expected_refs: list[str] = Field(default_factory=list)
+    included_refs: list[str] = Field(default_factory=list)
+    expected_nets: list[str] = Field(default_factory=list)
+    included_nets: list[str] = Field(default_factory=list)
+    omitted_mandatory: list[str] = Field(default_factory=list)
+    complete: bool
+
+
+class ReviewEvidence(BaseModel):
+    digest: str
+    coverage: ReviewCoverage
+
+
 class ConversationState(BaseModel):
     """Single mutable object passed to every stage and the orchestrator."""
 
@@ -1949,6 +2020,7 @@ class ConversationState(BaseModel):
     # artifacts is still None. The GUI electrical-review inspector reads this
     # first, falling back to artifacts.review_findings for legacy projects.
     review_findings: list[ReviewFinding] = Field(default_factory=list)
+    review_coverage: ReviewCoverage | None = None
     # Silkscreen content plan, authored post-wiring in the web process (same
     # lifecycle as review_findings). The build tail places it; None => the
     # deterministic legend only.

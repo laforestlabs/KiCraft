@@ -46,6 +46,15 @@ def _run(tmp_path: Path, labels: list[dict], legend_lines=None) -> tuple[dict, P
     return json.loads(result_path.read_text()), board
 
 
+def test_required_label_placement_failure_is_named(tmp_path):
+    result, _ = _run(tmp_path, [
+        {"id": "required:J999:usb", "text": "USB DATA", "ref": "J999",
+         "required": True, "priority": 1},
+    ], legend_lines=[])
+    assert result["required_missing"] == ["required:J999:usb"]
+    assert any(item["id"] == "required:J999:usb" for item in result["dropped"])
+
+
 def _board_texts_and_geometry(board_path: Path):
     import pcbnew
 

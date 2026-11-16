@@ -569,16 +569,127 @@ def _current_attempt_project_dir(ws: Path, generation: int, kind: str) -> Path |
 
 
 def _zip_generated(ws: Path, project_dir: Path | None) -> str | None:
-    """Archive exactly one current KiCad project, excluding internal experiments."""
+    """Package release inputs, binding all fabrication artifacts to the promoted PCB."""
     if project_dir is None or not project_dir.is_dir():
         return None
+    stem = _read_project_stem(ws)
+    provenance = sorted(project_dir.glob("*.provenance.json"))
+    promoted = []
+    for path in provenance:
+        record = json.loads(path.read_text(encoding="utf-8"))
+        name = Path(record.get("promoted_pcb", "")).name
+        if name and (project_dir / name).is_file():
+            promoted.append((project_dir / name, path))
+    if len(promoted) > 1:
+        raise ValueError("Multiple promoted PCBs in release directory")
+    board = promoted[0][0] if promoted else (
+        project_dir / f"{stem}.kicad_pcb" if stem else None
+    )
+    if board is not None and not board.is_file():
+        board = None
+    if board is None and list(project_dir.glob("*.kicad_pcb")):
+        raise ValueError("Cannot identify promoted PCB from provenance or project state")
+    board_hash = hashlib.sha256(board.read_bytes()).hexdigest() if board else None
+    selected: set[Path] = set()
+    if board:
+        selected.add(board)
+        stem = board.stem
+        if promoted:
+            selected.add(promoted[0][1])
+        project = project_dir / f"{stem}.kicad_pro"
+        if not project.is_file():
+            raise ValueError("Promoted PCB has no matching KiCad project")
+        selected.add(project)
+    selected.update(p for p in project_dir.glob("*.kicad_sch")
+                    if not p.stem.endswith("_best") and not p.name.startswith(("~", "#", "_autosave")))
+    for name in ("sym-lib-table", "fp-lib-table"):
+        path = project_dir / name
+        if path.is_file():
+            selected.add(path)
+    for directory in ("3dmodels", "symbols", "footprints"):
+        root = project_dir / directory
+        if root.is_dir():
+            selected.update(p for p in root.rglob("*") if p.is_file() and not p.is_symlink())
+    for pattern in ("*.kicad_sym", "*.pretty"):
+        for path in project_dir.glob(pattern):
+            if path.is_file():
+                selected.add(path)
+            elif path.is_dir():
+                selected.update(p for p in path.rglob("*") if p.is_file() and not p.is_symlink())
+
+    receipts = sorted(project_dir.glob("*_fab_*.receipt.json"))
+    matching = []
+    for path in receipts:
+        receipt = json.loads(path.read_text(encoding="utf-8"))
+        if receipt.get("board_sha256") == board_hash and receipt.get("board") == (board.name if board else None):
+            matching.append((path, receipt))
+    if board and not matching:
+        raise ValueError("Fabrication receipt missing or does not match promoted PCB hash")
+    if matching:
+        receipt_path, receipt = matching[-1]
+        if "operating_interfaces.txt" not in receipt.get("files", {}):
+            raise ValueError("Release requires a hash-bound operating/interface sheet")
+        archive_name = receipt.get("archive", "")
+        if Path(archive_name).name != archive_name:
+            raise ValueError("Invalid fabrication archive path")
+        archive = project_dir / archive_name
+        if not archive.is_file() or hashlib.sha256(archive.read_bytes()).hexdigest() != receipt.get("archive_sha256"):
+            raise ValueError("Fabrication archive hash mismatch")
+        selected.update((receipt_path, archive))
+        for name, digest in receipt.get("files", {}).items():
+            if Path(name).name != name:
+                raise ValueError("Invalid fabrication file path")
+            path = project_dir / "fab" / name
+            if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+                raise ValueError(f"Fabrication file hash mismatch: {name}")
+            selected.add(path)
+    if board:
+        for suffix, label in (
+            (".usb-routing.receipt.json", "USB physical"),
+            (".silk.receipt.json", "Silkscreen"),
+            (".escape-cleanup.receipt.json", "Escape cleanup"),
+            (".dangling.receipt.json", "Dangling copper"),
+            (".verification.receipt.json", "Verification"),
+        ):
+            path = board.with_suffix(suffix)
+            if not path.is_file() and label != "USB physical":
+                raise ValueError(f"{label} receipt is required for release")
+            if path.is_file():
+                record = json.loads(path.read_text(encoding="utf-8"))
+                if record.get("board_sha256") != board_hash:
+                    raise ValueError(f"{label} receipt does not match promoted PCB hash")
+                accepted = (record.get("fab_acceptable") is True if label == "Verification"
+                            else record.get("ok") is True)
+                if not accepted:
+                    raise ValueError(f"{label} receipt records an incomplete delivery")
+                selected.add(path)
+    selected = {p for p in selected if p.is_file() and not p.is_symlink()}
+    manifest = {
+        "schema_version": 1, "board": board.name if board else None,
+        "board_sha256": board_hash,
+        "files": {str(p.relative_to(project_dir)): hashlib.sha256(p.read_bytes()).hexdigest()
+                  for p in sorted(selected)},
+    }
     out = ws / "kicraft_project.zip"
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
-        for p in sorted(project_dir.rglob("*")):
-            rel = p.relative_to(project_dir)
-            if ".experiments" in rel.parts or p.is_dir():
-                continue
-            zf.write(p, str(Path(project_dir.name) / rel))
+        for path in sorted(selected):
+            zf.write(path, str(Path(project_dir.name) / path.relative_to(project_dir)))
+        if board:
+            zf.writestr(str(Path(project_dir.name) / "release_manifest.json"),
+                        json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    if board:
+        with zipfile.ZipFile(out) as zf:
+            for name, digest in manifest["files"].items():
+                if hashlib.sha256(zf.read(str(Path(project_dir.name) / name))).hexdigest() != digest:
+                    out.unlink(missing_ok=True)
+                    raise ValueError(f"Release file changed during packaging: {name}")
+        if hashlib.sha256(board.read_bytes()).hexdigest() != board_hash:
+            out.unlink(missing_ok=True)
+            raise ValueError("Promoted PCB changed during release packaging")
+        receipt = {"schema_version": 1, "board": board.name, "board_sha256": board_hash,
+                   "archive": out.name, "archive_sha256": hashlib.sha256(out.read_bytes()).hexdigest()}
+        out.with_suffix(".receipt.json").write_text(
+            json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return str(out)
 
 
@@ -1457,6 +1568,31 @@ def _step_model_summary(artifacts: dict) -> str:
     return "exported; all expected assembly references present"
 
 
+def _electrical_review_state(sj: dict) -> str:
+    """Read review completeness from persisted evidence, not an empty findings list."""
+    coverage = sj.get("review_coverage")
+    if not isinstance(coverage, dict):
+        return "unknown"
+    identities = ("refs", "nets")
+    for kind in identities:
+        expected = coverage.get(f"expected_{kind}")
+        included = coverage.get(f"included_{kind}")
+        if (not isinstance(expected, list) or not isinstance(included, list)
+                or not all(isinstance(item, str) for item in expected + included)
+                or set(expected) != set(included)):
+            return "incomplete"
+    if (coverage.get("complete") is not True
+            or coverage.get("omitted_mandatory") != []):
+        return "incomplete"
+    statuses = sj.get("stage_status")
+    entry = statuses.get("electrical_review") if isinstance(statuses, dict) else None
+    if not isinstance(entry, dict) or any(
+        entry.get(key) is not True for key in ("ok", "provider_ok", "schema_ok")
+    ) or not isinstance(entry.get("semantic_clean"), bool):
+        return "incomplete"
+    return "complete"
+
+
 def _inspector_spec(stage: str, sj: dict, run_status: dict, project_dir: Path | None,
                     build_lines: list[str], *, prices: dict | None = None,
                     assurance: dict | None = None) -> list[dict]:
@@ -1686,10 +1822,10 @@ def _inspector_spec(stage: str, sj: dict, run_status: dict, project_dir: Path | 
     if stage == "electrical_review":
         secs = []
         arts = sj.get("artifacts") or {}
-        # Prefer structured findings: top-level state.review_findings (written
-        # by the post-wiring review), then artifacts.review_findings (legacy
-        # build-tail location); fall back to parsing build_log lines.
-        raw = sj.get("review_findings") or arts.get("review_findings") or []
+        # Coverage marks the top-level findings as authoritative, including [].
+        covered = isinstance(sj.get("review_coverage"), dict)
+        raw = (sj.get("review_findings") or []) if covered else (
+            sj.get("review_findings") or arts.get("review_findings") or [])
         if raw:
             findings = [{"severity": f.get("severity", "note"),
                          "area": f.get("area", ""),
@@ -1697,21 +1833,35 @@ def _inspector_spec(stage: str, sj: dict, run_status: dict, project_dir: Path | 
                          "suggestion": f.get("suggestion", "")}
                         for f in raw]
         else:
-            findings = _parse_review_findings(build_lines)
+            findings = [] if covered else _parse_review_findings(build_lines)
+        review_state = _electrical_review_state(sj)
+        blocked = any(f["severity"] == "blocker" for f in findings)
+        n_blockers = sum(1 for f in findings if f["severity"] == "blocker")
+        n_warnings = sum(1 for f in findings if f["severity"] == "warning")
+        n_notes = sum(1 for f in findings if f["severity"] == "note")
+        statuses = sj.get("stage_status")
+        entry = statuses.get("electrical_review") if isinstance(statuses, dict) else None
+        if not isinstance(entry, dict):
+            entry = {}
+        if review_state == "unknown":
+            status = "Electrical review incomplete (coverage unknown)"
+        elif review_state == "incomplete":
+            status = "Electrical review incomplete"
+        elif blocked:
+            status = "BLOCKED"
+        elif not findings and entry.get("semantic_clean") is True:
+            status = "Complete — no findings"
+        else:
+            status = "Complete — findings require review"
+        secs.append({"type": "kv", "title": "Review outcome",
+                     "rows": [("status", status),
+                              ("blockers", n_blockers),
+                              ("warnings", n_warnings),
+                              ("notes", n_notes)]})
         if findings:
-            blocked = any(f["severity"] == "blocker" for f in findings)
-            n_blockers = sum(1 for f in findings if f["severity"] == "blocker")
-            n_warnings = sum(1 for f in findings if f["severity"] == "warning")
-            n_notes = sum(1 for f in findings if f["severity"] == "note")
-            status = "BLOCKED" if blocked else ("reviewed" if findings else "pending")
-            secs.append({"type": "kv", "title": "Review outcome",
-                         "rows": [("status", status),
-                                  ("blockers", n_blockers),
-                                  ("warnings", n_warnings),
-                                  ("notes", n_notes)]})
             secs.append({"type": "findings", "title": "Findings",
                          "items": findings})
-        else:
+        elif not covered:
             log = _build_lines_for("electrical_review", build_lines)
             if log:
                 secs.append({"type": "list", "title": "Electrical review", "items": log})
@@ -2040,16 +2190,23 @@ def _derived_statuses(ws: Path | None, sj: dict, project_status: str | None,
     mtime-cached reading instead of touching the filesystem again."""
     if signals is None and ws is not None:
         signals = _project_signals(ws)
+    state = sj or (signals.get("state") or {} if signals is not None else {})
     if signals is not None:
-        return derive_stage_statuses(
-            sj or signals["state"], project_status=project_status,
+        derived = derive_stage_statuses(
+            state, project_status=project_status,
             sheets_exist=signals["sheets"],
             synth_checks_failed=signals["checks_failed"],
             pcb_ready=signals["pcb"], zip_ok=zip_ok)
-    return derive_stage_statuses(sj, project_status=project_status,
-                                 sheets_exist=False,
-                                 synth_checks_failed=False,
-                                 pcb_ready=False, zip_ok=zip_ok)
+    else:
+        derived = derive_stage_statuses(state, project_status=project_status,
+                                        sheets_exist=False,
+                                        synth_checks_failed=False,
+                                        pcb_ready=False, zip_ok=zip_ok)
+    if (_electrical_review_state(state) != "complete"
+            and (derived.get("electrical_review") in ("done", "warning", "failed")
+                 or all(derived.get(stage) in ("done", "warning") for stage in DESIGN_STAGES))):
+        derived["electrical_review"] = "warning"
+    return derived
 
 
 # Live design runs, keyed by project id. A run's worker registers its state dict
@@ -2707,7 +2864,8 @@ def _project_signals(root: Path | None) -> dict:
         "build_warnings": list(artifacts.get("build_warnings") or []),
         "pcb_errors": list(artifacts.get("pcb_errors") or []),
         "review_findings": list(
-            sj.get("review_findings") or artifacts.get("review_findings") or []),
+            (sj.get("review_findings") or []) if isinstance(sj.get("review_coverage"), dict)
+            else (sj.get("review_findings") or artifacts.get("review_findings") or [])),
         "stage_status": sj.get("stage_status") or {},
         "state_mtime": sig[0],
         # Why the newest attempt ended, from its own transcript: the only durable
@@ -3087,6 +3245,15 @@ def _project_assurance(*, status: str, derived: dict, signals: dict) -> dict:
     if design_complete and signals.get("zip_ok") and not synth_check:
         limit("No synthesis-check summary is recorded for this export", blocking=True)
 
+    review_state = _electrical_review_state(sj)
+    if design_complete and review_state != "complete":
+        detail = " (coverage unknown)" if review_state == "unknown" else ""
+        limit(f"Electrical review incomplete{detail}; circuit review is unverified",
+              blocking=True)
+    elif review_state == "complete":
+        evidence.append("Electrical review completed with complete evidence")
+
+
     findings = [f for f in (signals.get("review_findings") or []) if isinstance(f, dict)]
     blockers = [f for f in findings if str(f.get("severity")) == "blocker"]
     if blockers:
@@ -3100,6 +3267,9 @@ def _project_assurance(*, status: str, derived: dict, signals: dict) -> dict:
     for stage in (*DESIGN_STAGES, "electrical_review"):
         entry = ss.get(stage)
         if not isinstance(entry, dict):
+            continue
+        if stage == "electrical_review" and review_state != "complete":
+            # Missing review evidence is a capability gap, not a circuit finding.
             continue
         label = _activity.stage_label(stage) or stage
         if entry.get("repair_required") or entry.get("semantic_clean") is False:
@@ -3335,8 +3505,19 @@ def _durable_issues(signals: dict, derived: dict) -> list[dict]:
     complete" marker."""
     concrete: list[dict] = []
     stages_with_concrete_error: set[str] = set()
+    review_state = _electrical_review_state(signals.get("state") or {})
+    if review_state != "complete" and (
+        "electrical_review" in (signals.get("stage_status") or {})
+        or all(derived.get(stage) in ("done", "warning") for stage in DESIGN_STAGES)
+    ):
+        detail = " (coverage unknown)" if review_state == "unknown" else ""
+        concrete.append(_issue(severity="warning", stage="electrical_review",
+                               code="electrical_review_incomplete",
+                               message=f"Electrical review incomplete{detail}"))
     for stage, entry in (signals.get("stage_status") or {}).items():
         if not isinstance(entry, dict):
+            continue
+        if stage == "electrical_review" and review_state != "complete":
             continue
         diagnostics = list(entry.get("diagnostics") or [])
         if isinstance(entry.get("diagnostic"), dict):
@@ -3404,6 +3585,7 @@ def _durable_issues(signals: dict, derived: dict) -> list[dict]:
                message=f"{_activity.stage_label(stage) or stage} did not complete")
         for stage, state in (derived or {}).items()
         if state == "failed" and str(stage) not in stages_with_concrete_error
+        and not (stage == "electrical_review" and review_state != "complete")
     ]
     return concrete + generic
 
@@ -6952,6 +7134,22 @@ def index(prompt: str = "", project: str = ""):
         return
     if user.accepted_terms_version != LEGAL_VERSION:
         return RedirectResponse("/consent")
+    requested = None
+    if project.strip():
+        # An explicit link must resolve or report availability, never silently
+        # substitute the current account's default project.
+        try:
+            requested = _store().get_project(int(project.strip()))
+        except (ValueError, OverflowError):
+            requested = None
+        if requested is None:
+            return RedirectResponse("/p/unavailable")
+        if requested.user_id != user.id:
+            if is_admin(user):
+                return RedirectResponse(f"/admin/projects/view?project={requested.id}")
+            # Reuse the public viewer's visibility gate and neutral unavailable
+            # panel; this does not grant access to another account's workspace.
+            return RedirectResponse(f"/p/{requested.id}")
     q0 = _store().quota_status(user)
 
     _mobile_head()
@@ -8679,7 +8877,7 @@ def index(prompt: str = "", project: str = ""):
                         # slot was nulled by an edit (it used to stay stale).
                         # set_inspector keeps an in-progress live draft on screen.
                         for stg in ("intent", "functional_spec", "architecture",
-                                    "bom", "wiring", "place_route"):
+                                    "bom", "wiring", "place_route", "electrical_review"):
                             inspector_dir = (
                                 Path(state["project_dir"])
                                 if state.get("project_dir") else None
@@ -8931,11 +9129,6 @@ def index(prompt: str = "", project: str = ""):
         # a question) first, else the newest finished design they haven't seen.
         # Arriving with a prefilled brief (?prompt= / a sample picked before
         # signup) means "start a new one", so that keeps the composer.
-        requested = None
-        if project.strip().isdigit():
-            rp = _store().get_project(int(project.strip()))
-            if rp is not None and rp.user_id == user.id:  # own projects only
-                requested = rp
         if requested is not None:
             open_project(requested, notify=False)
         elif not prefill:

@@ -78,11 +78,9 @@ _PACKAGE_SIZE_CODES = frozenset(
 def extract_lcsc_pin(text: str) -> str | None:
     """The explicit LCSC C-number pinned in prose, or None.
 
-    Shared by the BOM sourcing resolution (cli_app) and the fab BOM export so
-    both always agree on what counts as a pin. Package-size tokens (C0603,
-    C1206, ...) are excluded: treating "package C0603" as a pin either bounced
-    correct BOM commits at the sourcing gate or exported an unrelated real
-    part into the fab BOM.
+    Used by BOM sourcing validation and to reject a conflicting exported
+    selection. It is never used to select a catalog identity during export.
+    Package-size tokens (C0603, C1206, ...) are excluded.
     """
     for m in _LCSC_RE.finditer(text or ""):
         digits = m.group(0)[1:]
@@ -117,14 +115,17 @@ def _write_bom_csv(path: Path, parts: list[dict[str, Any]]) -> None:
         for p in parts:
             if p.get("assembly", True) is False:
                 continue
-            note = p.get("sourcing_note") or ""
+            selected = p.get("lcsc") or ""
+            pinned = extract_lcsc_pin(p.get("sourcing_note") or "")
+            if selected and pinned and selected != pinned:
+                raise ValueError(f"{p.get('ref', '')}: conflicting LCSC identities")
             w.writerow(
                 [
                     p.get("ref", ""),
                     p.get("value", ""),
                     p.get("footprint", ""),
                     p.get("mpn") or "",
-                    extract_lcsc_pin(note) or "",
+                    selected,
                     p.get("sheet", ""),
                 ]
             )
@@ -145,6 +146,73 @@ def _write_accessories_csv(path: Path, parts: list[dict[str, Any]]) -> bool:
     return True
 
 
+def _write_operating_sheet(path: Path, state: Any, project_root: Path | None,
+                           coverage: dict[str, Any]) -> None:
+    """Render only owner-reviewed interface claims and committed wiring."""
+    from .interface_facts import reviewed_interface_facts
+
+    facts = reviewed_interface_facts(state, project_root=project_root)
+    data = state.model_dump() if hasattr(state, "model_dump") else state
+    intent = data.get("intent") or {}
+    architecture = data.get("architecture") or {}
+    bom = data.get("bom") or {}
+    lines = [
+        "Operating and interface information",
+        "Design information only; operation and ratings have not been bench verified.",
+        "",
+        "Source requirements",
+        str(intent.get("goal") or "No source goal recorded."),
+    ]
+    lines.extend(f"- {item}" for item in intent.get("constraints", []))
+    lines.extend("- " + json.dumps(item, sort_keys=True) for item in intent.get("obligations", []))
+    lines.extend(f"Assumption: {item}" for item in intent.get("assumptions", []))
+    for name, topology in (architecture.get("topologies") or {}).items():
+        lines.append(f"Topology {name}: {topology}")
+    lines += ["", "Selected interface topology and instructions"]
+    for fact in facts:
+        lines.append(f"\n{fact['ref']} — {fact['title']} ({fact['kind']})")
+        lines.extend(f"  {text}" for text in fact.get("lines", []))
+        if fact["kind"] == "speaker" and "estimated_low_frequency_output_w" not in fact:
+            lines.append("  Audio output estimate unavailable: source and signal chain not fully reviewed.")
+        lines.extend(f"  {text}" for text in fact.get("notes", []))
+        for pin in fact.get("pins", []):
+            lines.append(f"  Pin {pin['pin']}: {pin['text']} — net {pin['net']}")
+        source = fact.get("source") or {}
+        lines.append("  Source: " + json.dumps(source, sort_keys=True))
+    kinds = {fact["kind"] for fact in facts}
+    if {"usb_programming", "boot", "reset"} <= kinds:
+        lines += ["", "Programming sequence: supply the board from its specified power input; "
+                  "hold BOOT, press and release RESET, then release BOOT. "
+                  "Connect the programming/data USB port to the host. "
+                  "Firmware and programming have not been demonstrated."]
+    lines += ["", "Committed pin/net map (includes MCU GPIO endpoints)"]
+    from .electrical_review import _pin_names
+    pin_names = {part["ref"]: _pin_names(part["symbol"], project_root)
+                 for part in bom.get("parts", []) if part.get("symbol")}
+    for net in bom.get("connections", []):
+        endpoints = ", ".join(
+            f"{p['ref']}.{p['pin']}({pin_names.get(p['ref'], {}).get(str(p['pin']), 'unresolved')})"
+            for p in net.get("endpoints", [])
+        )
+        lines.append(f"  {net.get('net_name', '')}: {endpoints}")
+    for selection in architecture.get("recipe_selections", []):
+        for allocation in selection.get("pin_allocations", []):
+            lines.append(f"  {selection.get('instance', '')}: pin {allocation.get('pin', '')} "
+                         f"({allocation.get('capability', '')}) — net {allocation.get('net', '')}")
+    for pin in bom.get("no_connect_pins", []):
+        lines.append(f"  {pin['ref']}.{pin['pin']}: no connect")
+    lines += [
+        "", "Unverified: panel model, scan and refresh compatibility; firmware; "
+        "bench performance and power sequencing; radio performance; ESD/EMC and "
+        "USB shield termination decision. CAD output is not hardware qualification.",
+        "STEP model coverage is not geometry or render qualification.",
+    ]
+    missing = coverage.get("missing_refs")
+    lines.append("Missing 3D model references: " +
+                 (", ".join(missing) if missing else "none observed" if missing == [] else "unknown"))
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 
 def _export_fab(
     pcb_path: str,
@@ -154,6 +222,8 @@ def _export_fab(
     bom_parts: list[dict[str, Any]] | None = None,
     fab_layers: str = _FAB_LAYERS,
     include_3d: bool = True,
+    state: Any | None = None,
+    project_root: Path | None = None,
 ) -> dict[str, Any]:
     """Export Gerbers/drill/CPL/BOM from a routed PCB and zip them.
 
@@ -350,6 +420,9 @@ def _export_fab(
             }, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
+    if state is not None:
+        _write_operating_sheet(fab / "operating_interfaces.txt", state, project_root, step_coverage)
+
 
     ts = datetime.now(timezone.utc).strftime("%Y%m%d")
     zip_path = out / f"{stem}_fab_{ts}.zip"
@@ -395,6 +468,8 @@ def export_fab(
     bom_parts: list[dict[str, Any]] | None = None,
     fab_layers: str | None = None,
     include_3d: bool = True,
+    state: Any | None = None,
+    project_root: Path | None = None,
 ) -> dict[str, Any]:
     """Publish a fresh package; never certify stale files from an earlier export.
 
@@ -408,6 +483,7 @@ def export_fab(
         result = _export_fab(
             pcb_path, str(staging), stem, bom_parts=bom_parts,
             fab_layers=fab_layers or fab_stack_layers(pcb_path), include_3d=include_3d,
+            state=state, project_root=project_root,
         )
         # This is generated output, not an input tree. Replace it only after all
         # required exports succeeded, so old drills/images cannot reappear.

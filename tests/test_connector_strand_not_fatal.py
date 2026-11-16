@@ -84,6 +84,10 @@ def _patch_validate(monkeypatch, *, accepted, drc=None, reasons=None):
     monkeypatch.setattr(
         "kicraft.autoplacer.routing_board.validate_routed_board", _fake
     )
+    monkeypatch.setattr(
+        cli_app, "_verify_dangling_copper",
+        lambda _pcb, evidence=None: {"ok": True, "complete": True, "accepted": True},
+    )
 
 def test_verify_gate_strand_is_warning_not_fail(monkeypatch, tmp_path):
     # A stranded connector on an electrically-clean board is a WARNING

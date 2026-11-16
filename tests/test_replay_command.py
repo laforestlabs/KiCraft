@@ -147,6 +147,22 @@ def test_replay_flag_parsing(monkeypatch):
 # ---- the synthesis-skip guarantee + seed/route threading ---------------------
 
 
+@pytest.mark.parametrize("mode", ["engineering_review", "unrecognized"])
+def test_manufacturing_invocation_refuses_nonmanufacturing_routing_input(tmp_path, mode):
+    import json
+
+    project = _stub_workspace(tmp_path)
+    path = project / "DEMO_autoplacer.json"
+    config = {"usb_geometry_mode": mode}
+    path.write_text(json.dumps(config))
+    before = path.read_bytes()
+    with pytest.raises(ValueError):
+        cli_app._configure_usb_geometry_mode(
+            project, "DEMO", config, engineering_review=False,
+        )
+    assert path.read_bytes() == before
+
+
 def _patch_replay_seams(monkeypatch, recorder):
     """Make `_cmd_replay` callable without a real layout run: no degenerate
     check, a no-op build slot, and a `_layout_route_fab` that records the

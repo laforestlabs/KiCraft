@@ -114,6 +114,7 @@ class HierarchyRound:
     # parent_routed is uniformly False (e.g. --leaves-only mode), since
     # the parent score is a meaningless 20.0 fallback in that case.
     leaf_score_summary: dict[str, Any] = field(default_factory=dict)
+    routed_tradeoff: dict[str, Any] = field(default_factory=dict)
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), sort_keys=False)
@@ -727,6 +728,7 @@ def _auto_pin_best_leaves(project_dir: Path, *, allow_incomplete: bool = False) 
 _PARENT_SNAPSHOT_FILES = (
     "parent_routed.kicad_pcb", "parent_routed.kicad_pro",
     "parent_routed.kicad_prl", "parent_routed.kicad_dru",
+    "parent_routed.kicad_pcb.escape_ownership.json",
     "debug.json", "metadata.json", "solved_layout.json",
 )
 
@@ -752,6 +754,78 @@ def _snapshot_best_parent(parent_dir: Path, best_dir: Path, round_num: int, run_
         "parent_dir": parent_dir.name, "files": files,
     })
     return True
+
+
+def _routed_parent_metrics(board_path: Path) -> dict[str, float | int | None]:
+    """Measure the entire routed board, never the pre-route child inventory."""
+    from kicraft.autoplacer.routing_board import _kicad_subprocess_env
+
+    unknown = {"board_area_mm2": None, "via_count": None, "copper_length_mm": None}
+    script = """
+import json, pcbnew, sys
+board = pcbnew.LoadBoard(sys.argv[1])
+poly = pcbnew.SHAPE_POLY_SET()
+area = None
+if board.GetBoardPolygonOutlines(poly) and poly.OutlineCount():
+    area = abs(poly.Area()) / float(pcbnew.FromMM(1)) ** 2
+tracks = list(board.GetTracks())
+vias = sum(isinstance(t, pcbnew.PCB_VIA) for t in tracks)
+length = sum(t.GetLength() for t in tracks if not isinstance(t, pcbnew.PCB_VIA))
+print(json.dumps(dict(board_area_mm2=area, via_count=vias,
+                      copper_length_mm=pcbnew.ToMM(length))))
+"""
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", script, str(board_path)],
+            capture_output=True, text=True, env=_kicad_subprocess_env(), timeout=60,
+        )
+        if result.returncode:
+            return unknown
+        data = json.loads(result.stdout)
+        for key in unknown:
+            value = data.get(key)
+            if not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+                data[key] = None
+        if data["board_area_mm2"] == 0:
+            data["board_area_mm2"] = None
+        return {key: data[key] for key in unknown}
+    except (OSError, ValueError, TypeError, AttributeError, subprocess.SubprocessError):
+        return unknown
+
+
+def _routed_pareto_choice(candidates: list[dict[str, Any]]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Return the best-scoring non-dominated accepted parent and its receipt.
+
+    Incomplete measurements are incomparable, not zero or a guessed estimate.
+    """
+    keys = ("board_area_mm2", "via_count", "copper_length_mm")
+    receipt = []
+    frontier = []
+    for candidate in candidates:
+        metrics = candidate["metrics"]
+        dominators = []
+        if all(metrics.get(key) is not None for key in keys):
+            for other in candidates:
+                if other is candidate:
+                    continue
+                theirs = other["metrics"]
+                if (all(theirs.get(key) is not None for key in keys)
+                        and all(theirs[key] <= metrics[key] for key in keys)
+                        and any(theirs[key] < metrics[key] for key in keys)):
+                    dominators.append(other["round"].round_num)
+        if not dominators:
+            frontier.append(candidate)
+        receipt.append({
+            "round_num": candidate["round"].round_num,
+            "score": candidate["round"].score,
+            "metrics": dict(metrics),
+            "dominated_by": dominators,
+            "reason": ("dominated" if dominators else
+                       "non_dominated" if all(metrics.get(k) is not None for k in keys)
+                       else "incomparable_missing_measurement"),
+        })
+    winner = max(frontier, key=lambda item: item["round"].score)
+    return winner, receipt
 
 
 def _pin_best_parent(project_dir: Path, best_dir: Path, best_round, run_id: str) -> bool:
@@ -2714,6 +2788,7 @@ def main(argv: list[str] | None = None) -> int:
 
     start_ts = time.monotonic()
     best_round: HierarchyRound | None = None
+    routed_candidates: list[dict[str, Any]] = []
     # The final status must not collapse to 0/0 just because no round was ever
     # KEPT (a kept round requires a routed parent, so a routing wall zeroes the
     # reported leaf counts). Keep the last round's record as the fallback so the
@@ -3580,6 +3655,13 @@ def main(argv: list[str] | None = None) -> int:
         subprocesses_ok = (args.parents_only or solve_rc == 0) and (
             args.leaves_only or parent_route_rc == 0
         )
+        # A routed inspection artifact rejected by its own gate is never a
+        # contender for the accepted-parent winner.
+        if not args.leaves_only:
+            subprocesses_ok = (
+                subprocesses_ok and tier == "functional"
+                and parent_routed_validation.get("accepted") is True
+            )
         is_meaningful_improvement = scheduler.observe_round_end(
             score=score, subprocesses_ok=subprocesses_ok
         )
@@ -3657,6 +3739,22 @@ def main(argv: list[str] | None = None) -> int:
             leaf_score_summary=_extract_leaf_score_summary(solve_payload),
         )
         last_round = round_result
+        if not args.leaves_only and subprocesses_ok:
+            parent_dir = _discover_latest_parent_artifact_dir(project_dir)
+            candidate_dir = round_dir / "routed_candidate"
+            candidate_dir.mkdir(parents=True, exist_ok=True)
+            if parent_dir is not None and _snapshot_best_parent(
+                parent_dir, candidate_dir, round_num, run_id
+            ):
+                metrics = _routed_parent_metrics(candidate_dir / "parent_routed.kicad_pcb")
+                round_result.routed_tradeoff = {"metrics": metrics, "eligible": True}
+                routed_candidates.append({
+                    "round": round_result, "metrics": metrics, "directory": candidate_dir,
+                })
+            else:
+                round_result.routed_tradeoff = {
+                    "eligible": False, "reason": "incomplete_parent_custody",
+                }
 
         if round_result.kept:
             # (scheduler already folded score into best_score/kept_count)
@@ -3777,6 +3875,41 @@ def main(argv: list[str] | None = None) -> int:
         _safe_unlink(work_dir / "stop.now")
     # A failed round can leave a fresh but rejected router output at the
     # canonical path. Only the selected successful round may be promoted.
+    if not args.leaves_only:
+        if routed_candidates:
+            winner, tradeoffs = _routed_pareto_choice(routed_candidates)
+            best_round = winner["round"]
+            best_round.kept = True
+            scheduler.best_score = best_round.score
+            best_round.routed_tradeoff = {
+                "eligible": True,
+                "metrics": winner["metrics"],
+                "selection_reason": "highest_score_among_non_dominated",
+                "candidates": tradeoffs,
+            }
+            selected_dir = winner["directory"]
+            for name in (*_PARENT_SNAPSHOT_FILES, "parent_custody.json"):
+                source = selected_dir / name
+                if source.is_file():
+                    _copy_if_exists(source, best_dir / name)
+                else:
+                    _safe_unlink(best_dir / name)
+            _copy_if_exists(
+                selected_dir / "parent_routed.kicad_pcb",
+                project_dir / f"{project_dir.name}_best.kicad_pcb",
+            )
+            _write_json(best_dir / "best_hierarchical_round.json", {
+                "round_num": best_round.round_num,
+                "seed": best_round.seed,
+                "score": best_round.score,
+                "tier": best_round.tier,
+                "details": best_round.details,
+                "parent_output_json": best_round.parent_output_json,
+                "routed_tradeoff": best_round.routed_tradeoff,
+            })
+        else:
+            best_round = None
+            _safe_unlink(best_dir / "parent_custody.json")
     parent_selected = False if args.leaves_only else _pin_best_parent(
         project_dir, best_dir, best_round, run_id
     )

@@ -125,6 +125,15 @@ class RecipePlacementConstraint(BaseModel):
     parameters: dict[str, JsonScalar] = Field(default_factory=dict)
 
 
+def usb_pair_placement(role: str) -> RecipePlacementConstraint:
+    """Reviewed USB layout targets shared by native and bridge PHY recipes."""
+    return RecipePlacementConstraint(
+        kind="usb_differential_pair", role=role,
+        parameters={"impedance_ohm": 90.0, "impedance_tolerance": 0.1,
+                    "max_skew_mm": 0.5, "max_layer_transitions": 2},
+    )
+
+
 class RecipeElectricalAssertion(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

@@ -358,7 +358,7 @@ def _reserve_signal_escapes(board_path: Path, extraction: ExtractedSubcircuitBoa
             raise ValueError(f"failed to load {board_path}")
         specs = signal_escape_specs(board, cfg, set(extraction.external_net_names))
         del board
-        result = add_breakout_stubs(str(board_path), specs, cfg=cfg) if specs else {
+        result = add_breakout_stubs(str(board_path), specs, cfg=cfg, signal_escape_owner=True) if specs else {
             "stubs": 0, "vias": 0, "skipped": [],
         }
         result["candidates"] = len(specs)
@@ -374,6 +374,15 @@ def _reserve_signal_escapes(board_path: Path, extraction: ExtractedSubcircuitBoa
         return {"stubs": 0, "vias": 0, "skipped": [], "error": str(exc)}
 
 
+def _require_signal_escape_ownership(validation: dict, ownership: dict,
+                                     reservation: dict) -> None:
+    """A generated escape must never silently lose its ownership receipt."""
+    if not ownership.get("unresolved_source_uuids") and not reservation.get("error"):
+        return
+    validation["accepted"] = False
+    validation.setdefault("rejection_reasons", []).append("signal_escape_ownership_incomplete")
+
+
 def _finish_interface_landings(
     board_path: Path, extraction: ExtractedSubcircuitBoard, cfg: dict[str, Any]
 ) -> dict[str, Any]:
@@ -384,8 +393,10 @@ def _finish_interface_landings(
         signal_escape_specs, unlanded_interface_components,
     )
     from kicraft.design.models import is_power_or_ground_name
+    from kicraft.autoplacer.brain.signal_escape import declared_usb_nets
 
-    nets = set(extraction.external_net_names) - set(cfg.get("power_nets", ()))
+    nets = (set(extraction.external_net_names) - set(cfg.get("power_nets", ()))
+            - declared_usb_nets(cfg))
     nets = {name for name in nets if not is_power_or_ground_name(name)}
     board = pcbnew.LoadBoard(str(board_path))
     if board is None:
@@ -400,7 +411,7 @@ def _finish_interface_landings(
     sidecars = [board_path.with_suffix(suffix) for suffix in (".kicad_pro", ".kicad_dru")]
     rules = [(path, path.read_bytes() if path.is_file() else None) for path in sidecars]
     try:
-        return add_breakout_stubs(str(board_path), specs, cfg=cfg)
+        return add_breakout_stubs(str(board_path), specs, cfg=cfg, signal_escape_owner=True)
     finally:
         for path, content in rules:
             if content is None:
@@ -413,8 +424,12 @@ def _audit_interface_landings(board_path: Path, extraction: ExtractedSubcircuitB
                               validation: dict[str, Any], cfg: dict[str, Any]) -> None:
     """Require a native landing for every actual cross-leaf signal component."""
     from kicraft.design.models import is_power_or_ground_name
+    from kicraft.autoplacer.brain.signal_escape import declared_usb_nets
 
-    signal_nets = set(extraction.external_net_names) - set(cfg.get("power_nets", ()))
+    # Paired external terminals stay on their native face for the parent-owned
+    # corridor; an arbitrary via landing would destroy the pair/reference intent.
+    signal_nets = (set(extraction.external_net_names) - set(cfg.get("power_nets", ()))
+                   - declared_usb_nets(cfg))
     signal_nets = {name for name in signal_nets if not is_power_or_ground_name(name)}
     if not signal_nets:
         validation["interface_landing_audit"] = {"unlanded_components": []}
@@ -1060,7 +1075,7 @@ def route_local_subcircuit(
     route_timing["stamp_pre_route_board_s"] = round(max(0.0, time.monotonic() - stamp_start), 3)
 
     routing_start = time.monotonic()
-    leaf_routing_cfg = {**cfg, "pcb_path": str(source_pcb)}
+    leaf_routing_cfg = {**cfg, "pcb_path": str(source_pcb), "usb_routing_scope": "leaf"}
     _breakout_specs = _resolve_breakout_specs(cfg)
 
     # Contracted returns need an actual plane witness before signal copper can
@@ -1408,6 +1423,10 @@ def route_local_subcircuit(
 
     import_copper_start = time.monotonic()
     imported_copper = import_routed_copper(str(routed_board))
+    from kicraft.autoplacer.brain.copper_accounting import attach_signal_escape_ownership
+    _escape_ownership = attach_signal_escape_ownership(
+        imported_copper, _signal_escape, _signal_finish
+    )
     route_timing["import_routed_copper_s"] = round(
         max(0.0, time.monotonic() - import_copper_start), 3
     )
@@ -1567,6 +1586,7 @@ def route_local_subcircuit(
     validation["interface_port_names"] = [port.name for port in extraction.interface_ports]
     validation["signal_pre_escape"] = _signal_escape
     validation["signal_finish"] = _signal_finish
+    validation["signal_escape_ownership"] = _escape_ownership
     route_timing["routed_validation_s"] = round(
         max(0.0, time.monotonic() - routed_validation_start), 3
     )
@@ -1622,6 +1642,8 @@ def route_local_subcircuit(
     validation["interface_port_names"] = [port.name for port in extraction.interface_ports]
     validation["signal_pre_escape"] = _signal_escape
     validation["signal_finish"] = _signal_finish
+    validation["signal_escape_ownership"] = _escape_ownership
+    _require_signal_escape_ownership(validation, _escape_ownership, _signal_escape)
     _audit_interface_landings(routed_board, extraction, validation, cfg)
     if generate_diagnostics and render_intermediate:
         routed_render_start = time.monotonic()
@@ -2099,6 +2121,10 @@ def _stamp_trivial_leaf(
     finish_local_thermal_ground(str(routed_board), cfg)
     _finish_leaf_current_landings(routed_board, cfg)
     imported_copper = import_routed_copper(str(routed_board))
+    from kicraft.autoplacer.brain.copper_accounting import attach_signal_escape_ownership
+    _escape_ownership = attach_signal_escape_ownership(
+        imported_copper, _signal_escape, _signal_finish
+    )
     validation_start = time.monotonic()
     validation = validate_routed_board(
         str(routed_board),
@@ -2111,6 +2137,8 @@ def _stamp_trivial_leaf(
     validation["interface_port_names"] = [port.name for port in extraction.interface_ports]
     validation["signal_pre_escape"] = _signal_escape
     validation["signal_finish"] = _signal_finish
+    validation["signal_escape_ownership"] = _escape_ownership
+    _require_signal_escape_ownership(validation, _escape_ownership, _signal_escape)
     _audit_interface_landings(routed_board, extraction, validation, cfg)
     _validate_leaf_current_contracts(routed_board, cfg, validation)
     _validate_leaf_thermal_requirements(routed_board, cfg, validation)

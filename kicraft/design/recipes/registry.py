@@ -306,7 +306,15 @@ def _validated_parameters(definition: RecipeDefinition, selection: RecipeSelecti
 
 def _scope_internal_net(recipe: str, instance: str, net: str) -> str:
     recipe_name = recipe.rsplit("@", 1)[0].replace("-", "_")
-    return f"__KICRAFT_RECIPE__{recipe_name}__{instance}__{net}"
+    # These are reviewed USB recipe-local identities, not inferred board nets.
+    # The differential router requires matching base names and DP/DM suffixes.
+    usb_names = {
+        "usb_dp": "usb_internal_DP", "usb_dm": "usb_internal_DM",
+        "usb_dp_raw": "usb_raw_DP", "usb_dm_raw": "usb_raw_DM",
+        "dp_conn": "usb_conn_DP", "dm_conn": "usb_conn_DM",
+        "dp_esd": "usb_esd_DP", "dm_esd": "usb_esd_DM",
+    }
+    return f"__KICRAFT_RECIPE__{recipe_name}__{instance}__{usb_names.get(net, net)}"
 
 
 def expand_static_definition(

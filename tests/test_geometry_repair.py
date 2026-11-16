@@ -185,3 +185,28 @@ def test_geometry_wrapper_restores_board_when_redrc_times_out(tmp_path, monkeypa
     assert not result["illegal_geometry_repair"]["kept"]
 
 
+
+
+def test_generic_geometry_repair_cannot_rip_usb_pair(tmp_path):
+    pcbnew = pytest.importorskip("pcbnew")
+    from kicraft.autoplacer.brain.geometry_repair import rip_illegal_copper
+
+    pcb = _board_with_escaped_track(tmp_path)
+    board = pcbnew.LoadBoard(str(pcb))
+    net = pcbnew.NETINFO_ITEM(board, "USB_DP")
+    board.Add(net)
+    for item in board.GetTracks():
+        item.SetNet(net)
+    pcbnew.SaveBoard(str(pcb), board)
+    original = pcb.read_bytes()
+    contract = {"id": "usb", "reference_net": "GND", "segments": [{
+        "id": "port", "positive_net": "USB_DP", "negative_net": "USB_DM",
+        "positive_from": [{"ref": "J1", "pin": "1"}],
+        "positive_to": [{"ref": "U1", "pin": "1"}],
+        "negative_from": [{"ref": "J1", "pin": "2"}],
+        "negative_to": [{"ref": "U1", "pin": "2"}],
+    }]}
+    result = rip_illegal_copper(str(pcb), {"usb_routing_contracts": [contract]})
+    assert result["ripped"] == 0
+    assert pcb.read_bytes() == original
+    assert any("USB differential owner required" in reason for reason in result["skipped"])

@@ -214,14 +214,14 @@ def test_mpnless_passive_is_keyword_pinned(tmp_path, monkeypatch):
 
 def test_keyword_pick_prefers_basic_over_stocked_extended(tmp_path, monkeypatch):
     _install(monkeypatch, _kw_catalog("1k 0603", [
-        {"lcsc": "CEXT", "model": "CHURN", "stock": 2_000_000, "package": "0603", "type": "Extended"},
-        {"lcsc": "CBAS", "model": "0603WAF1001T5E", "stock": 900_000,
+        {"lcsc": "C100001", "model": "CHURN", "stock": 2_000_000, "package": "0603", "type": "Extended"},
+        {"lcsc": "C100002", "model": "0603WAF1001T5E", "stock": 900_000,
          "package": "0603", "type": "Basic"}]))
     p = _part(ref="R2", mpn=None, symbol="Device:R",
               footprint="Resistor_SMD:R_0603_1608Metric")
     p.value = "1k"
     assert _resolve_bom_mpn_sourcing(_bom(p), tmp_path) == ([], [])
-    assert p.sourcing_note == "LCSC CBAS"
+    assert p.sourcing_note == "LCSC C100002"
 
 
 def test_keyword_qualifiers_relax_on_miss(tmp_path, monkeypatch):
@@ -408,6 +408,7 @@ def test_library_bundle_low_jlc_stock_is_kept_and_recorded(tmp_path, monkeypatch
     bad, warns = _resolve_bom_mpn_sourcing(bom, tmp_path)
     assert bad == []
     assert len(warns) == 1 and "tps5430" in warns[0] and "only 12" in warns[0]
+    assert bom.parts[0].lcsc == "C9864"
     assert any("only 12" in row for row in bom.assumptions)
 
 
@@ -421,6 +422,7 @@ def test_library_bundle_retail_dry_is_kept_and_recorded(tmp_path, monkeypatch):
     bad, warns = _resolve_bom_mpn_sourcing(bom, tmp_path)
     assert bad == []
     assert len(warns) == 1 and "retail storefront" in warns[0]
+    assert bom.parts[0].lcsc == "C9864"
     assert any("retail storefront" in row for row in bom.assumptions)
 
 
@@ -503,7 +505,10 @@ def test_an_unnamed_out_of_stock_bundle_part_is_swapped_for_an_in_stock_carrier(
         manifest = _Man()
 
     _install(monkeypatch,
-             _FakeCatalog(by_lcsc={"C1": {"lcsc": "C1", "model": "LED-A", "stock": 500}}),
+             _FakeCatalog(by_lcsc={
+                 "C1": {"lcsc": "C1", "model": "LED-A", "stock": 500},
+                 "C2": {"lcsc": "C2", "model": "LED-B", "stock": 500},
+             }),
              _FakeRetail(by_lcsc={"C1": {"stock": 0, "min_buy": 5}}))
     monkeypatch.setattr(cli_app, "_load_library_parts", lambda root: ([_Loaded()], []))
     part = _part(ref="D1", mpn="LED-A", symbol="led-a:LED_0603_1608Metric",
@@ -516,6 +521,7 @@ def test_an_unnamed_out_of_stock_bundle_part_is_swapped_for_an_in_stock_carrier(
     assert "takes its place (defaulted)" in warns[0]
     assert (part.symbol, part.footprint) == (fresh.symbol, fresh.footprint)
     assert part.value == "led-b"
+    assert part.lcsc == "C2"
     assert bom.substitutions and bom.substitutions[0].got == "led-b"
 
 
@@ -638,16 +644,16 @@ def test_mpn_walk_exhausted_suggests_orderable_keyword_alternative(tmp_path, mon
 def test_kw_walk_picks_next_candidate_when_basic_is_retail_dry(tmp_path, monkeypatch):
     _install(monkeypatch,
              _kw_catalog("1k 0603", [
-                 {"lcsc": "CEXT", "model": "CHURN", "stock": 2_000_000,
+                 {"lcsc": "C100001", "model": "CHURN", "stock": 2_000_000,
                   "package": "0603", "type": "Extended"},
-                 {"lcsc": "CBAS", "model": "0603WAF1001T5E", "stock": 900_000,
+                 {"lcsc": "C100002", "model": "0603WAF1001T5E", "stock": 900_000,
                   "package": "0603", "type": "Basic"}]),
-             _FakeRetail(by_lcsc={"CBAS": {"stock": 0, "min_buy": 100}}))
+             _FakeRetail(by_lcsc={"C100002": {"stock": 0, "min_buy": 100}}))
     p = _part(ref="R2", mpn=None, symbol="Device:R",
               footprint="Resistor_SMD:R_0603_1608Metric")
     p.value = "1k"
     assert _resolve_bom_mpn_sourcing(_bom(p), tmp_path) == ([], [])
-    assert p.sourcing_note == "LCSC CEXT"  # Basic preferred but dry → next
+    assert p.sourcing_note == "LCSC C100001"  # Basic preferred but dry → next
 
 
 def test_kw_walk_exhausted_is_offender_not_blank(tmp_path, monkeypatch):
@@ -1169,7 +1175,7 @@ def test_matching_button_records_catalog_brand_in_passing_receipt(tmp_path, monk
                 mpn="UNREVIEWED-R-0603",
             ),
             _kw_row(
-                "CR0603",
+                "C100003",
                 "UNREVIEWED-R-0603",
                 "Basic",
                 2_000,
@@ -1186,7 +1192,7 @@ def test_matching_button_records_catalog_brand_in_passing_receipt(tmp_path, monk
                 mpn="UNREVIEWED-C-0603",
             ),
             _kw_row(
-                "CC0603",
+                "C100004",
                 "UNREVIEWED-C-0603",
                 "Basic",
                 2_000,
@@ -1264,6 +1270,7 @@ def test_real_bundle_missing_assembly_snapshot_keeps_exact_identity_without_inve
     bad, warnings = _resolve_bom_mpn_sourcing(bom, tmp_path, receipts)
     assert bad == []
     assert part.mpn == "TPS5430DDAR" and part.sourcing_note == "LCSC C9864"
+    assert part.lcsc == "C9864"
     assert any("assembly stock is unverified" in warning for warning in warnings)
     assert receipts[0]["assembly_stock"] is None
     assert receipts[0]["retail_stock"] == 123
@@ -1325,3 +1332,39 @@ def test_live_bundle_identity_does_not_authorize_a_different_bom_ordering_code(t
     bom = _bom(part)
     assert cli_app._unresolved_lcsc(bom, tmp_path)
     assert _resolve_bom_mpn_sourcing(bom, tmp_path)[0]
+
+
+def test_lcsc_model_legacy_pin_and_strict_shape():
+    from pydantic import ValidationError
+
+    assert _part(note="LCSC C9864").lcsc == "C9864"
+    with pytest.raises(ValidationError):
+        BomPart(ref="U1", value="x", symbol="Device:R", footprint="Resistor_SMD:R_0603",
+                sheet="A", lcsc="Cinvalid")
+
+
+@pytest.mark.parametrize("source", ["typed", "note", "symbol", "footprint"])
+def test_conflicting_catalog_identities_rejected(tmp_path, monkeypatch, source):
+    from types import SimpleNamespace
+
+    _install_bundle(monkeypatch, _FakeCatalog(by_lcsc={
+        "C9864": {"lcsc": "C9864", "model": "TPS5430DDAR", "stock": 10000},
+        "C9999": {"lcsc": "C9999", "model": "OTHER", "stock": 10000},
+    }))
+    part = _bundle_part()
+    part.lcsc = "C9864"
+    part.sourcing_note = "LCSC C9864"
+    if source == "typed":
+        part.lcsc = "C9999"
+    elif source == "note":
+        part.sourcing_note = "LCSC C9999"
+    else:
+        other = SimpleNamespace(name="other", mpn="OTHER", sourcing={"lcsc": "C9999"})
+        monkeypatch.setattr(cli_app, "_load_library_parts", lambda root: (
+            [_Loaded(), SimpleNamespace(manifest=other)], []))
+        if source == "symbol":
+            part.symbol = "other:OTHER"
+        else:
+            part.footprint = "other:PACKAGE"
+    bad, _ = _resolve_bom_mpn_sourcing(_bom(part), tmp_path)
+    assert len(bad) == 1 and "conflicting LCSC identities" in bad[0]

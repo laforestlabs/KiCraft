@@ -601,3 +601,23 @@ def test_interface_ground_bonds_wait_for_signal_routes_and_finish_connected(tmp_
     assert proof["pads"] == 3
     drc = run_kicad_cli_drc(path)
     assert drc["unconnected"] == drc["shorts"] == drc["clearance"] == 0, drc
+
+
+def test_declared_usb_pair_cannot_receive_independent_dogbone_vias(tmp_path):
+    path = str(tmp_path / "usb-field.kicad_pcb")
+    _dense_pad_field(path)
+    contract = {
+        "id": "usb", "reference_net": "GND", "segments": [{
+            "id": "connector-device", "positive_net": "GPIO0", "negative_net": "GPIO1",
+            "positive_from": [{"ref": "U1", "pin": "2"}],
+            "positive_to": [{"ref": "J1", "pin": "1"}],
+            "negative_from": [{"ref": "U1", "pin": "3"}],
+            "negative_to": [{"ref": "J1", "pin": "2"}],
+        }],
+    }
+    board = pcbnew.LoadBoard(path)
+    specs = signal_escape_specs(board, {"usb_routing_contracts": [contract]})
+    assert {spec.pad for spec in specs} == {"5", "6", "7", "8"}
+    add_breakout_stubs(path, specs)
+    assert all(track.GetNetname() not in {"GPIO0", "GPIO1"}
+               for track in pcbnew.LoadBoard(path).GetTracks())

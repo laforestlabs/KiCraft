@@ -622,6 +622,52 @@ class KiCadAdapter:
                     (pad_tl.x + pad_br.x) / 2.0,
                     (pad_tl.y + pad_br.y) / 2.0,
                 )
+            reservation = (self.cfg.get("silk_label_reservations") or {}).get(ref)
+            if reservation:
+                # Keep one measured title lane and narrow pad-adjacent strips.
+                # The lane union follows the component through serialization
+                # and rigid parent transforms; pad copper is unchanged.
+                from ._silk_legend_subprocess import _make_text
+
+                title = _make_text(board, reservation["text"], 1.0,
+                                   pcbnew.F_SilkS, False).GetBoundingBox()
+                pins = [_make_text(board, text, 0.8, pcbnew.F_SilkS, False).GetBoundingBox()
+                        for text in reservation["pin_texts"]]
+                # The first placer candidate uses 0.4 mm gap and 0.25 mm
+                # clearance. Later candidates remain best-effort and are
+                # checked by the post-route physical receipt.
+                pin_x = max((pcbnew.ToMM(box.GetWidth()) for box in pins), default=0.0)
+                pin_y = max((pcbnew.ToMM(box.GetHeight()) for box in pins), default=0.0)
+                pin_x = pin_x + 0.65 if pins else 0.0
+                pin_y = pin_y + 0.65 if pins else 0.0
+                title_width = pcbnew.ToMM(title.GetWidth())
+                title_height = pcbnew.ToMM(title.GetHeight())
+                lo, hi = comp.physical_bbox()
+                cx = (lo.x + hi.x) / 2
+                half_width = max((hi.x - lo.x) / 2 + pin_x, title_width / 2)
+                left, right = cx - half_width, cx + half_width
+                top = lo.y - pin_y - title_height - 0.65
+                bottom = hi.y + pin_y
+                local_pins = {
+                    pair[0]
+                    for spec in self.cfg.get("local_bypasses", [])
+                    if spec["owner_ref"] == ref
+                    for pair in spec.get("pin_pairs", [])
+                }
+                protected = [pad.pos for pad in comp.pads if pad.pad_id in local_pins]
+                if protected and (
+                    max(p.x for p in protected) - min(p.x for p in protected)
+                    >= max(p.y for p in protected) - min(p.y for p in protected)
+                ):
+                    # Keep measured title space beside a coupled signal row,
+                    # rather than obstructing its required close approach.
+                    cy = (lo.y + hi.y) / 2
+                    left, right = lo.x - pin_x, hi.x + pin_x + 0.65 + title_width
+                    top = min(lo.y - pin_y, cy - title_height / 2)
+                    bottom = max(hi.y + pin_y, cy + title_height / 2)
+                comp.width_mm = right - left
+                comp.height_mm = bottom - top
+                comp.body_center = Point((left + right) / 2, (top + bottom) / 2)
             components[ref] = comp
 
         # --- Nets ---

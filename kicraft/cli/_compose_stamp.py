@@ -43,6 +43,7 @@ def _stamp_parent_board(
     Returns the stamped board path.
     """
     import json as _json
+    import hashlib
     import os
     import tempfile
 
@@ -91,6 +92,7 @@ def _stamp_parent_board(
                 "width": trace.width_mm,
                 "layer": "F.Cu" if trace.layer == Layer.FRONT else "B.Cu",
                 "net_name": trace.net or "",
+                "escape_ownership": trace.escape_ownership,
             }
         )
 
@@ -103,6 +105,7 @@ def _stamp_parent_board(
                 "size": via.size_mm,
                 "drill": via.drill_mm,
                 "net_name": via.net or "",
+                "escape_ownership": via.escape_ownership,
             }
         )
 
@@ -316,6 +319,16 @@ def _stamp_parent_board(
             _json.dump(payload, f)
 
         run_pcbnew_script_file(_PARENT_STAMP_SCRIPT_PATH, tmp_path)
+        ownership = {
+            "version": 1,
+            "stamped_board_sha256": hashlib.sha256(output_pcb.read_bytes()).hexdigest(),
+            "stamped_board_path": str(output_pcb),
+            "traces": [item for item in traces_json if item.get("escape_ownership")],
+            "vias": [item for item in vias_json if item.get("escape_ownership")],
+        }
+        Path(str(output_pcb) + ".escape_ownership.json").write_text(
+            _json.dumps(ownership, sort_keys=True, indent=2) + "\n"
+        )
     finally:
         try:
             os.unlink(tmp_path)

@@ -152,6 +152,12 @@ def invalidate_downstream(
     state: MutableMapping[str, Any], stage: str
 ) -> tuple[str, ...]:
     """Remove every state field made stale by accepting ``stage``."""
+    if stage in DESIGN_STAGES:
+        state["review_coverage"] = None
+        state["review_findings"] = []
+        statuses = state.get("stage_status")
+        if isinstance(statuses, MutableMapping):
+            statuses.pop("electrical_review", None)
     invalidated = downstream_stages(stage)
     for downstream in invalidated:
         if downstream == "wiring":

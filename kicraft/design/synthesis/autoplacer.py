@@ -126,6 +126,204 @@ def _same_edge_connector_zones(refs, component_zones, placement):
     return {"edge": edge, "refs": list(refs)}
 
 
+def usb_routing_contracts(architecture: Architecture, bom: BOM):
+    """Compile reviewed USB recipe roles against canonical ownership and wiring.
+
+    A saved BOM built with an older recipe expansion is deliberately rejected:
+    changing only the board-side net names would lose schematic custody.
+    """
+    from kicraft.design.models import PinEndpoint, USBPairSegment, USBRoutingContract
+    from kicraft.design.recipes.registry import expand_recipe, get_recipe
+    from kicraft.design.recipes.wave_a_mcus import _NATIVE_USB_PINS
+
+    mcu_pins = dict(_NATIVE_USB_PINS)
+    mcu_pins["esp32-s3-mini-1-minimal@1"] = ("23", "24")
+
+    def targets(selection, role):
+        rules = [r for r in get_recipe(selection.recipe).placement_constraints
+                 if r.kind == "usb_differential_pair" and r.role == role]
+        keys = {"impedance_ohm", "impedance_tolerance", "max_skew_mm", "max_layer_transitions"}
+        if len(rules) != 1 or set(rules[0].parameters) != keys:
+            raise ValueError(f"{selection.instance}: missing reviewed USB routing targets")
+        return rules[0].parameters
+    mcu_pins["rp2040-minimal@3"] = ("46", "47")
+    actual = {}
+    for connection in bom.connections:
+        for ep in connection.endpoints:
+            actual.setdefault((ep.ref, ep.pin), set()).add(connection.net_name)
+
+    def materialize(selection):
+        manifest = [m for m in bom.recipe_ownership
+                    if (m.recipe, m.instance) == (selection.recipe, selection.instance)]
+        if (len(manifest) != 1 or manifest[0].port_bindings != selection.port_bindings
+                or set(manifest[0].requirement_ids) != set(selection.requirement_ids)):
+            raise ValueError(f"{selection.instance}: USB recipe ownership missing or changed")
+        manifest = manifest[0]
+        expected = expand_recipe(selection)
+        parts = [p for p in bom.parts if p.recipe_id == selection.recipe
+                 and p.recipe_instance == selection.instance and p.resolution_source == "recipe"]
+        if {p.ref for p in parts} != set(manifest.refs):
+            raise ValueError(f"{selection.instance}: USB component ownership changed")
+
+        def key(p):
+            match = re.fullmatch(r"([A-Z]+)([0-9]+)", p.ref)
+            if not match:
+                raise ValueError(f"{selection.instance}: invalid recipe reference {p.ref}")
+            return match.group(1), int(match.group(2))
+
+        roles = {}
+        canonical = {}
+        for part in parts:
+            roles.setdefault(part.recipe_role, []).append(part)
+        for part in expected.parts:
+            canonical.setdefault(part.recipe_role, []).append(part)
+        for members in roles.values():
+            members.sort(key=key)
+        for members in canonical.values():
+            members.sort(key=key)
+        expected_pins = {(p.ref, p.pin): p.net for p in expected.ownership.pins}
+        owned = {(p.ref, p.pin): p for p in manifest.pins}
+
+        def pin(role, number, index=0):
+            members, originals = roles.get(role, []), canonical.get(role, [])
+            if len(members) != len(originals) or index >= len(members):
+                raise ValueError(f"{selection.instance}: USB role {role} missing or ambiguous")
+            part, original = members[index], originals[index]
+            if (part.value, part.symbol, part.footprint, part.mpn) != (
+                    original.value, original.symbol, original.footprint, original.mpn):
+                raise ValueError(f"{selection.instance}: USB role {role} identity changed")
+            net = expected_pins.get((original.ref, number))
+            owner = owned.get((part.ref, number))
+            if (not net or owner is None or owner.owner != "recipe"
+                    or owner.owner_id != selection.recipe or owner.net != net
+                    or (owner.requirement_id not in selection.requirement_ids
+                        if selection.requirement_ids else owner.requirement_id is not None)
+                    or actual.get((part.ref, number)) != {net}):
+                raise ValueError(f"{selection.instance}: USB pin {part.ref}.{number} is not canonical")
+            return PinEndpoint(ref=part.ref, pin=number), net
+        return pin
+
+    connectors = [s for s in architecture.recipe_selections if s.recipe == "usb-c-usb2-device@1"]
+    devices = [s for s in architecture.recipe_selections if s.recipe in mcu_pins
+               and {"usb_dp", "usb_dm"} <= s.port_bindings.keys()]
+    result = []
+    for connector in connectors:
+        bindings = connector.port_bindings
+        matches = [s for s in devices if all(s.port_bindings.get(k) == bindings.get(k)
+                                             for k in ("usb_dp", "usb_dm"))]
+        if not matches:
+            raise ValueError(f"{connector.instance}: no reviewed USB device with matching polarity")
+        if len(matches) != 1:
+            raise ValueError(f"{connector.instance}: ambiguous USB device")
+        device = matches[0]
+        if bindings.get("gnd") != device.port_bindings.get("gnd") or not bindings.get("gnd"):
+            raise ValueError(f"{connector.instance}: USB reference mismatch")
+        c, d = materialize(connector), materialize(device)
+        if c("esd", "2")[1] != bindings["gnd"]:
+            raise ValueError(f"{connector.instance}: USB ESD reference mismatch")
+        segments = []
+
+        def segment(name, pf, pt, nf, nt):
+            def unpack(rows):
+                nets = {net for _, net in rows}
+                if len(nets) != 1:
+                    raise ValueError(f"{connector.instance}: broken USB {name} wiring")
+                return [ep for ep, _ in rows], next(iter(nets))
+            pfrom, pn = unpack(pf)
+            pto, pn_to = unpack(pt)
+            nfrom, nn = unpack(nf)
+            nto, nn_to = unpack(nt)
+            if pn != pn_to or nn != nn_to or pn == nn:
+                raise ValueError(f"{connector.instance}: swapped or broken USB {name} wiring")
+            if not (pn.endswith("_DP") and nn == pn[:-3] + "_DM"):
+                raise ValueError(f"{connector.instance}: USB pair names require matching _DP/_DM suffixes")
+            segments.append(USBPairSegment(id=name, positive_net=pn, negative_net=nn,
+                                           positive_from=pfrom, positive_to=pto,
+                                           negative_from=nfrom, negative_to=nto))
+
+        segment("connector_esd", [c("connector", "A6"), c("connector", "B6")],
+                [c("esd", "3")], [c("connector", "A7"), c("connector", "B7")],
+                [c("esd", "1")])
+        if connector.parameters.get("series_resistors", True):
+            segment("esd_connector_series", [c("esd", "4")], [c("usb_series", "1", 1)],
+                    [c("esd", "6")], [c("usb_series", "1", 0)])
+            positive, negative = c("usb_series", "2", 1), c("usb_series", "2", 0)
+        else:
+            positive, negative = c("esd", "4"), c("esd", "6")
+        segment("connector_mcu_series", [positive], [d("usb_dp_series", "2")],
+                [negative], [d("usb_dm_series", "2")])
+        dm_pin, dp_pin = mcu_pins[device.recipe]
+        segment("series_mcu", [d("usb_dp_series", "1")], [d("mcu", dp_pin)],
+                [d("usb_dm_series", "1")], [d("mcu", dm_pin)])
+        result.append(USBRoutingContract(id=f"{connector.instance}:{device.instance}",
+                                         segments=segments, reference_net=bindings["gnd"],
+                                         **targets(device, "mcu")))
+    bridge_pins = {
+        "ch340c-usb-uart@1": ("5", "6"),
+        "cp2102n-usb-uart@1": ("4", "5"),
+    }
+    for bridge in architecture.recipe_selections:
+        if bridge.recipe not in bridge_pins:
+            continue
+        c = materialize(bridge)
+        reference = bridge.port_bindings.get("gnd")
+        if not reference or c("esd", "2")[1] != reference:
+            raise ValueError(f"{bridge.instance}: USB ESD reference mismatch")
+        positive_pin, negative_pin = bridge_pins[bridge.recipe]
+        segments = []
+        for name, pf, pt, nf, nt in (
+            ("connector_esd", [c("connector", "A6"), c("connector", "B6")],
+             [c("esd", "3")], [c("connector", "A7"), c("connector", "B7")],
+             [c("esd", "1")]),
+            ("esd_bridge", [c("esd", "4")], [c("bridge", positive_pin)],
+             [c("esd", "6")], [c("bridge", negative_pin)]),
+        ):
+            pn = pf[0][1]
+            nn = nf[0][1]
+            if (any(net != pn for _, net in pf + pt)
+                    or any(net != nn for _, net in nf + nt)
+                    or not pn.endswith("_DP") or nn != pn[:-3] + "_DM"):
+                raise ValueError(f"{bridge.instance}: swapped or broken USB {name} wiring")
+            segments.append(USBPairSegment(
+                id=name, positive_net=pn, negative_net=nn,
+                positive_from=[ep for ep, _ in pf], positive_to=[ep for ep, _ in pt],
+                negative_from=[ep for ep, _ in nf], negative_to=[ep for ep, _ in nt],
+            ))
+        result.append(USBRoutingContract(id=bridge.instance, segments=segments,
+                                         reference_net=reference, **targets(bridge, "bridge")))
+    return result
+
+
+def _usb_local_placement(contracts):
+    """Compile proven USB endpoints into existing pad-local placement contracts."""
+    result = []
+    for contract in contracts:
+        for segment in contract.segments:
+            if segment.id == "connector_esd":
+                pf, nf = segment.positive_from, segment.negative_from
+                pt, nt = segment.positive_to, segment.negative_to
+                if (len({p.ref for p in pf + nf}) != 1
+                        or len(pt) != 1 or len(nt) != 1 or pt[0].ref != nt[0].ref):
+                    raise ValueError(f"{contract.id}: invalid USB connector/ESD placement endpoints")
+                result.append({
+                    "owner_ref": pf[0].ref, "bypass_ref": pt[0].ref,
+                    "pin_pairs": [[pf[0].pin, pt[0].pin], [nf[0].pin, nt[0].pin]],
+                    "max_distance_mm": 3.0,
+                })
+            elif segment.id in {"series_mcu", "esd_connector_series"}:
+                for source, target in ((segment.positive_from, segment.positive_to),
+                                       (segment.negative_from, segment.negative_to)):
+                    if len(source) != 1 or len(target) != 1:
+                        raise ValueError(f"{contract.id}: invalid USB series placement endpoints")
+                    # A series resistor is the local member, not the anchor.
+                    anchor, member = ((target[0], source[0]) if segment.id == "series_mcu"
+                                      else (source[0], target[0]))
+                    result.append({"owner_ref": anchor.ref, "bypass_ref": member.ref,
+                                   "pin_pairs": [[anchor.pin, member.pin]],
+                                   "max_distance_mm": 3.0})
+    return result
+
+
 def _recipe_local_bypasses(architecture: Architecture, bom: BOM) -> list[dict]:
     """Resolve reviewed recipe pin contracts from selection, manifest and wiring."""
     from kicraft.design.recipes.registry import expand_recipe, get_recipe
@@ -411,6 +609,23 @@ def canonical_recipe_thermal_requirements(architecture: Architecture, bom: BOM) 
     return result
 
 
+def canonical_silk_label_reservations(architecture: Architecture, bom: BOM, intent=None,
+                                      project_root=None) -> dict:
+    """Compile conservative placement envelopes from owned required content."""
+    from .interface_facts import reviewed_interface_facts
+    from ..models import ConversationState
+
+    facts = reviewed_interface_facts(ConversationState(
+        architecture=architecture, bom=bom, intent=intent), project_root)
+    return {
+        fact["ref"]: {
+            "text": "\n".join(fact["lines"]),
+            "pin_texts": [pin["text"] for pin in fact["pins"]],
+        }
+        for fact in facts
+    }
+
+
 def write_autoplacer_json(
     project_dir: Path,
     project_stem: str,
@@ -448,6 +663,12 @@ def write_autoplacer_json(
         "pcb_file": f"{project_stem}.kicad_pcb",
         "power_nets": sorted(set(architecture.power_nets)),
     }
+    reservations = canonical_silk_label_reservations(architecture, bom, intent, project_dir)
+    if reservations:
+        body["silk_label_reservations"] = reservations
+    contracts = usb_routing_contracts(architecture, bom)
+    if contracts:
+        body["usb_routing_contracts"] = [contract.model_dump(mode="json") for contract in contracts]
     # Reconstruct compiler-owned constraints, rather than accepting candidate
     # metadata. The canonical check includes all roles and their wired nets.
     from kicraft.design.lowering import lower_requirement
@@ -482,6 +703,7 @@ def write_autoplacer_json(
                 "max_distance_mm": local.max_distance_mm,
             })
     local_bypasses.extend(_recipe_local_bypasses(architecture, bom))
+    local_bypasses.extend(_usb_local_placement(contracts))
     current_nets = {spec["current_carrying_net"] for spec in local_bypasses
                     if "current_carrying_net" in spec}
     body["power_nets"] = sorted(set(body["power_nets"]) | current_nets)

@@ -2182,6 +2182,20 @@ def _extract_blockers_from_pcb(
         rects: tuple[tuple[Point, Point], ...],
     ) -> tuple[tuple[Point, Point], ...]:
         return tuple(_rebase_rect(rect) for rect in rects)
+    # Layout component envelopes include any compiler-owned silk lane.  The
+    # native courtyard alone cannot represent that reserved, empty space.
+    local_component_rects = {ref: _rebase_rect(rect)
+                             for ref, rect in component_rects.items()}
+    for ref, component in artifact.layout.components.items():
+        if ref not in local_component_rects:
+            continue
+        lo, hi = local_component_rects[ref]
+        reserved_lo, reserved_hi = component.physical_bbox()
+        local_component_rects[ref] = (
+            Point(min(lo.x, reserved_lo.x), min(lo.y, reserved_lo.y)),
+            Point(max(hi.x, reserved_hi.x), max(hi.y, reserved_hi.y)),
+        )
+
 
     return LeafBlockerSet(
         front_pads=_rebase_rects(_coalesce_rects(front_pads)),
@@ -2193,9 +2207,7 @@ def _extract_blockers_from_pcb(
         back_traces=_coalesce_rects(back_traces),
         front_tht_pads=_rebase_rects(_coalesce_rects(front_tht_pads)),
         back_tht_pads=_rebase_rects(_coalesce_rects(back_tht_pads)),
-        component_rects={
-            ref: _rebase_rect(rect) for ref, rect in component_rects.items()
-        },
+        component_rects=local_component_rects,
         component_sides=dict(component_sides),
         edge_reference_points={
             ref: Point(point.x - shift_x, point.y - shift_y)

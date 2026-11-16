@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from .models import RecipeComponentGroup as Group, RecipeDefinition, RecipeElectricalAssertion as Assertion, RecipeNoConnectSpec as NoConnect, RecipePinSpec as Pin, RecipePlacementConstraint as Placement, RecipePort as Port, RecipeSourceDocument as Source
+from .models import usb_pair_placement
 
 
 def _part(role, prefix, value, symbol, footprint, *, quantity=1, mpn=None):
@@ -49,7 +50,7 @@ CP2102N_USB_UART = RecipeDefinition(
         Pin(role="program_header", pin="1", net="gnd"), Pin(role="program_header", pin="2", net="vdd"), Pin(role="program_header", pin="3", net="tx"), Pin(role="program_header", pin="4", net="rx"), Pin(role="program_header", pin="5", net="dtr_n"), Pin(role="program_header", pin="6", net="rts_n"),
     ),
     no_connects=(NoConnect(role="connector", pin="A8"), NoConnect(role="connector", pin="B8"), *(NoConnect(role="bridge", pin=str(pin)) for pin in ("1", "2", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", "27"))),
-    placement_constraints=(Placement(kind="decoupling_proximity", role="bridge", parameters={"max_mm": 3.0}),),
+    placement_constraints=(Placement(kind="decoupling_proximity", role="bridge", parameters={"max_mm": 3.0}), usb_pair_placement("bridge")),
     electrical_assertions=(Assertion(code="cp2102n_usb_c_uart", message="CP2102N owns one protected USB-C D+/D- pair. VDD and VREGIN share the external 3.3 V UART supply; a 22.1 kΩ/47.5 kΩ divider senses USB VBUS. USB compliance remains unmeasured."),),
     source_documents=(Source(url="https://www.silabs.com/documents/public/data-sheets/cp2102n-datasheet.pdf", title="Silicon Labs CP2102N", revision="1.5", reviewed_date="2026-10-11", sections=("5.1 QFN28 Pin Definitions", "2.1 Power, Figure 2.3 regulator bypass", "2.3 USB, Figure 2.6 VBUS divider")),),
 )

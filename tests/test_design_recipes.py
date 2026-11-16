@@ -6963,3 +6963,96 @@ def test_hub75_legacy_ownership_requires_upstream_regeneration():
     assert legacy_recipe_resume_stage({
         "bom": {"recipe_ownership": [{"recipe": old.recipe}]},
     }) == "architecture"
+
+
+@pytest.mark.parametrize(("recipe", "dm_pin", "dp_pin"), [
+    ("esp32-s3-wroom-1-n16r8-minimal@1", "13", "14"),
+    ("esp32-s3-mini-1-minimal@1", "23", "24"),
+])
+def test_usb_contract_proves_reviewed_chain_and_rejects_altered_wiring(recipe, dm_pin, dp_pin):
+    from kicraft.design.synthesis.autoplacer import _usb_local_placement, usb_routing_contracts
+
+    selections = [
+        RecipeSelection(
+            recipe=recipe, instance="core", sheets={"mcu": "MCU"},
+            port_bindings={"vdd": "+3V3", "gnd": "GND",
+                           "usb_dm": "USB_DM", "usb_dp": "USB_DP"},
+        ),
+        RecipeSelection(
+            recipe="usb-c-usb2-device@1", instance="socket", sheets={"power": "USB"},
+            parameters={"series_resistors": False},
+            port_bindings={"vbus": "VBUS", "gnd": "GND",
+                           "usb_dm": "USB_DM", "usb_dp": "USB_DP"},
+        ),
+    ]
+    expansions = expand_selections(selections)
+    bom = BOM(parts=[p for e in expansions for p in e.parts],
+              connections=[c for e in expansions for c in e.connections],
+              recipe_ownership=[e.ownership for e in expansions])
+    arch = SimpleNamespace(recipe_selections=selections)
+    contract, = usb_routing_contracts(arch, bom)
+    assert [s.id for s in contract.segments] == [
+        "connector_esd", "connector_mcu_series", "series_mcu"]
+    assert contract.segments[-1].positive_to[0].pin == dp_pin
+    assert contract.segments[-1].negative_to[0].pin == dm_pin
+    assert all(s.positive_net.endswith("_DP") and s.negative_net.endswith("_DM")
+               for s in contract.segments)
+    assert contract.reference_net == "GND"
+    rule, = [r for r in get_recipe(recipe).placement_constraints
+             if r.kind == "usb_differential_pair"]
+    assert {key: getattr(contract, key) for key in rule.parameters} == rule.parameters
+    local = _usb_local_placement([contract])
+    assert len(local) == 3
+    assert local[0]["owner_ref"] == contract.segments[0].positive_from[0].ref
+    assert local[0]["bypass_ref"] == contract.segments[0].positive_to[0].ref
+    assert {row["owner_ref"] for row in local[1:]} == {contract.segments[-1].positive_to[0].ref}
+    assert {row["bypass_ref"] for row in local[1:]} == {
+        contract.segments[-1].positive_from[0].ref, contract.segments[-1].negative_from[0].ref}
+    endpoint = contract.segments[0].positive_to[0]
+    altered = [
+        c.model_copy(update={"net_name": "WRONG"})
+        if endpoint in c.endpoints else c for c in bom.connections
+    ]
+    with pytest.raises(ValueError, match="not canonical"):
+        usb_routing_contracts(arch, bom.model_copy(update={"connections": altered}))
+    swapped = selections[0].model_copy(update={"port_bindings": {
+        **selections[0].port_bindings, "usb_dm": "USB_DP", "usb_dp": "USB_DM"}})
+    with pytest.raises(ValueError, match="matching polarity"):
+        usb_routing_contracts(SimpleNamespace(recipe_selections=[swapped, selections[1]]), bom)
+
+
+@pytest.mark.parametrize(("recipe", "positive_pin", "negative_pin"), [
+    ("ch340c-usb-uart@1", "5", "6"),
+    ("cp2102n-usb-uart@1", "4", "5"),
+])
+def test_usb_bridge_contract_uses_reviewed_connector_esd_and_bridge(recipe, positive_pin, negative_pin):
+    from kicraft.design.synthesis.autoplacer import _usb_local_placement, usb_routing_contracts
+
+    selection = RecipeSelection(
+        recipe=recipe, instance="bridge", sheets={"interface": "USB"},
+        port_bindings={"vbus": "USB5V", "vdd": "+3V3", "gnd": "GND",
+                       "tx": "TX", "rx": "RX"},
+        parameters={"supply_voltage": 3.3} if recipe.startswith("ch340") else {},
+    )
+    expansion = expand_recipe(selection)
+    bom = BOM(parts=expansion.parts, connections=expansion.connections,
+              recipe_ownership=[expansion.ownership])
+    contract, = usb_routing_contracts(SimpleNamespace(recipe_selections=[selection]), bom)
+    assert [s.id for s in contract.segments] == ["connector_esd", "esd_bridge"]
+    assert contract.segments[-1].positive_to[0].pin == positive_pin
+    assert contract.segments[-1].negative_to[0].pin == negative_pin
+    assert all(s.positive_net.endswith("_DP") and s.negative_net.endswith("_DM")
+               for s in contract.segments)
+    assert contract.reference_net == "GND"
+    rule, = [r for r in get_recipe(recipe).placement_constraints
+             if r.kind == "usb_differential_pair"]
+    assert {key: getattr(contract, key) for key in rule.parameters} == rule.parameters
+    local, = _usb_local_placement([contract])
+    assert local["owner_ref"] == contract.segments[0].positive_from[0].ref
+    assert local["bypass_ref"] == contract.segments[0].positive_to[0].ref
+    endpoint = contract.segments[-1].positive_to[0]
+    changed = [c.model_copy(update={"net_name": "BROKEN"}) if endpoint in c.endpoints else c
+               for c in bom.connections]
+    with pytest.raises(ValueError, match="not canonical"):
+        usb_routing_contracts(SimpleNamespace(recipe_selections=[selection]),
+                              bom.model_copy(update={"connections": changed}))

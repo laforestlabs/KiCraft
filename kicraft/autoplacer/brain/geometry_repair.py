@@ -139,6 +139,13 @@ def rip_illegal_copper(
             elif outside(t.GetStart()) or outside(t.GetEnd()):
                 to_rip[u] = t
 
+    from kicraft.autoplacer.brain.signal_escape import declared_usb_nets
+    paired = declared_usb_nets(cfg)
+    for uid, item in list(to_rip.items()):
+        if item.GetNetname() in paired:
+            skipped.append(f"{item.GetNetname()}:USB differential owner required")
+            del to_rip[uid]
+
     max_rips = int(cfg.get("geometry_repair_max_rips", _DEFAULT_MAX_RIPS))
     if len(to_rip) > max_rips:
         return {

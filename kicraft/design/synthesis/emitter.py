@@ -20,6 +20,7 @@ later by the user.
 from __future__ import annotations
 
 import hashlib
+import textwrap
 import uuid as uuidlib
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -29,6 +30,7 @@ from ..models import (
     BOM,
     Architecture,
     ArtifactPaths,
+    ConversationState,
     BomPart,
     InterSheetNet,
     Sheet,
@@ -36,7 +38,9 @@ from ..models import (
     is_power_or_ground_name,
 )
 from .placement import place_sheet
-from .sch_geometry import pin_abs_position
+from .sch_geometry import (
+    pin_abs_position, placed_graphics_bounds, prepare_text_metrics, text_width_mm,
+)
 from .router import (
     GlobalLabel,
     Junction,
@@ -46,6 +50,7 @@ from .router import (
     RoutedSheet,
     WireSegment,
     _label_rect,
+    _power_value_rect,
     _rects_overlap,
     route_sheet,
 )
@@ -192,10 +197,9 @@ def ensure_leaf_stems_distinct(project_stem: str, sheets: list[Sheet]) -> None:
 
 # ---------- root schematic ----------
 
-# Vertical pitch between adjacent sheet pins on the root canvas. One KiCad grid
-# step: keeps every pin (and its stub/label) on-grid and, crucially, guarantees
-# no two pins share a Y (a sub-grid step silently merges nets -- WS11).
-_SHEET_PIN_PITCH_MM = 1.27
+# Text is 1.27 mm high; a full two-grid pitch leaves room between labels.
+_SHEET_PIN_PITCH_MM = 2.54
+_SCHEMATIC_GRID_MM = 1.27
 
 
 def _sheet_signal_pin_count(sheet_inst: _SheetInstance) -> int:
@@ -209,8 +213,7 @@ def _sheet_signal_pin_count(sheet_inst: _SheetInstance) -> int:
 
 
 def _sheet_required_height(sheet_inst: _SheetInstance, base_height: float) -> float:
-    """Sheet-box height tall enough to give every signal pin its own 1.27 mm
-    slot. Grows past ``base_height`` only for pin-dense sheets (>~23 pins)."""
+    """Grow the sheet to reserve a text-height lane for every signal pin."""
     n_pins = _sheet_signal_pin_count(sheet_inst)
     return max(base_height, _SHEET_PIN_PITCH_MM * (n_pins + 1))
 
@@ -242,17 +245,12 @@ def _emit_sheet_block(
         if not is_power_or_ground_name(net.name)
     ]
     n_pins = len(signal_endpoints)
-    # Spread pins evenly, but never tighter than one grid step. The old
-    # height/(n_pins+1) step fell BELOW 1.27 mm for a pin-dense sheet (24 pins on
-    # a 30.48 mm sheet -> 1.22 mm), so adjacent pins snapped to the SAME grid Y
-    # and their nets merged silently -- caught only by the netlist-faithfulness
-    # diff (WS11). The caller grows `height` (_sheet_required_height) so a dense
-    # sheet still fits every pin at the 1.27 mm floor; a sparse sheet keeps its
-    # previous even spread byte-for-byte.
+    # Give every label a separate text-height lane, while keeping all pin
+    # anchors on the electrical grid.
     step = max(_SHEET_PIN_PITCH_MM, height / (n_pins + 1)) if n_pins else 0.0
     for i, (net, ep) in enumerate(signal_endpoints):
         # Snap to the 1.27 mm grid so the pin (and its root stub) is on-grid.
-        pin_y = round((y + step * (i + 1)) / _SHEET_PIN_PITCH_MM) * _SHEET_PIN_PITCH_MM
+        pin_y = round((y + step * (i + 1)) / _SCHEMATIC_GRID_MM) * _SCHEMATIC_GRID_MM
         pin_records.append((net.name, x + width, pin_y))
         pin_lines.append(
             f'\t\t(pin "{_q(net.name)}" {ep.direction}\n'
@@ -341,6 +339,46 @@ def _external_adc_notes(architecture: Architecture, bom: BOM) -> list[str]:
     return notes
 
 
+def _reviewed_operating_notes(architecture: Architecture, bom: BOM) -> list[str]:
+    """Human-readable operating facts, only from verified recipe ownership."""
+    from .interface_facts import reviewed_interface_facts
+
+    facts = reviewed_interface_facts(ConversationState(architecture=architecture, bom=bom))
+    notes = []
+    for fact in facts:
+        if fact["kind"] not in {"pd_power", "usb_programming", "hub75",
+                                "led_output", "speaker"}:
+            continue
+        notes.append(f"{fact['ref']}: " + "; ".join(fact["lines"]) + ".")
+        notes.extend(f"{fact['ref']}: {note}" for note in fact.get("notes", []))
+    if notes:
+        notes.insert(0, "Operating interfaces (design assumptions; not bench verified):")
+    return notes
+
+
+def _root_note_lines(architecture: Architecture, bom: BOM) -> list[str]:
+    adc_notes = _external_adc_notes(architecture, bom)
+    if adc_notes:
+        contract = architecture.external_adc_contracts[0]
+        adc_notes.extend([
+            "ADC inputs: VSSA (ground) to actual VREF+/VDD rail, not 5 V tolerant.",
+            "No drive when MCU supply is unpowered or invalid; source must be high impedance.",
+            f"Total Thevenin source <= {contract.source_impedance_max_ohm:g} ohms; "
+            f"{contract.resolution_bits}-bit ADC, "
+            f"{contract.adc_clock_min_hz / 1e6:g}–{contract.adc_clock_max_hz / 1e6:g} MHz, "
+            f"{contract.sample_cycles:g} sampling cycles.",
+            f"BOOSTEN on below {contract.boost_threshold_v:g} V VDDA; off at or above.",
+            "Follow DS12991 ADC startup requirements; calibration after power-up recommended.",
+            "Firmware to configure ADC is not provided; no rate or accuracy is promised.",
+        ])
+    return [
+        line
+        for note in adc_notes + _reviewed_operating_notes(architecture, bom)
+        for line in textwrap.wrap(note, width=100, break_long_words=False,
+                                  break_on_hyphens=False)
+    ]
+
+
 def _emit_root(
     project_stem: str,
     project_dir: Path,
@@ -356,58 +394,60 @@ def _emit_root(
     sheet_height = 30.48   # 24 * 1.27
     sheet_gap = 15.24      # 12 * 1.27
     rows: list[str] = []
-    adc_notes = _external_adc_notes(architecture, bom)
-    if adc_notes:
-        contract = architecture.external_adc_contracts[0]
-        adc_notes.extend([
-            "ADC inputs: VSSA (ground) to actual VREF+/VDD rail, not 5 V tolerant.",
-            "No drive when MCU supply is unpowered or invalid; source must be high impedance.",
-            f"Total Thevenin source <= {contract.source_impedance_max_ohm:g} ohms; "
-            f"{contract.resolution_bits}-bit ADC, "
-            f"{contract.adc_clock_min_hz / 1e6:g}–{contract.adc_clock_max_hz / 1e6:g} MHz, "
-            f"{contract.sample_cycles:g} sampling cycles.",
-            f"BOOSTEN on below {contract.boost_threshold_v:g} V VDDA; off at or above.",
-            "Follow DS12991 ADC startup requirements; calibration after power-up recommended.",
-            "Firmware to configure ADC is not provided; no rate or accuracy is promised.",
-        ])
-    # Lay sheets out horizontally, centered on the smallest page that fits:
-    # a lone sheet symbol parked in the corner of an A3 reads as a draft,
-    # not a finished drawing. The pin stubs + labels extend half a gap past
-    # the last sheet block, so include that in the fit check.
-    n_sheets = max(1, len(sheet_insts))
-    content_w = n_sheets * sheet_width + (n_sheets - 1) * sheet_gap
-    content_w += sheet_gap * 0.5 + 12.7  # right-side pin stubs + labels
-    # A pin-dense sheet grows taller than the 24-pin base so no two pins collide;
-    # size the page against the tallest sheet (WS11).
-    sheet_heights = {
-        si.sheet.name: _sheet_required_height(si, sheet_height) for si in sheet_insts
-    }
-    content_h = max(sheet_heights.values(), default=sheet_height)
-    notes_h = 3.0 * len(adc_notes)
-    content_h += notes_h
-    if content_w <= 297.0 - 2 * 25.4 and content_h <= 210.0 - 2 * 25.4:
-        paper, page_w, page_h = "A4", 297.0, 210.0
+    note_lines = _root_note_lines(architecture, bom)
+    prepare_text_metrics(note_lines + [
+        net.name for si in sheet_insts for net, _ in si.inter_sheet_endpoints
+    ])
+    # Reserve the full pin text both inside the sheet and after its stub.
+    # Pair adjacent sheets into rows instead of forcing an arbitrarily wide
+    # single row. Pin positions and names are unchanged electrical identities.
+    dimensions = []
+    for si in sheet_insts:
+        names = [net.name for net, _ in si.inter_sheet_endpoints
+                 if not is_power_or_ground_name(net.name)]
+        text_width = max((text_width_mm(name) + 1.5 for name in names), default=0.0)
+        width = max(sheet_width, (int((text_width + 5.08) / 1.27) + 1) * 1.27)
+        height = _sheet_required_height(si, sheet_height)
+        dimensions.append((si, width, height, text_width))
+    layout_rows = [dimensions[i:i + 2] for i in range(0, len(dimensions), 2)]
+    row_widths = [sum(width + sheet_gap * 0.5 + text + sheet_gap
+                      for _, width, _, text in row) for row in layout_rows]
+    row_heights = [max(height for _, _, height, _ in row) + 15.24
+                   for row in layout_rows]
+    content_w = max(max(row_widths, default=sheet_width),
+                    max((text_width_mm(line, 1.0) + 1.0 for line in note_lines), default=0.0))
+    content_h = sum(row_heights) + 3.0 * len(note_lines)
+    sizes = (("A4", 297.0, 210.0), ("A3", 420.0, 297.0),
+             ("A2", 594.0, 420.0), ("A1", 841.0, 594.0),
+             ("A0", 1189.0, 841.0))
+    paper, page_w, page_h = sizes[-1]
+    for candidate in sizes:
+        if content_w + 50.8 <= candidate[1] and content_h + 50.8 <= candidate[2]:
+            paper, page_w, page_h = candidate
+            break
     else:
-        paper, page_w, page_h = "A3", 420.0, 297.0
+        page_w, page_h = content_w + 50.8, content_h + 50.8
+        paper = "User"
     grid = 1.27
     start_x = round(((page_w - content_w) / 2) / grid) * grid
     start_y = round(((page_h - content_h) / 2) / grid) * grid
-    sheet_origins: dict[str, tuple[float, float]] = {}
     pin_records: list[tuple[str, float, float]] = []
-    for i, si in enumerate(sheet_insts):
-        x = start_x + i * (sheet_width + sheet_gap)
-        y = start_y + notes_h
-        block, recs = _emit_sheet_block(
-            si, x, y, sheet_width, sheet_heights[si.sheet.name], project_stem
-        )
-        rows.append(block)
-        pin_records.extend(recs)
-        sheet_origins[si.sheet.name] = (x, y)
-    for idx, note in enumerate(adc_notes):
+    y = round((start_y + 3.0 * len(note_lines)) / grid) * grid
+    for row, row_height in zip(layout_rows, row_heights):
+        x = start_x
+        for si, width, height, text_width in row:
+            block, recs = _emit_sheet_block(si, x, y, width, height, project_stem)
+            rows.append(block)
+            pin_records.extend(recs)
+            x += width + sheet_gap * 0.5 + text_width + sheet_gap
+            x = round(x / grid) * grid
+        y += row_height
+        y = round(y / grid) * grid
+    for idx, note in enumerate(note_lines):
         rows.append(
-            f'\t(text "{_q(note)}" (at 20 {_fmt(start_y + idx * 3.0)} 0) '
+            f'\t(text "{_q(note)}" (at {_fmt(start_x)} {_fmt(start_y + idx * 3.0)} 0) '
             f'(effects (font (size 1 1)) (justify left)) '
-            f'(uuid "{_uuid_seeded(f"adc-note/{idx}", project_stem)}"))'
+            f'(uuid "{_uuid_seeded(f"root-note/{idx}", project_stem)}"))'
         )
 
     # Connect same-named signal sheet pins across sheets: a short stub + a
@@ -431,13 +471,15 @@ def _emit_root(
             )
         )
 
+    paper_line = (f'\t(paper "User" {_fmt(page_w)} {_fmt(page_h)})\n'
+                  if paper == "User" else f'\t(paper "{paper}")\n')
     header = (
         "(kicad_sch\n"
         "\t(version 20250114)\n"
         '\t(generator "eeschema")\n'
         '\t(generator_version "9.0")\n'
         f'\t(uuid "{root_uuid}")\n'
-        f'\t(paper "{paper}")\n'
+        f"{paper_line}"
         "\n"
         "\t(title_block\n"
         f'\t\t(title "{_q(_fit_title(project_title))}")\n'
@@ -493,7 +535,7 @@ def _field_rect(
     text: str, x: float, y: float, justify: str
 ) -> tuple[float, float, float, float]:
     """Estimated bbox of one field's rendered text (1.27 mm font)."""
-    length = len(text) * 1.1 + 0.5
+    length = text_width_mm(text) + 0.5
     if justify == "left":
         return (x, y - 0.95, x + length, y + 0.95)
     if justify == "right":
@@ -547,6 +589,19 @@ def _text_anchors(
             ((left - 1.778, y - 1.27, "right"), (left - 1.778, y + 1.27, "right")),
             ((x, top - 5.08, ""), (x, top - 7.62, "")),
         ]
+    # Give crowded fields additional lanes instead of accepting overlap with
+    # a neighbouring symbol, label or field. All candidates remain associated
+    # with the same symbol and never affect connectivity.
+    for lane in range(1, 17):
+        d = lane * 2.54
+        candidates.extend([
+            ((right + 1.778 + d, y - 1.27, "left"),
+             (right + 1.778 + d, y + 1.27, "left")),
+            ((left - 1.778 - d, y - 1.27, "right"),
+             (left - 1.778 - d, y + 1.27, "right")),
+            ((x, top - 2.54 - d, ""), (x, top - 5.08 - d, "")),
+            ((x, bottom + 5.08 + d, ""), (x, bottom + 2.54 + d, "")),
+        ])
     if not obstacles:
         return candidates[0]
 
@@ -668,7 +723,7 @@ def _emit_hierarchical_label(
     return (
         f'\t(hierarchical_label "{_q(name)}" (shape {shape})\n'
         f"\t\t(at {_fmt(x)} {_fmt(y)} {angle})\n"
-        "\t\t(effects (font (size 1.27 1.27)) (justify left))\n"
+        f"\t\t(effects (font (size 1.27 1.27)) (justify {_label_justify(angle)}))\n"
         f'\t\t(uuid "{uuid_str}")\n'
         "\t)"
     )
@@ -757,6 +812,9 @@ def _emit_power_symbol(
     # PWR_FLAG carries no rail name worth showing — its label just collides with
     # the rail/ground symbol it sits on. Keep the flag graphic, hide the word.
     value_hide = " (hide yes)" if value == "PWR_FLAG" else ""
+    value_x = ps.value_x_mm if ps.value_x_mm is not None else ps.x_mm
+    value_y = ps.value_y_mm if ps.value_y_mm is not None else ps.y_mm + 3.0
+    value_angle, _ = _field_angle_justify(ps.angle_deg, "")
     return (
         "\t(symbol\n"
         f'\t\t(lib_id "{ps.lib_id}")\n'
@@ -772,7 +830,7 @@ def _emit_power_symbol(
         "\t\t\t(effects (font (size 1.27 1.27)) (hide yes))\n"
         "\t\t)\n"
         f'\t\t(property "Value" "{value}"\n'
-        f"\t\t\t(at {_fmt(ps.x_mm)} {_fmt(ps.y_mm + 3)} 0)\n"
+        f"\t\t\t(at {_fmt(value_x)} {_fmt(value_y)} {value_angle})\n"
         f"\t\t\t(effects (font (size 1.27 1.27)){value_hide})\n"
         "\t\t)\n"
         "\t\t(instances\n"
@@ -790,6 +848,9 @@ def _emit_power_symbol(
 _LEAF_PAGE_SIZES: tuple[tuple[str, float, float], ...] = (
     ("A4", 297.0, 210.0),
     ("A3", 420.0, 297.0),
+    ("A2", 594.0, 420.0),
+    ("A1", 841.0, 594.0),
+    ("A0", 1189.0, 841.0),
 )
 
 
@@ -813,6 +874,11 @@ def _leaf_content_bbox(
         except (SymbolNotFoundError, ValueError, KeyError):
             all_unit_pins = []
         unit = getattr(pp, "unit", 1)
+        graphic = placed_graphics_bounds(part.symbol, unit, pp.x_mm, pp.y_mm,
+                                         pp.rotation_deg)
+        if graphic is not None:
+            xs.extend((graphic[0], graphic[2]))
+            ys.extend((graphic[1], graphic[3]))
         pins = [
             p for p in all_unit_pins if int(p.get("unit", 1) or 1) == unit
         ]
@@ -824,6 +890,11 @@ def _leaf_content_bbox(
         else:
             xs.append(pp.x_mm)
             ys.append(pp.y_mm)
+        for text, spot in zip((part.ref, part.value),
+                              _text_anchors(part, pp.x_mm, pp.y_mm, pp.rotation_deg)):
+            x1, y1, x2, y2 = _field_rect(text, *spot)
+            xs.extend((x1, x2))
+            ys.extend((y1, y2))
     for w in routed.wires:
         xs.extend((w.x1_mm, w.x2_mm))
         ys.extend((w.y1_mm, w.y2_mm))
@@ -838,13 +909,24 @@ def _leaf_content_bbox(
         for item in items:
             xs.append(item.x_mm)
             ys.append(item.y_mm)
+    for lab in (*routed.labels, *routed.global_labels, *routed.hier_labels):
+        text = lab.name if hasattr(lab, "name") else lab.text
+        x1, y1, x2, y2 = _label_rect(text, lab.x_mm, lab.y_mm, lab.angle_deg)
+        xs.extend((x1, x2))
+        ys.extend((y1, y2))
+    for ps in routed.power_symbols:
+        rect = _power_value_rect(ps)
+        if rect is not None:
+            xs.extend((rect[0], rect[2]))
+            ys.extend((rect[1], rect[3]))
     if not xs:
         return None
     return min(xs), min(ys), max(xs), max(ys)
 
 
 def _fit_leaf_page(
-    parts: list[BomPart], placed: list, routed: RoutedSheet
+    parts: list[BomPart], placed: list, routed: RoutedSheet,
+    heading_lines: list[str] | None = None,
 ) -> tuple[list, RoutedSheet, str]:
     """Pick the smallest page that fits the drawing and center it there.
 
@@ -856,6 +938,10 @@ def _fit_leaf_page(
     bbox = _leaf_content_bbox(parts, placed, routed)
     if bbox is None:
         return placed, routed, "A4"
+    if heading_lines:
+        heading_width = max(text_width_mm(line) + 1.5 for line in heading_lines)
+        bbox = (bbox[0], bbox[1] - 3.0 * len(heading_lines) - 5.08,
+                max(bbox[2], bbox[0] + heading_width), bbox[3])
     # Frame + title block + text-overhang allowance around the content.
     pad = 25.4
     w = bbox[2] - bbox[0]
@@ -865,6 +951,9 @@ def _fit_leaf_page(
         if w + 2 * pad <= pw and h + 2 * pad <= ph:
             paper, page_w, page_h = name, pw, ph
             break
+    else:
+        page_w, page_h = w + 2 * pad, h + 2 * pad
+        paper = f'User {_fmt(page_w)} {_fmt(page_h)}'
     grid = 1.27
     dx = round(((page_w - w) / 2 - bbox[0]) / grid) * grid
     dy = round(((page_h - h) / 2 - bbox[1]) / grid) * grid
@@ -886,7 +975,9 @@ def _fit_leaf_page(
             for lab in routed.labels
         ],
         power_symbols=[
-            replace(ps, x_mm=ps.x_mm + dx, y_mm=ps.y_mm + dy)
+            replace(ps, x_mm=ps.x_mm + dx, y_mm=ps.y_mm + dy,
+                    value_x_mm=None if ps.value_x_mm is None else ps.value_x_mm + dx,
+                    value_y_mm=None if ps.value_y_mm is None else ps.value_y_mm + dy)
             for ps in routed.power_symbols
         ],
         no_connects=[
@@ -903,6 +994,29 @@ def _fit_leaf_page(
         ],
     )
     return placed_shifted, routed_shifted, paper
+
+
+def _sheet_heading_lines(sheet_inst: _SheetInstance, bom: BOM | None) -> list[str]:
+    """Functional legend tied to the sheet and its component group owners."""
+    sheet = sheet_inst.sheet
+    headings = [f"{sheet.name}: {sheet.function}"]
+    if bom is not None:
+        for part in sheet_inst.parts:
+            group = bom.group_labels.get(part.ref)
+            if group:
+                headings.append(f"{part.ref}: {group} ({part.mpn or part.value})")
+            elif part.recipe_instance and part.recipe_role in {
+                "converter", "controller", "amplifier", "mcu",
+            }:
+                headings.append(
+                    f"{part.ref}: {part.recipe_instance} / "
+                    f"{part.recipe_role} ({part.mpn or part.value})"
+                )
+    return [
+        line for heading in headings
+        for line in textwrap.wrap(heading, width=90, break_long_words=False,
+                                  break_on_hyphens=False)
+    ]
 
 
 def _emit_leaf(
@@ -924,6 +1038,7 @@ def _emit_leaf(
     )
 
     sheet_stem = sheet_inst.sheet.stem
+    heading_lines = _sheet_heading_lines(sheet_inst, bom)
 
     if stage_b:
         placed = place_sheet(sheet_inst.sheet, sheet_inst.parts, bom)
@@ -935,7 +1050,9 @@ def _emit_leaf(
             architecture,
             flag_nets,
         )
-        placed, routed, paper = _fit_leaf_page(sheet_inst.parts, placed, routed)
+        placed, routed, paper = _fit_leaf_page(
+            sheet_inst.parts, placed, routed, heading_lines
+        )
     else:
         placed = None
         routed = RoutedSheet()
@@ -959,11 +1076,57 @@ def _emit_leaf(
     # power-symbol graphics+text, grown with each part's chosen fields so
     # later parts dodge earlier ones.
     obstacles: list[tuple[float, float, float, float]] = []
+    bbox = _leaf_content_bbox(sheet_inst.parts, placed, routed) if placed is not None else None
+    heading_x = bbox[0] if bbox else 25.4
+    heading_y = bbox[1] - 3.0 * len(heading_lines) - 2.54 if bbox else 25.4
+    heading_blocks = []
+    for idx, heading in enumerate(heading_lines):
+        y = heading_y + 3.0 * idx
+        obstacles.append(_field_rect(heading, heading_x, y, "left"))
+        heading_blocks.append(
+            f'\t(text "{_q(heading)}" (at {_fmt(heading_x)} {_fmt(y)} 0) '
+            f'(effects (font (size 1.27 1.27)) (justify left)) '
+            f'(uuid "{_uuid_seeded(f"{sheet_stem}/heading/{idx}", project_stem)}"))'
+        )
     for lab_list in (routed.labels, routed.global_labels):
         for lab in lab_list:
             obstacles.append(_label_rect(lab.text, lab.x_mm, lab.y_mm, lab.angle_deg))
+    for lab in routed.hier_labels:
+        obstacles.append(_label_rect(lab.name, lab.x_mm, lab.y_mm, lab.angle_deg))
     for ps in routed.power_symbols:
-        obstacles.append((ps.x_mm - 4.0, ps.y_mm - 5.5, ps.x_mm + 4.0, ps.y_mm + 5.5))
+        graphic = placed_graphics_bounds(ps.lib_id, 1, ps.x_mm, ps.y_mm, ps.angle_deg)
+        if graphic is not None:
+            obstacles.append(graphic)
+        rect = _power_value_rect(ps)
+        if rect is not None:
+            obstacles.append(rect)
+    if placed is not None:
+        parts_by_ref = {part.ref: part for part in sheet_inst.parts}
+        for pp in placed:
+            part = parts_by_ref[pp.ref]
+            graphic = placed_graphics_bounds(part.symbol, pp.unit, pp.x_mm, pp.y_mm,
+                                             pp.rotation_deg)
+            if graphic is not None:
+                obstacles.append(graphic)
+                continue
+            try:
+                pins = [pin for pin in lookup_pins(part.symbol, all_units=True)["pins"]
+                        if int(pin.get("unit", 1) or 1) == pp.unit]
+            except (SymbolNotFoundError, ValueError, KeyError):
+                pins = []
+            if not pins:
+                continue
+            points = [pin_abs_position(pp.x_mm, pp.y_mm, pp.rotation_deg, pin)
+                      for pin in pins]
+            xs, ys = zip(*points)
+            shrink = max((pin.get("length", 2.54) or 2.54 for pin in pins)) + 0.5
+            x1, x2 = min(xs) + shrink, max(xs) - shrink
+            y1, y2 = min(ys) + shrink, max(ys) - shrink
+            if x1 >= x2:
+                x1, x2 = pp.x_mm - 1.2, pp.x_mm + 1.2
+            if y1 >= y2:
+                y1, y2 = pp.y_mm - 1.2, pp.y_mm + 1.2
+            obstacles.append((x1, y1, x2, y2))
 
     # Component symbol instances.
     symbol_blocks: list[str] = []
@@ -1073,19 +1236,22 @@ def _emit_leaf(
                 _emit_hierarchical_label(net.name, ep.direction, 40.0, 50.0 + i * 10)
             )
 
+    paper_line = (f'\t(paper "User" {paper[5:]})\n'
+                  if paper.startswith("User ") else f'\t(paper "{paper}")\n')
     header = (
         "(kicad_sch\n"
         "\t(version 20250114)\n"
         '\t(generator "eeschema")\n'
         '\t(generator_version "9.0")\n'
         f'\t(uuid "{sheet_inst.leaf_uuid}")\n'
-        f'\t(paper "{paper}")\n'
+        f"{paper_line}"
         "\n"
         f"{lib_block}\n"
         "\n"
     )
     body_parts = (
-        symbol_blocks
+        heading_blocks
+        + symbol_blocks
         + power_blocks
         + wire_blocks
         + junction_blocks
@@ -1298,6 +1464,13 @@ def emit_schematic(
     # guard it before any path is derived (no-op if run() already deduped).
     ensure_leaf_stems_distinct(project_stem, architecture.sheets)
     sheet_insts = sheet_instances if sheet_instances is not None else _build_sheet_instances(architecture, bom)
+    prepare_text_metrics(
+        [part.ref for part in bom.parts] + [part.value for part in bom.parts]
+        + [connection.net_name for connection in bom.connections]
+        + [net.name for si in sheet_insts for net, _ in si.inter_sheet_endpoints]
+        + [line for si in sheet_insts for line in _sheet_heading_lines(si, bom)]
+        + _root_note_lines(architecture, bom)
+    )
     root = _emit_root(
         project_stem,
         project_dir,
