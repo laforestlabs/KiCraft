@@ -2,6 +2,7 @@
 import hashlib
 import json
 import zipfile
+from pathlib import Path
 
 import pytest
 
@@ -113,3 +114,38 @@ def test_release_rejects_failed_or_unknown_fabrication_verdict(tmp_path, record)
     }))
     with pytest.raises(ValueError, match="Verification receipt records an incomplete delivery"):
         _zip_generated(tmp_path, project)
+
+
+def _history_release(project, board):
+    from kicraft.layout_history import atomic_json, start_capture
+    from kicraft.layout_history_export import finalize_capture
+    root = start_capture(project, run_id="release")
+    root.scene([], phase="delivered", geometry_source="native_board")
+    root.end("complete")
+    atomic_json(Path(root.descriptor.directory) / "final-board.json", {
+        "source_scene": {"scope_id": root.scope_id}, "final_board_path": board.name,
+        "final_board_sha256": _sha(board),
+    })
+    return finalize_capture(project, root.descriptor.capture_id, build_rc=0)
+
+
+def test_release_binds_only_current_finalized_history(tmp_path):
+    project, board = _release(tmp_path)
+    manifest_path = _history_release(project, board)
+    history = json.loads(manifest_path.read_text())
+    result = _zip_generated(tmp_path, project)
+    with zipfile.ZipFile(result) as archive:
+        release = json.loads(archive.read("BOARD/release_manifest.json"))
+        html = "BOARD/" + history["html_path"]
+        assert html in archive.namelist()
+        assert release["files"][history["html_path"]] == hashlib.sha256(archive.read(html)).hexdigest()
+        assert not any(name.endswith(".jsonl.gz") for name in archive.namelist())
+
+
+def test_release_omits_hash_mismatched_history_without_failing_fab(tmp_path):
+    project, board = _release(tmp_path)
+    manifest_path = _history_release(project, board)
+    (manifest_path.parent / "timelapse.html").write_text("changed")
+    result = _zip_generated(tmp_path, project)
+    with zipfile.ZipFile(result) as archive:
+        assert not any("/layout-history/" in name for name in archive.namelist())

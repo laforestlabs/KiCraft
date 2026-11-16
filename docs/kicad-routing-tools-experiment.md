@@ -6,9 +6,9 @@ KiCraft has one autorouter: KiCad Routing Tools (KRT). There is no backend selec
 
 - Repository: `https://github.com/drandyhaas/KiCadRoutingTools.git`
 - Source version: `0.20.2`
-- Commit: `8eeee55fd4ba4ed600b11bd8214de9994e8f5396`
+- Commit: `f6fa93122db463ff3f3a1617605c69f7959d2cd9`
 - Native router reported by startup checks: `0.20.1`
-- KiCraft's bundled connectivity repair atop upstream `3ceb773722bea67aa3685e7ee430c0c0d17ef38d`; no native binary changes.
+- KiCraft's bundled connectivity repair and streaming route observer atop upstream `3ceb773722bea67aa3685e7ee430c0c0d17ef38d`; no native binary changes.
 
 Provision from the KiCraft repository root; the repaired commit is carried in the
 bundle, not assumed to exist in the upstream GitHub repository:
@@ -17,7 +17,7 @@ bundle, not assumed to exist in the upstream GitHub repository:
 git clone https://github.com/drandyhaas/KiCadRoutingTools.git /opt/KiCadRoutingTools
 git -C /opt/KiCadRoutingTools checkout 3ceb773722bea67aa3685e7ee430c0c0d17ef38d
 git -C /opt/KiCadRoutingTools fetch "$PWD/deploy/tuning-i7/kicad-routing-tools-connectivity.bundle" main
-git -C /opt/KiCadRoutingTools checkout 8eeee55fd4ba4ed600b11bd8214de9994e8f5396
+git -C /opt/KiCadRoutingTools checkout f6fa93122db463ff3f3a1617605c69f7959d2cd9
 python3 -m venv --system-site-packages /opt/krt-venv
 /opt/krt-venv/bin/pip install -r /opt/KiCadRoutingTools/requirements.txt
 cd /opt/KiCadRoutingTools

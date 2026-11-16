@@ -86,6 +86,8 @@ def rip_illegal_copper(
     """
     cfg = cfg or {}
     board = pcbnew.LoadBoard(pcb_path)
+    from kicraft.autoplacer.hardware.history_geometry import capture_board
+    capture_board(board, phase="illegal_copper_input")
     tracks_by_uuid = {t.m_Uuid.AsString(): t for t in board.GetTracks()}
 
     to_rip: dict[str, Any] = {}  # uuid -> item, insertion-ordered
@@ -163,6 +165,7 @@ def rip_illegal_copper(
     board.BuildConnectivity()
     pcbnew.ZONE_FILLER(board).Fill(board.Zones())
     board.Save(pcb_path)
+    capture_board(board, phase="illegal_copper_rip_and_fill")
     return {
         "ripped": len(to_rip),
         "over_cap": 0,

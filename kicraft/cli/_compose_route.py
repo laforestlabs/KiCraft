@@ -540,6 +540,8 @@ def _attempt_illegal_geometry_repair(
             f"{shorts_after}); board restored"
         )
         shutil.copy2(backup, routed_pcb)
+        from kicraft.autoplacer.hardware.history_geometry import capture_restored_external
+        capture_restored_external(routed_pcb, phase="illegal_geometry_repair_restore")
         backup.unlink(missing_ok=True)
         record["reverted"] = True
         validation["illegal_geometry_repair"] = record
@@ -549,6 +551,8 @@ def _attempt_illegal_geometry_repair(
               file=sys.stderr)
         if backup.exists():
             shutil.copy2(backup, routed_pcb)
+            from kicraft.autoplacer.hardware.history_geometry import capture_restored_external
+            capture_restored_external(routed_pcb, phase="illegal_geometry_exception_restore")
             backup.unlink(missing_ok=True)
         record["failed"] = str(exc)
         validation["illegal_geometry_repair"] = record

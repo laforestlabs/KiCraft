@@ -272,6 +272,12 @@ def _finalize_orphan_locked(job) -> None:
                 "orphan_job_id": job.id}
     if ws is not None and ws.is_dir():
         st["stem"] = _read_project_stem(ws) or p.project_stem
+        if job.status in ("done", "failed"):
+            from kicraft.layout_history_export import recover_terminated_capture
+            recover_terminated_capture(
+                _current_attempt_project_dir(ws, job.attempt_generation, job.kind),
+                generation=job.attempt_generation, build_rc=job.rc,
+            )
         if st["ok"]:
             st["zip"] = _zip_generated(
                 ws, _current_attempt_project_dir(ws, job.attempt_generation, job.kind))
@@ -663,6 +669,20 @@ def _zip_generated(ws: Path, project_dir: Path | None) -> str | None:
                 if not accepted:
                     raise ValueError(f"{label} receipt records an incomplete delivery")
                 selected.add(path)
+    if (project_dir / "layout-history.json").is_file():
+        from kicraft.layout_history_export import published_capture
+        publication = published_capture(project_dir)
+        history = publication[0] if publication else {}
+        expected_generation = next(
+            (int(part[8:]) for part in project_dir.parts
+             if part.startswith("attempt-") and part[8:].isdigit()), None,
+        )
+        if (publication and history.get("final_board_sha256") == board_hash
+                and history.get("final_board_path") == (board.name if board else None)
+                and (expected_generation is None or history.get("generation") == expected_generation)):
+            selected.update((publication[1], publication[1].parent / "manifest.json"))
+        else:
+            print("[layout-history] omitted stale, unavailable or hash-mismatched history from release", flush=True)
     selected = {p for p in selected if p.is_file() and not p.is_symlink()}
     manifest = {
         "schema_version": 1, "board": board.name if board else None,
@@ -4080,6 +4100,8 @@ def _execute_claimed_job_local(ws: Path, state: dict, job_id: int, progress,
     # operator env override wins.
     env = {**os.environ}
     env.setdefault("KICRAFT_BUILD_MAX_WALL_S", f"{timeout_s * 0.9:.0f}")
+    if state.get("attempt_generation") is not None:
+        env["KICRAFT_ATTEMPT_GENERATION"] = str(state["attempt_generation"])
     proc = subprocess.Popen(
         cmd, cwd=str(ws), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         text=True, errors="replace", bufsize=1, start_new_session=True,
@@ -4105,6 +4127,11 @@ def _execute_claimed_job_local(ws: Path, state: dict, job_id: int, progress,
         if ACQUIRED_MARKER in text:
             wd["deadline"] = time.monotonic() + timeout_s
     rc = proc.wait()
+    from kicraft.layout_history_export import recover_terminated_capture
+    recover_terminated_capture(
+        _current_attempt_project_dir(ws, state.get("attempt_generation"), kind),
+        generation=state.get("attempt_generation"), build_rc=rc,
+    )
     if wd["killed"]:
         progress({"kind": "build_log", "text": "[build exceeded 30m, killed]"})
     _store().finish_build(job_id, rc=rc)
@@ -6058,7 +6085,7 @@ def _rebase_cloned_artifacts(src: Path, dst: Path) -> None:
 
     for key in ("project_dir", "root_sch", "kicad_pro", "autoplacer_json",
                 "custom_footprint_dir", "routed_pcb", "fab_zip", "step_file",
-                "board_3d_png"):
+                "board_3d_png", "layout_history_manifest"):
         if artifacts.get(key) is not None:
             artifacts[key] = rebase(artifacts[key])
     if artifacts.get("leaf_schs") is not None:
@@ -7178,6 +7205,9 @@ def index(prompt: str = "", project: str = ""):
 
     def _reset_view():
         live_sig = view.get("live_sig")  # page-level, survives project switches
+        previous_history = view.get("history_panel")
+        if previous_history is not None:
+            previous_history.dispose()
         view.clear()
         view.update(rendered=0, build_lines=[], fab_done=False,
                     sch_view=None, pcb_view=None, pcb_overlay_url=None,
@@ -8917,6 +8947,11 @@ def index(prompt: str = "", project: str = ""):
             project_dir = Path(state["project_dir"]) if state["project_dir"] else None
             current_dir = str(project_dir) if project_dir is not None else None
             if view.get("project_dir_seen") != current_dir:
+                previous_history = view.get("history_panel")
+                if previous_history is not None:
+                    previous_history.dispose()
+                view["history_panel"] = None
+                tabs.history_slot("place_route").clear()
                 view["project_dir_seen"] = current_dir
                 view.update(sch_view=None, pcb_view=None, pcb_mtime=None,
                             pcb_overlay_url=None, run_mtime=None,
@@ -8941,6 +8976,14 @@ def index(prompt: str = "", project: str = ""):
             # Place/route: live progress bar (inspector) + KiCanvas board views
             # (view_slot) during the build, replaced by the final PCB when done.
             if project_dir is not None:
+                if view.get("history_panel") is None and state.get("token"):
+                    from .layout_history import LayoutHistoryPanel
+                    with tabs.history_slot("place_route"):
+                        view["history_panel"] = LayoutHistoryPanel(
+                            project_dir, state["token"], generation=state.get("attempt_generation"),
+                        )
+                if view.get("history_panel") is not None:
+                    view["history_panel"].refresh()
                 rmt = _mtime(project_dir / ".experiments" / "run_status.json")
                 if rmt and rmt != view["run_mtime"]:
                     view["run_mtime"] = rmt

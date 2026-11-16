@@ -1,6 +1,6 @@
 EXPERIMENTAL: bounded local USB routing has not completed a full good/seed0 replay.
 The current native USB smoke is blocked; do not deploy this patch as qualified routing.
-Against pinned commit 8eeee55fd4ba4ed600b11bd8214de9994e8f5396; native binary0.20.1 unchanged.
+Against pinned commit f6fa93122db463ff3f3a1617605c69f7959d2cd9; native binary 0.20.1 unchanged.
 Apply only to a separate checkout:
   patch -d "$KRT_REVIEW_CHECKOUT" -p1 < deploy/tuning-i7/kicad-routing-tools-strict-coupled.patch
 Point kicad_routing_tools_path or the scoped KICRAFT_KICAD_ROUTING_TOOLS_PATH

@@ -152,6 +152,8 @@ def attempt_unconnected_repair(
             + "); board restored"
         )
         shutil.copy2(backup, routed_pcb)
+        from kicraft.autoplacer.hardware.history_geometry import capture_restored_external
+        capture_restored_external(routed_pcb, phase="unconnected_repair_restore")
         backup.unlink(missing_ok=True)
         record["reverted"] = True
         validation["unconnected_repair"] = record
@@ -160,6 +162,8 @@ def attempt_unconnected_repair(
         print(f"warning: {label} failed: {exc}", file=sys.stderr)
         if backup.exists():
             shutil.copy2(backup, routed_pcb)
+            from kicraft.autoplacer.hardware.history_geometry import capture_restored_external
+            capture_restored_external(routed_pcb, phase="unconnected_repair_exception_restore")
             backup.unlink(missing_ok=True)
         record["failed"] = str(exc)
         validation["unconnected_repair"] = record

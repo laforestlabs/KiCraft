@@ -40,6 +40,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from kicraft.layout_history import history_from_env
 
 from kicraft.autoplacer.brain.hierarchy_parser import parse_hierarchy
 
@@ -1613,6 +1614,8 @@ def _compose_artifacts(
     seed_aspect_target: float = 1.0,
     seed_size_override: tuple[float, float] | None = None,
     manual_layout: ManualLayout | None = None,
+    history=None,
+    history_sources=None,
 ) -> tuple[ParentCompositionState, list[dict[str, Any]]]:
     """Compose loaded artifacts into a parent composition snapshot.
 
@@ -1712,6 +1715,11 @@ def _compose_artifacts(
         i: synthetic_block_ref(i, art.sheet_name)
         for i, art in enumerate(loaded_artifacts)
     }
+    if history:
+        history.decision("reuse", phase="child_mapping", children=[
+            {"synthetic_ref": synthetic_refs[i], "instance_path": art.instance_path}
+            for i, art in enumerate(loaded_artifacts)
+        ])
     block_zones, allowed_rotations = attachment_constraints_to_zones(
         derived, synthetic_refs, list(loaded_artifacts)
     )
@@ -1864,6 +1872,78 @@ def _compose_artifacts(
     # over-provisioned the interior. Set only on the auto (solver) path for
     # rect/parametric boards; stays None for manual/ff/shaped/override runs.
     _refit_seed: tuple[float, float] | None = None
+    group_sources = {}
+    if history:
+        for i, artifact in enumerate(loaded_artifacts):
+            cached = (history_sources or {}).get(artifact.instance_path)
+            source_scene, source_origin = cached if cached else (None, [0, 0])
+            if cached is None:
+                try:
+                    layout_path = artifact.source_files.get("solved_layout_json", "")
+                    saved = json.loads(Path(layout_path).read_text(encoding="utf-8"))
+                    saved_source = saved.get("layout_history_source") or {}
+                    scope_id = saved_source.get("scope_id")
+                    if (saved_source.get("capture_id") == history.descriptor.capture_id
+                            and isinstance(scope_id, str) and len(scope_id) == 32
+                            and all(c in "0123456789abcdef" for c in scope_id)
+                            and (Path(history.descriptor.directory) / f"scope-{scope_id}.jsonl.gz").is_file()):
+                        source_scene = {"scope_id": scope_id, "seq": saved_source.get("seq")}
+                except (OSError, ValueError, TypeError, AttributeError):
+                    pass
+                if source_scene is None:
+                    source = history.child("leaf", "imported child placement model",
+                                           {"instance_path": artifact.instance_path})
+                    source.placement(artifact.layout.components, phase="imported_child")
+                    source_scene = {"scope_id": source.scope_id, "seq": source.seq}
+                    source.decision("reuse", phase="imported_child",
+                                    instance_path=artifact.instance_path,
+                                    geometry_source="placement_model")
+                    source.end("completed")
+                try:
+                    import subprocess
+                    from kicraft.autoplacer.routing_board import _kicad_subprocess_env
+                    board_path = artifact.source_files.get("mini_pcb", "")
+                    if not board_path or not Path(board_path).is_file():
+                        raise ValueError("selected child board unavailable")
+                    result = subprocess.run(
+                        [sys.executable, "-m", "kicraft.autoplacer.hardware.history_geometry",
+                         "--board", board_path, "--phase", "imported_child"],
+                        env=history.child_env(_kicad_subprocess_env()),
+                        capture_output=True, text=True, timeout=60,
+                    )
+                    if result.returncode:
+                        raise RuntimeError(result.stderr[-1000:])
+                    native = json.loads(result.stdout.splitlines()[-1])
+                    origin = native.get("outline_origin")
+                    if not origin or (abs(origin[0]) <= 0.5 and abs(origin[1]) <= 0.5):
+                        origin = [0, 0]
+                    poses = native["footprints"]
+                    components = artifact.layout.components
+                    if set(poses) != set(components) or any(
+                        abs(poses[ref][0] - origin[0] - comp.pos.x) > 0.001
+                        or abs(poses[ref][1] - origin[1] - comp.pos.y) > 0.001
+                        or abs((poses[ref][2] - comp.rotation + 180) % 360 - 180) > 0.001
+                        for ref, comp in components.items()
+                    ):
+                        raise ValueError("native child does not match rebased selected layout")
+                    source_scene = {"scope_id": native["scope_id"]}
+                    source_origin = origin
+                    history.decision("reuse", phase="imported_child_native",
+                                     instance_path=artifact.instance_path,
+                                     source_scope_id=native["scope_id"])
+                except Exception as error:
+                    history.decision("skip", phase="imported_child_native",
+                                     reason="native_source_unavailable",
+                                     gap="native_source_unavailable", detail=str(error))
+                if history_sources is not None:
+                    history_sources[artifact.instance_path] = (source_scene, source_origin)
+            group_sources[i] = (source_scene, source_origin)
+            history.register_group(
+                synthetic_refs[i], source_scene, origin=source_origin,
+                instance_path=artifact.instance_path,
+                synthetic_ref=synthetic_refs[i],
+                net_map=artifact.metadata.get("replication_net_map", {}),
+            )
     if manual_layout is not None:
         # Manual mode: user-supplied placements + outline. Skip the solver
         # and the auto outline-fit pass entirely. Validation, stamping and
@@ -1992,6 +2072,8 @@ def _compose_artifacts(
             ],
             exact_outline,
         )
+        if history:
+            history.placement(parent_local_solved, phase="manual_layout_baseline")
     else:
         solver_cfg = {
             **cfg,
@@ -2010,7 +2092,7 @@ def _compose_artifacts(
             for owner, members in affinity.items():
                 groups[owner] = sorted(set(groups.get(owner, [])) | set(members))
             solver_cfg["ic_groups"] = groups
-        solver = PlacementSolver(state_in, config=solver_cfg, seed=seed)
+        solver = PlacementSolver(state_in, config=solver_cfg, seed=seed, **({"history": history} if history else {}))
         solved = solver.solve()
         solver_phase_timings = dict(getattr(solver, "last_solve_phase_timings", {}))
 
@@ -2031,6 +2113,8 @@ def _compose_artifacts(
         # _compute_final_outline shrink the board.
         _pre_slide_positions = {r: (c.pos.x, c.pos.y) for r, c in solved.items()}
         _slide_constrained_to_cluster(solved, derived, synthetic_refs)
+        if history:
+            history.placement(solved, phase="slide_constrained_to_cluster")
         _3d_slide_changes = sum(
             1 for r, c in solved.items()
             if r in _pre_slide_positions
@@ -2044,6 +2128,8 @@ def _compose_artifacts(
         if cfg.get("connector_edge_block_extremity", True):
             _pre_extremal_positions = {r: (c.pos.x, c.pos.y) for r, c in solved.items()}
             _shifted = _ensure_edge_blocks_extremal(solved, block_zones)
+            if history:
+                history.placement(solved, phase="edge_blocks_extremal")
             _3d_extremal_changes = sum(
                 1 for r, c in solved.items()
                 if r in _pre_extremal_positions
@@ -2065,6 +2151,8 @@ def _compose_artifacts(
         if cfg.get("resolve_courtyard_overlaps", True):
             _pre_courtyard_positions = {r: (c.pos.x, c.pos.y) for r, c in solved.items()}
             solver._resolve_courtyard_overlaps(solved)
+            if history:
+                history.placement(solved, phase="courtyard_repair")
             _3d_courtyard_resolved = sum(
                 1 for r, c in solved.items()
                 if r in _pre_courtyard_positions
@@ -2086,6 +2174,8 @@ def _compose_artifacts(
                 },
                 max(0.2, float(cfg.get("connector_edge_pad_clearance_mm", 0.2))),
             )
+            if history:
+                history.placement(solved, phase="antenna_edges_extremal")
 
         if _3d_slide_changes or _3d_extremal_changes or _3d_courtyard_resolved:
             print(
@@ -2098,6 +2188,15 @@ def _compose_artifacts(
 
         # --- Recover artifact placements from solver output ---
         placements_dict = placements_from_solved_state(solved, list(loaded_artifacts), synthetic_refs)
+        if history:
+            history.decision("accept", phase="child_transforms", children=[
+                {"synthetic_ref": synthetic_refs[i], "instance_path": art.instance_path,
+                 "origin": [placements_dict[art.instance_path].origin.x,
+                            placements_dict[art.instance_path].origin.y],
+                 "rotation": placements_dict[art.instance_path].rotation}
+                for i, art in enumerate(loaded_artifacts)
+                if art.instance_path in placements_dict
+            ])
         # Hard invariant seam: coupled replicas must have ended at one parent
         # rotation. Raised before geometry/stamping so a mismatched candidate
         # cannot proceed (geometry_validation.accepted=False alone is not a
@@ -2168,6 +2267,24 @@ def _compose_artifacts(
             derived.parent_local_constraints,
             exact_outline,
         )
+    if history:
+        history.placement(parent_local_solved, phase="parent_local_snap")
+        groups = []
+        for i, artifact in enumerate(loaded_artifacts):
+            placement = placements_dict.get(artifact.instance_path)
+            if placement is None:
+                continue
+            source_scene, source_origin = group_sources[i]
+            groups.append({
+                "id": "footprint:" + synthetic_refs[i], "type": "group",
+                "source_scene": source_scene,
+                "instance_path": artifact.instance_path,
+                "synthetic_ref": synthetic_refs[i], "origin": source_origin,
+                "net_map": artifact.metadata.get("replication_net_map", {}),
+                "pose": {"x": placement.origin.x, "y": placement.origin.y,
+                         "rotation": placement.rotation, "side": "front"},
+            })
+        history.delta(groups, phase="child_placements", geometry_source="placement_model")
 
     # --- Build CompositionEntry list + transformed_payloads in artifact order ---
     entries: list[CompositionEntry] = []
@@ -3111,9 +3228,12 @@ def _search_best_layout(
     from kicraft.autoplacer.brain.placement_scorer import PlacementScorer
     from kicraft.autoplacer.routing_board import run_kicad_cli_drc
 
+    search_history = history_from_env("parent_candidate", "parent search", {"seed": base_seed})
+    candidate_scope_ids = []
     base_cfg = dict(cfg or {})
     base_parent_placement = dict(base_cfg.get("parent_placement", {}))
     _search_cfg = dict(base_parent_placement.get("candidate_search", {}))
+    history_sources = {}
 
     # Manual mode: collapse the candidate search to a single trial. The
     # user has chosen the layout, so seed-aspect sweeping is meaningless
@@ -3171,6 +3291,8 @@ def _search_best_layout(
     while pending_waves:
         wave_cfg, _cand_prefix = pending_waves.pop(0)
         wave_no += 1
+        if search_history:
+            search_history.decision("accept", phase="candidate_wave", wave=wave_no, prefix=_cand_prefix)
         t_wave_start = time.perf_counter()
         for i in range(k):
             elapsed_ms = (time.perf_counter() - t_wave_start) * 1000.0
@@ -3216,6 +3338,11 @@ def _search_best_layout(
             while _pass_idx < len(_passes):
                 _pass_suffix, _seed_override = _passes[_pass_idx]
                 _pass_idx += 1
+                candidate_history = (search_history.child(
+                    "parent_candidate", f"{_cand_prefix}_{i}{_pass_suffix}",
+                    {"wave": wave_no, "candidate": i, "refit": bool(_pass_suffix),
+                     "seed": seed_i, "seed_size_override": _seed_override},
+                ) if search_history else None)
                 t_solve = time.perf_counter()
                 try:
                     state, payloads = _compose_artifacts(
@@ -3230,12 +3357,17 @@ def _search_best_layout(
                         seed_aspect_target=seed_aspect_i,
                         seed_size_override=_seed_override,
                         manual_layout=manual_layout,
+                        **({"history": candidate_history} if candidate_history else {}),
+                        **({"history_sources": history_sources} if candidate_history else {}),
                     )
                 except ConnectorOrientationError as exc:
                     # Rejected before any stamping/routing: this candidate
                     # cannot produce a mateable port. Try the next seed; if no
                     # candidate survives, the round fails with the reasons.
                     orientation_rejected.append(str(exc))
+                    if candidate_history:
+                        candidate_history.decision("reject", phase="orientation", reason=str(exc))
+                        candidate_history.end("rejected")
                     print(
                         f"[candidate-search] cand={i}{_pass_suffix} rejected "
                         f"before routing: {exc}"
@@ -3461,6 +3593,15 @@ def _search_best_layout(
                     phase_timings=dict(state.phase_timings),
                     shape_fitted=shape_fitted,
                 )
+                if candidate_history:
+                    candidate_history.decision(
+                        "accept" if accepted else "reject", phase="stamp_verdict",
+                        shorts=shorts if pcb_path is not None else None,
+                        drc_unreliable=stamp_drc_unreliable if pcb_path is not None else None,
+                        score=composite, shape_fitted=shape_fitted,
+                    )
+                    candidate_history.end("accepted" if accepted else "rejected")
+                candidate_scope_ids.append(candidate_history.scope_id if candidate_history else None)
                 candidates.append(rec)
                 cand_states.append(state)
                 cand_payloads.append(payloads)
@@ -3516,6 +3657,8 @@ def _search_best_layout(
     total_search_ms = (time.perf_counter() - t_search_start) * 1000.0
 
     if not candidates:
+        if search_history:
+            search_history.end("failed", reason="no_candidates")
         if orientation_rejected:
             raise ConnectorOrientationError(
                 "every one of "
@@ -3534,6 +3677,8 @@ def _search_best_layout(
 
     accepted_recs = [c for c in candidates if c.accepted]
     if not accepted_recs:
+        if search_history:
+            search_history.end("failed", reason="no_accepted_candidates")
         # All K candidates failed at least one hard gate (shorts > 0
         # or geometry_accepted False). Fail loudly -- per "no
         # fallbacks", a masked failure here would let real solver
@@ -3648,6 +3793,11 @@ def _search_best_layout(
     winner_state = cand_states[winner_idx]
     winner_payloads = cand_payloads[winner_idx]
     winner_pcb = cand_pcb_paths[winner_idx]
+    if search_history:
+        search_history.decision("select", phase="candidate_winner", candidate_index=winner_idx,
+                                scope_id=candidate_scope_ids[winner_idx], seed=winner_rec.seed,
+                                refit=winner_rec.refit)
+        search_history.end("completed")
 
     winner_from_demoted_wave = bool(edge_pins_demoted) and winner_idx >= wave1_count
     winner_state.candidate_search = {

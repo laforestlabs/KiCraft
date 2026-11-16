@@ -783,6 +783,8 @@ def add_breakout_stubs(
         return summary
 
     board = pcbnew.LoadBoard(pcb_path)
+    from kicraft.autoplacer.hardware.history_geometry import capture_board
+    capture_board(board, phase="guarded_breakout_input")
     if any(spec.via_outside_smd_pads for spec in specs):
         from kicraft.autoplacer.brain.gnd_pour import _board_edge_geometry
 
@@ -1158,6 +1160,7 @@ def add_breakout_stubs(
                 "pad": str(spec.pad), "items": owned_items,
             })
         summary["stubs"] += 1
+        capture_board(board, phase="guarded_breakout_batch")
 
     board.Save(pcb_path)
     return summary

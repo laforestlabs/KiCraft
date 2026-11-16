@@ -49,6 +49,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from kicraft.layout_history import HistoryDescriptor
 
 
 def _round_index(r: dict, default: int = -1) -> int:
@@ -203,6 +204,8 @@ class SolvedLeafSubcircuit:
     failure_summary: dict[str, Any] = field(default_factory=dict)
     experiment_round: int = 0
     prior_rounds: list[dict[str, Any]] = field(default_factory=list)
+    history_descriptor: HistoryDescriptor | None = None
+    round_history_scopes: dict[int, str] = field(default_factory=dict)
 
     @property
     def sheet_name(self) -> str:
@@ -469,8 +472,10 @@ def _attempt_leaf_size_reduction(
     extraction: ExtractedSubcircuitBoard,
     best_round: SolveRoundResult,
     cfg: dict[str, Any],
+    *,
+    history=None,
 ) -> tuple[ExtractedSubcircuitBoard, SolveRoundResult, dict[str, Any]]:
-    return attempt_leaf_size_reduction(extraction, best_round, cfg)
+    return attempt_leaf_size_reduction(extraction, best_round, cfg, **({"history": history} if history else {}))
 
 
 def _score_local_components(
@@ -496,6 +501,7 @@ def _route_local_subcircuit(
     *,
     generate_diagnostics: bool = True,
     round_index: int | None = None,
+    history=None,
 ) -> tuple[dict[str, Any], dict[str, float]]:
     return route_local_subcircuit(
         extraction,
@@ -503,6 +509,7 @@ def _route_local_subcircuit(
         cfg,
         generate_diagnostics=generate_diagnostics,
         round_index=round_index,
+        **({"history": history} if history else {}),
     )
 
 
@@ -564,6 +571,8 @@ def _solve_one_round(
     round_index: int,
     route: bool,
     place_quality_best_mm: float | None = None,
+    *,
+    history=None,
 ) -> SolveRoundResult:
     round_timing: dict[str, float] = {}
     round_total_start = time.monotonic()
@@ -571,7 +580,7 @@ def _solve_one_round(
     local_state = copy.deepcopy(extraction.local_state)
 
     placement_start = time.monotonic()
-    solver = PlacementSolver(local_state, cfg, seed=seed)
+    solver = PlacementSolver(local_state, cfg, seed=seed, **({"history": history} if history else {}))
     solved_components = solver.solve()
     round_timing["placement_solve_s"] = round(
         max(0.0, time.monotonic() - placement_start), 3
@@ -583,6 +592,8 @@ def _solve_one_round(
         solved_components,
         cfg,
     )
+    if history:
+        history.placement(repaired_components, phase="legality_repair")
     # Adaptive retry: if the first pass used its full budget without
     # converging, retry once with double the pass limit. Empirically this
     # recovers a majority of "illegal_unrepaired_leaf_placement" failures on
@@ -597,6 +608,8 @@ def _solve_one_round(
             solved_components,
             retry_cfg,
         )
+        if history:
+            history.placement(retry_components, phase="legality_repair_retry")
         round_timing["legality_repair_retry"] = True
         if retry_legality.get("resolved", False):
             repaired_components = retry_components
@@ -607,6 +620,8 @@ def _solve_one_round(
 
     if ordering_legality.get("resolved", False):
         solved_components = repaired_components
+    if history:
+        history.placement(solved_components, phase="legality_repair_retained")
 
     # Keep ordinary parts behind their edge connector's pads (KC-S8PC37 R8).
     # Compose stamps this leaf rigidly, so a companion fixed behind the pads
@@ -622,10 +637,14 @@ def _solve_one_round(
             solver._resolve_overlaps(solved_components)
             solver._restore_pinned_positions(solved_components)
         solver._clamp_companions_inboard_of_connectors(solved_components, companion_clear)
+        if history:
+            history.placement(solved_components, phase="connector_clamp")
 
     # Post-solve legalization and connector repair can move a bypass again.
     # Re-establish the mandatory owned pair before scoring and stamping.
     solver._place_local_bypasses(solved_components)
+    if history:
+        history.placement(solved_components, phase="local_bypass")
 
     placement_score_start = time.monotonic()
     placement = _score_local_components(local_state, solved_components, cfg)
@@ -637,6 +656,8 @@ def _solve_one_round(
     antenna_conflicts = diagnostics.get("antenna_edge_conflicts") or []
     if antenna_conflicts:
         reason = str(antenna_conflicts[0])
+        if history:
+            history.decision("skip", phase="route", reason=reason)
         round_timing["route_local_subcircuit_total_s"] = 0.0
         round_timing["solve_one_round_total_s"] = round(
             max(0.0, time.monotonic() - round_total_start), 3
@@ -701,6 +722,9 @@ def _solve_one_round(
             f"{round_index} and re-placing"
         )
         diagnostics["place_quality_gate"] = "skipped_route"
+        if history:
+            history.decision("skip", phase="route", reason="place_quality_gate",
+                             median_pin_mm=median_pin, threshold_mm=gate_threshold)
         round_timing["route_local_subcircuit_total_s"] = 0.0
         round_timing["solve_one_round_total_s"] = round(
             max(0.0, time.monotonic() - round_total_start), 3
@@ -750,6 +774,7 @@ def _solve_one_round(
                 # canonical renders are produced downstream and are unaffected.
                 generate_diagnostics=cfg.get("subcircuit_render_intermediate", True),
                 round_index=round_index,
+                **({"history": history} if history else {}),
             )
             round_timing.update(route_timing)
         except StampSubprocessError:
@@ -914,8 +939,16 @@ def _solve_leaf_subcircuit(
     base_seed: int,
     route: bool,
     experiment_round: int = 0,
+    history_descriptor: HistoryDescriptor | None = None,
 ) -> SolvedLeafSubcircuit:
     leaf_total_start = time.monotonic()
+    history_descriptor = history_descriptor or HistoryDescriptor.from_env()
+    history = (history_descriptor.writer(
+        "leaf", node.definition.id.instance_path,
+        {"instance_path": node.definition.id.instance_path,
+         "experiment_round": experiment_round, "seed": base_seed},
+    ) if history_descriptor else None)
+    round_scopes = {}
 
     # -- Canvas plan (PCB area-compaction plan, Phase 1) -------------------
     # In "content" mode the leaf solves on a canvas sized from its component
@@ -1087,7 +1120,13 @@ def _solve_leaf_subcircuit(
         if _deadline_hit and canvas_fill is not None:
             # Deadline tripped on an earlier rung: skip the remaining
             # compaction rungs and go straight to the seed-bbox fallback.
+            if history:
+                history.decision("skip", phase="canvas", reason="leaf_solve_deadline",
+                                 canvas_index=attempt_index, fill=canvas_fill)
             continue
+        if history:
+            history.decision("accept", phase="canvas_start", canvas_index=attempt_index,
+                             fill=canvas_fill)
         extraction_start = time.monotonic()
         extraction = _build_extraction(canvas_fill)
         extraction_elapsed_s = round(max(0.0, time.monotonic() - extraction_start), 3)
@@ -1184,12 +1223,21 @@ def _solve_leaf_subcircuit(
                 # shorts or courtyards deserves its full routing budget.
                 and _only_adjacency_failures(failure_reasons)
             )
+            round_history = (history.child(
+                "placement", f"round {round_index}",
+                {"instance_path": node.definition.id.instance_path,
+                 "experiment_round": experiment_round, "canvas_index": attempt_index,
+                 "canvas_fill": canvas_fill, "round_index": round_index, "seed": seed},
+            ) if history else None)
+            if round_history:
+                round_scopes[round_index] = round_history.scope_id
             try:
                 result = _solve_one_round(
                     extraction, round_cfg, seed, round_index, route,
                     place_quality_best_mm=(
                         _place_quality_best if _gate_allowed else None
                     ),
+                    **({"history": round_history} if round_history else {}),
                 )
             except LocalBypassPlacementError as exc:
                 # Capacity rejection must reach the existing bounded canvas
@@ -1216,6 +1264,14 @@ def _solve_leaf_subcircuit(
                     placement_diagnostics={"placement_completed": False},
                 )
                 print(f"  placement capacity rejection: {exc}")
+            except Exception:
+                if round_history:
+                    round_history.end("failed")
+                if history:
+                    history.end("failed", reason="round_exception")
+                raise
+            if round_history:
+                round_history.end("completed" if result.placement_diagnostics.get("placement_completed", True) else "rejected")
             _round_median = result.placement_diagnostics.get("median_pin_mm")
             if _round_median is not None:
                 _place_quality_best = min(_place_quality_best, float(_round_median))
@@ -1268,6 +1324,13 @@ def _solve_leaf_subcircuit(
                     "notes": [],
                 }
             )
+            if history:
+                history.decision(
+                    "accept" if accepted else "reject", phase="round_verdict",
+                    reason=None if accepted else str(validation.get("rejection_stage") or routing.get("reason") or "acceptance_gate"),
+                    round_index=round_index, scope_id=round_scopes.get(round_index),
+                    rejection_reasons=(list(round_acceptance.rejection_reasons) if round_acceptance else []),
+                )
 
             # A routed round is a best-effort fallback (used when no round is
             # accepted) -- including one routing marked "failed" for residual
@@ -1356,6 +1419,9 @@ def _solve_leaf_subcircuit(
                 f"(not on room); skipping the seed-bbox rung, which would only "
                 f"lengthen the hauls"
             )
+            if history:
+                history.decision("skip", phase="canvas", reason="unconnected_only_seed_bbox",
+                                 canvas_index=attempt_index + 1)
             break
 
     if best is None and best_routed is not None:
@@ -1366,6 +1432,9 @@ def _solve_leaf_subcircuit(
         # verdict (accepted=False) is still recorded downstream for quality.
         best = best_routed
         best_extraction = best_routed_extraction
+        if history:
+            history.decision("select", phase="best_routed_fallback",
+                             round_index=best.round_index, scope_id=round_scopes.get(best.round_index))
         print(
             f"  WARNING: no accepted round for "
             f"{node.definition.id.instance_path}; composing best-effort from "
@@ -1397,6 +1466,8 @@ def _solve_leaf_subcircuit(
                 # actual leaf-failure reason.
                 pass
         unique_reasons = sorted(set(failure_reasons))
+        if history:
+            history.end("failed", reason="no_accepted_leaf")
         raise RuntimeError(
             "No accepted routed leaf artifact produced for "
             f"{node.definition.id.instance_path} after {len(round_results)} round(s) "
@@ -1408,6 +1479,9 @@ def _solve_leaf_subcircuit(
     # From here on, everything (size reduction, artifacts, metadata) must use
     # the canvas the winning round was actually solved against.
     extraction = best_extraction if best_extraction is not None else extraction
+    if history:
+        history.decision("select", phase="leaf_winner", round_index=best.round_index,
+                         scope_id=round_scopes.get(best.round_index))
 
     # Later rounds overwrite the shared boards. Materialize the selected
     # round before reduction measures/preserves them or metadata points at
@@ -1426,6 +1500,7 @@ def _solve_leaf_subcircuit(
         extraction,
         best,
         cfg,
+        **({"history": history} if history else {}),
     )
     # Reduction reroutes overwrite the winning round's PCB snapshot. Keep its
     # per-round layout and verdict paired with those exact reduced bytes.
@@ -1480,6 +1555,8 @@ def _solve_leaf_subcircuit(
         "unique_reasons": sorted(set(failure_reasons)),
         "failures": failure_rows,
     }
+    if history:
+        history.end("completed", selected_round=reduced_best.round_index)
 
     return SolvedLeafSubcircuit(
         node=node,
@@ -1491,6 +1568,8 @@ def _solve_leaf_subcircuit(
         failure_summary=failure_summary,
         experiment_round=experiment_round,
         prior_rounds=prior_all_rounds,
+        history_descriptor=history_descriptor,
+        round_history_scopes=round_scopes,
     )
 
 
@@ -1574,6 +1653,23 @@ def _solved_local_translation(extraction: ExtractedSubcircuitBoard) -> dict[str,
         "x": extraction.translation.x,
         "y": extraction.translation.y,
     }
+
+
+def _record_layout_source(solved, layout, round_index):
+    """Capture the rebased layout consumed by composition in its own frame."""
+    descriptor = solved.history_descriptor
+    if descriptor is None:
+        return None
+    writer = descriptor.writer("leaf", "persisted leaf placement model", {
+        "instance_path": solved.instance_path, "round_index": round_index,
+    })
+    writer.placement(layout.components, phase="persisted_layout")
+    scene_seq = writer.seq
+    source_scope = solved.round_history_scopes.get(round_index)
+    writer.decision("reuse", phase="persisted_layout", geometry_source="placement_model",
+                    **({"source_scope_id": source_scope} if source_scope else {}))
+    writer.end("completed")
+    return {"capture_id": descriptor.capture_id, "scope_id": writer.scope_id, "seq": scene_seq}
 
 
 def _persist_solution(
@@ -1732,6 +1828,9 @@ def _persist_solution(
     canonical_layout["original_outline"] = original_outline
     canonical_layout["reduced_outline"] = reduced_outline
     canonical_layout["size_reduction"] = size_reduction
+    source_scene = _record_layout_source(solved, solved_layout, solved.best_round.round_index)
+    if source_scene:
+        canonical_layout["layout_history_source"] = source_scene
 
     solved_layout_json: str | None = None
     # Persist the canonical solved_layout.json for any leaf with a routed board,
@@ -1912,6 +2011,9 @@ def _persist_solution(
                 }
                 round_validation["accepted"] = False
             layout_artifact["validation"] = round_validation
+            source_scene = _record_layout_source(solved, layout, round_idx)
+            if source_scene:
+                layout_artifact["layout_history_source"] = source_scene
             (artifact_dir / f"{round_prefix}_solved_layout.json").write_text(
                 json.dumps(layout_artifact, indent=2, sort_keys=True, default=str),
                 encoding="utf-8",
@@ -2090,9 +2192,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 def _solve_leaf_worker(
-    args: tuple[HierarchyNode, BoardState, dict[str, Any], int, int, bool, int],
+    args: tuple,
 ) -> tuple[str, SolvedLeafSubcircuit | None, dict[str, Any] | None]:
-    node, full_state, cfg, rounds, base_seed, route, experiment_round = args
+    node, full_state, cfg, rounds, base_seed, route, experiment_round, history_descriptor = args
     try:
         solved = _solve_leaf_subcircuit(
             node=node,
@@ -2102,6 +2204,7 @@ def _solve_leaf_worker(
             base_seed=base_seed,
             route=route,
             experiment_round=experiment_round,
+            history_descriptor=history_descriptor,
         )
         return (node.id.instance_path, solved, None)
     except Exception as exc:
@@ -2195,6 +2298,7 @@ def main(argv: list[str] | None = None) -> int:
         rounds = max(1, args.rounds)
 
         experiment_round = int(getattr(args, "experiment_round", 0) or 0)
+        history_descriptor = HistoryDescriptor.from_env()
 
         if worker_count == 1 or len(representatives) <= 1:
             for index, node in enumerate(representatives):
@@ -2207,6 +2311,7 @@ def main(argv: list[str] | None = None) -> int:
                         base_seed=args.seed + index * 1009,
                         route=args.route,
                         experiment_round=experiment_round,
+                        history_descriptor=history_descriptor,
                     )
                     solved_results.append(solved)
                 except Exception as exc:
@@ -2231,6 +2336,7 @@ def main(argv: list[str] | None = None) -> int:
                     args.seed + index * 1009,
                     args.route,
                     experiment_round,
+                    history_descriptor,
                 )
                 for index, node in enumerate(representatives)
             ]
@@ -2288,6 +2394,7 @@ def main(argv: list[str] | None = None) -> int:
                             base_seed=args.seed + index * 1009,
                             route=args.route,
                             experiment_round=experiment_round,
+                            history_descriptor=history_descriptor,
                         )
                         solved_by_path[solved.instance_path] = solved
                     except Exception as exc:

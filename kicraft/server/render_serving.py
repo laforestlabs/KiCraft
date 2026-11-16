@@ -188,6 +188,39 @@ def serve_project_board(token: str, subpath: str):
     )
 
 
+_HISTORY_HEADERS = {
+    "Cache-Control": "private, no-store",
+    "X-Content-Type-Options": "nosniff",
+    "Content-Security-Policy": "default-src 'none'; script-src 'unsafe-inline'; "
+        "style-src 'unsafe-inline'; connect-src 'none'; base-uri 'none'; "
+        "form-action 'none'; frame-ancestors 'self'",
+}
+
+
+def _history_response(token: str, capture_id: str, *, download: bool):
+    from kicraft.layout_history_export import published_capture
+    base = _resolve_project_token(token)
+    publication = published_capture(base, capture_id) if base is not None else None
+    if publication is None:
+        return PlainTextResponse("not found", status_code=404)
+    _, target = publication
+    return FileResponse(
+        target, media_type="text/html", headers=_HISTORY_HEADERS,
+        filename="kicraft-timelapse.html" if download else None,
+        content_disposition_type="attachment" if download else "inline",
+    )
+
+
+@app.get("/project/{token}/history/{capture_id}")
+def serve_project_history(token: str, capture_id: str):
+    return _history_response(token, capture_id, download=False)
+
+
+@app.get("/project/{token}/history/{capture_id}/download")
+def download_project_history(token: str, capture_id: str):
+    return _history_response(token, capture_id, download=True)
+
+
 # Part-library previews: KiCanvas can't render a bare .kicad_sym/.kicad_mod, so the
 # /parts catalog shows symbols and footprints as SVGs produced by kicad-cli and cached
 # by content-hash (see parts_catalog). These are library reference assets (no per-user

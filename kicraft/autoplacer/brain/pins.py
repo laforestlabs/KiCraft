@@ -410,6 +410,12 @@ def pin_leaf(
         _copy_snapshot_file(src, dst)
     _invalidate_leaf_canvas_cache(leaf_dir)
     _reconcile_pinned_debug(leaf_dir, snapshot_id)
+    from kicraft.layout_history import history_from_env
+    history = history_from_env("leaf", "pinned leaf", {"leaf_key": leaf_key})
+    if history:
+        history.decision("reuse", phase="pin_leaf", snapshot_id=snapshot_id, source=source,
+                         source_files=sorted(path.name for path in snapshot.values()))
+        history.end("completed")
 
 
     manifest = read_pins(experiments_dir)
@@ -571,6 +577,13 @@ def ensure_applied(experiments_dir: Path) -> dict[str, str]:
                 _copy_snapshot_file(src, dst)
             _invalidate_leaf_canvas_cache(leaf_dir)
             statuses[leaf_key] = "applied"
+        from kicraft.layout_history import history_from_env
+        history = history_from_env("leaf", "applied leaf pin", {"leaf_key": leaf_key})
+        if history:
+            history.decision("reuse", phase="apply_pin", snapshot_id=snapshot_id,
+                             source=pin.get("source"), already_current=all_current,
+                             source_files=sorted(path.name for path in snapshot.values()))
+            history.end("completed")
         _reconcile_pinned_debug(leaf_dir, snapshot_id)
     return statuses
 

@@ -854,6 +854,12 @@ def _pin_best_parent(project_dir: Path, best_dir: Path, best_round, run_id: str)
         _copy_if_exists(best_dir / "parent_custody.json", parent_dir / "parent_custody.json")
     except (OSError, ValueError, KeyError, TypeError):
         return False
+    from kicraft.layout_history import history_from_env
+    history = history_from_env("parent_candidate", "pinned parent", {"round": best_round.round_num})
+    if history:
+        history.decision("reuse", phase="pin_parent", source_round=best_round.round_num,
+                         source_files=sorted(files), source_sha256=files)
+        history.end("completed")
     return True
 
 
@@ -2715,7 +2721,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, *, history=None) -> int:
     args = parse_args(argv or sys.argv[1:])
 
     project_dir = Path(args.pcb).resolve().parent
@@ -3221,6 +3227,8 @@ def main(argv: list[str] | None = None) -> int:
                 solve_env["KICRAFT_LEAF_SOLVE_MAX_WALL_S"] = (
                     f"{plan.leaf_deadline_s:.0f}"
                 )
+            if history:
+                solve_env = history.child_env(solve_env)
             if reuse_enabled:
                 prior_snapshots = set(
                     (project_dir / ".experiments" / "subcircuits").glob(
@@ -3475,6 +3483,7 @@ def main(argv: list[str] | None = None) -> int:
             parent_route_rc, parent_route_stdout, parent_route_stderr = _run_command(
                 parent_route_cmd,
                 cwd=project_dir,
+                **({"env": history.child_env()} if history else {}),
             )
             parent_route_elapsed_s = _record_timing(
                 round_timing_breakdown,

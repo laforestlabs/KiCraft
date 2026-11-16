@@ -627,6 +627,8 @@ def repair_unconnected_signals(
                 finally:
                     if not accepted:
                         Path(pcb_path).write_bytes(original)
+                        from kicraft.autoplacer.hardware.history_geometry import capture_restored_file
+                        capture_restored_file(pcb_path, phase="signal_repair_restore")
                 if accepted:
                     summary["tied"] += 1
                     tied = True
@@ -648,6 +650,8 @@ def repair_unconnected_signals(
         board = pcbnew.LoadBoard(pcb_path)
         pcbnew.ZONE_FILLER(board).Fill(board.Zones())
         board.Save(pcb_path)
+        from kicraft.autoplacer.hardware.history_geometry import capture_board
+        capture_board(board, phase="signal_repair_fill")
     return summary
 
 
@@ -779,6 +783,8 @@ def repair_unconnected_power(
                 finally:
                     if not accepted:
                         path.write_bytes(before_batch)
+                        from kicraft.autoplacer.hardware.history_geometry import capture_restored_file
+                        capture_restored_file(pcb_path, phase="power_repair_restore")
                 if accepted:
                     summary["tied"] += 1
                     if is_zone_edge:
@@ -787,6 +793,8 @@ def repair_unconnected_power(
                         board = pcbnew.LoadBoard(pcb_path)
                         pcbnew.ZONE_FILLER(board).Fill(board.Zones())
                         board.Save(pcb_path)
+                        from kicraft.autoplacer.hardware.history_geometry import capture_board
+                        capture_board(board, phase="power_repair_island_fill")
                     break
             if not accepted:
                 summary["skipped"].append(f"{label}:no_clear_path")
@@ -794,8 +802,12 @@ def repair_unconnected_power(
             board = pcbnew.LoadBoard(pcb_path)
             pcbnew.ZONE_FILLER(board).Fill(board.Zones())
             board.Save(pcb_path)
+            from kicraft.autoplacer.hardware.history_geometry import capture_board
+            capture_board(board, phase="power_repair_final_fill")
     except BaseException:
         path.write_bytes(original)
+        from kicraft.autoplacer.hardware.history_geometry import capture_restored_file
+        capture_restored_file(pcb_path, phase="power_repair_exception_restore")
         raise
     finally:
         for sidecar, content in sidecars:

@@ -20,7 +20,7 @@ from kicraft.pcb_layers import OUTER_COPPER_LAYERS, declared_copper_layers
 
 
 KICAD_ROUTING_TOOLS_VERSION = "0.20.2"
-KICAD_ROUTING_TOOLS_COMMIT = "8eeee55fd4ba4ed600b11bd8214de9994e8f5396"
+KICAD_ROUTING_TOOLS_COMMIT = "f6fa93122db463ff3f3a1617605c69f7959d2cd9"
 _KRT_NATIVE_VERSION = "0.20.1"
 _KRT_PREFLIGHT_CACHE: dict[tuple[str, str], dict[str, str]] = {}
 
@@ -179,6 +179,14 @@ def preflight_kicad_routing_tools(config: dict[str, Any] | None = None) -> dict[
                 f"expected pinned {_KRT_NATIVE_VERSION!r}"
             )
 
+    trace_schema = ""
+    try:
+        trace_source = (root / "py_router" / "route_trace.py").read_text(encoding="utf-8")
+        match = re.search(r"^TRACE_STREAM_SCHEMA_VERSION\s*=\s*(\d+)\s*$", trace_source, re.MULTILINE)
+        trace_schema = match.group(1) if match else ""
+    except OSError:
+        pass
+
     if problems:
         raise KicadRoutingToolsUnavailableError(
             "KiCadRoutingTools backend unavailable:\n  - " + "\n  - ".join(problems)
@@ -190,6 +198,7 @@ def preflight_kicad_routing_tools(config: dict[str, Any] | None = None) -> dict[
         "version": source_version,
         "commit": revision,
         "native_version": native_version,
+        "trace_stream_schema": trace_schema,
     }
     _KRT_PREFLIGHT_CACHE[cache_key] = result
     return dict(result)
@@ -758,6 +767,12 @@ if {prepare_thermal!r}:
 if preparation is not None:
     result["ground_preparation"] = preparation
 board.Save(path)
+try:
+    from kicraft.autoplacer.hardware.history_geometry import capture_board
+    capture_board(board, phase="ground_reservation")
+except Exception as error:
+    import warnings
+    warnings.warn(f"[layout-history] ground reservation capture failed: {{error}}", RuntimeWarning)
 restore_rules()
 with open({str(summary_path)!r}, "w") as out:
     json.dump(result, out)
@@ -791,6 +806,12 @@ for zone in list(board.Zones()):
 if removed:
     board.BuildConnectivity()
     board.Save({str(board_path)!r})
+    try:
+        from kicraft.autoplacer.hardware.history_geometry import capture_board
+        capture_board(board, phase="router_keepout_removal")
+    except Exception as error:
+        import warnings
+        warnings.warn(f"[layout-history] keepout removal capture failed: {{error}}", RuntimeWarning)
 """
     sidecars = [board_path.with_suffix(suffix) for suffix in (".kicad_pro", ".kicad_dru")]
     rules = [(path, path.read_bytes() if path.is_file() else None) for path in sidecars]
@@ -1568,7 +1589,7 @@ print(json.dumps([[p.component_ref, str(p.pad_number), p.net_name] for fp in pcb
     return available, deferred
 
 def route_with_kicad_routing_tools(
-    kicad_pcb_path: str, output_path: str, config: dict[str, Any]
+    kicad_pcb_path: str, output_path: str, config: dict[str, Any], *, history=None
 ) -> dict[str, Any]:
     """Route widest classes first; planes replace only natively proved grounds."""
     input_board = Path(kicad_pcb_path).resolve()
@@ -1638,6 +1659,7 @@ def route_with_kicad_routing_tools(
     ]
     passes = []
     current = staged
+    source_scene_scope_id = history.scope_id if history is not None else None
     usb_receipts = []
     for index, (contract, segment) in enumerate(available, 1):
         remaining = timeout - (time.monotonic() - started)
@@ -1672,7 +1694,9 @@ def route_with_kicad_routing_tools(
         if "launch_policy" in profile:
             pass_config["_usb_bounded_launch_policy"] = {**profile["launch_policy"], "segment": segment}
         stats = _route_krt_pass(str(current), str(candidate), pass_config, nets=nets,
-                                track_width=width, usb_contract=contract, usb_gap=gap)
+                                track_width=width, usb_contract=contract, usb_gap=gap,
+                                **({"history": history, "source_scene_scope_id": source_scene_scope_id}
+                                   if history is not None else {}))
         _require_coupled_usb(
             stats, *nets,
             allow_bounded_local=(
@@ -1693,6 +1717,7 @@ def route_with_kicad_routing_tools(
                              "native_launch_receipt": native_receipt})
         passes.append(stats)
         current = candidate
+        source_scene_scope_id = stats.get("history_scope_id") or source_scene_scope_id
     if _usb_bounded_launches_enabled(config) and config.get("usb_routing_scope", "parent") != "leaf":
         for contract in {row["contract_id"] for row in usb_receipts}:
             if not any(row["contract_id"] == contract and
@@ -1700,6 +1725,13 @@ def route_with_kicad_routing_tools(
                        for row in usb_receipts):
                 raise RuntimeError(f"USB contract {contract} has no full-width coupled main copper")
     if not groups and not available:
+        from kicraft.layout_history import history_from_env
+        skip_history = (history.child("router_pass", "Plane-connected routing", {"nets": sorted(plane_grounds)})
+                        if history is not None else
+                        history_from_env("router_pass", "Plane-connected routing", {"nets": sorted(plane_grounds)}))
+        if skip_history:
+            skip_history.decision("skip", phase="routing", reason="plane_connected")
+            skip_history.end("skipped")
         # Keep the hash-bound staged plan immutable even without router passes.
         current = output_board.with_name(f"{output_board.stem}.krt-plane-connected.kicad_pcb")
         shutil.copy2(staged, current)
@@ -1713,9 +1745,12 @@ def route_with_kicad_routing_tools(
             )
         candidate = output_board.with_name(f"{output_board.stem}.krt-pass-{index:02d}.kicad_pcb")
         pass_config = dict(config, kicad_routing_tools_timeout_s=remaining, _krt_deadline=started + timeout)
-        stats = _route_krt_pass(str(current), str(candidate), pass_config, nets=nets, track_width=width)
+        stats = _route_krt_pass(str(current), str(candidate), pass_config, nets=nets, track_width=width,
+                                **({"history": history, "source_scene_scope_id": source_scene_scope_id}
+                                   if history is not None else {}))
         passes.append(stats)
         current = candidate
+        source_scene_scope_id = stats.get("history_scope_id") or source_scene_scope_id
     if ground_keepouts is not None:
         _strip_router_keepouts(current, ground_zone_name)
         _propagate_sibling_project_rules(str(project.with_suffix(".kicad_pcb")), str(current))
@@ -1768,6 +1803,8 @@ def route_with_kicad_routing_tools(
         json_summaries=[summary for item in passes for summary in item["json_summaries"]],
         usb_routing_receipts=usb_receipts,
         deferred_usb_segments=deferred,
+        history_scope_ids=[item["history_scope_id"] for item in passes if item.get("history_scope_id")],
+        history_selected_scope_id=source_scene_scope_id,
         passes=passes,
     )
     if ground_plan is not None:
@@ -1780,7 +1817,7 @@ def _route_krt_pass(
     output_path: str,
     config: dict[str, Any],
     *, nets: list[str], track_width: float, usb_contract: dict[str, Any] | None = None,
-    usb_gap: float | None = None,
+    usb_gap: float | None = None, history=None, source_scene_scope_id: str | None = None,
 ) -> dict[str, Any]:
     """Route directly while preserving input copper and project design rules."""
     from kicraft.autoplacer.brain.copper_accounting import (
@@ -1869,17 +1906,71 @@ def _route_krt_pass(
     environment["KICAD_RIP_PREEXISTING"] = "0"
     environment["KICAD_PLANE_FINALIZE"] = "0"
     environment["PYTHONUNBUFFERED"] = "1"
+    from kicraft.layout_history import HistoryDescriptor
+    descriptor = history.child_descriptor() if history is not None else HistoryDescriptor.from_env(environment)
+    board_scene = None
+    if descriptor and runtime.get("trace_stream_schema") == "1":
+        from kicraft.autoplacer.routing_board import _kicad_subprocess_env
+        try:
+            extraction = subprocess.run(
+                [sys.executable, "-m", "kicraft.autoplacer.hardware.history_geometry",
+                 "--board", str(router_input), "--phase", "router_input"],
+                env=descriptor.child_env(_kicad_subprocess_env()),
+                capture_output=True, text=True, timeout=60,
+            )
+            if extraction.returncode:
+                raise RuntimeError("native input extraction failed")
+            native_scope = json.loads(extraction.stdout.strip().splitlines()[-1])["scope_id"]
+            if not native_scope:
+                raise RuntimeError("native input scope missing")
+            board_scene = {"scope_id": native_scope}
+        except Exception as exc:
+            receipt = descriptor.writer("router_pass", "Router input geometry unavailable", {})
+            receipt.decision("skip", phase="router_input", reason=type(exc).__name__,
+                             gap="router_input_geometry_unavailable")
+            receipt.end("partial")
+    history_scope_id = None
+    if descriptor:
+        if runtime.get("trace_stream_schema") == "1":
+            history_scope_id = uuid.uuid4().hex
+            environment["KICAD_ROUTE_TRACE"] = "1"
+            environment["KICAD_ROUTE_TRACE_STREAM"] = str(
+                Path(descriptor.directory).resolve() / f"scope-{history_scope_id}.jsonl.gz"
+            )
+            environment["KICAD_ROUTE_TRACE_CONTEXT"] = json.dumps({
+                "capture_id": descriptor.capture_id, "scope_id": history_scope_id,
+                "parent_scope_id": descriptor.parent_scope_id, "scope_kind": "router_pass",
+                "label": "USB router pass" if usb_contract is not None else "Router width pass",
+                "identity": {"nets": nets, "track_width": track_width, "usb_gap": usb_gap,
+                             "source_scene_scope_id": source_scene_scope_id,
+                             "board_scene": board_scene},
+            }, separators=(",", ":"))
+        else:
+            history = descriptor.writer("router_pass", "Router trace unavailable",
+                                        {"nets": nets, "track_width": track_width})
+            history_scope_id = history.scope_id
+            history.decision("skip", phase="routing", reason="router trace unavailable",
+                             gap="router_trace_unavailable")
+            history.end("unavailable")
     started = time.monotonic()
     timed_out = False
-    proc = subprocess.Popen(
-        command,
-        cwd=root,
-        env=environment,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        start_new_session=True,
-    )
+    try:
+        proc = subprocess.Popen(
+            command,
+            cwd=root,
+            env=environment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+    except OSError:
+        if descriptor:
+            receipt = descriptor.writer("router_pass", "Router launch failed", {"nets": nets})
+            receipt.decision("reject", phase="routing", reason="router launch failed",
+                             gap="router_trace_missing")
+            receipt.end("partial")
+        raise
     try:
         stdout, stderr = proc.communicate(timeout=timeout_s)
     except subprocess.TimeoutExpired:
@@ -1890,6 +1981,21 @@ def _route_krt_pass(
         except subprocess.TimeoutExpired:
             os.killpg(proc.pid, signal.SIGKILL)
             stdout, stderr = proc.communicate()
+    if descriptor and runtime.get("trace_stream_schema") == "1":
+        stream_path = Path(environment["KICAD_ROUTE_TRACE_STREAM"])
+        missing_stream = not stream_path.is_file()
+        if timed_out or proc.returncode != 0 or missing_stream:
+            receipt = descriptor.writer("router_pass", "Router pass outcome", {
+                "router_scope_id": history_scope_id, "nets": nets,
+            })
+            receipt.decision(
+                "reject" if timed_out or proc.returncode != 0 else "skip",
+                phase="routing",
+                reason="timeout" if timed_out else "router_failure" if proc.returncode != 0 else "trace_missing",
+                gap="router_trace_missing" if missing_stream else "router_trace_interrupted",
+                returncode=proc.returncode,
+            )
+            receipt.end("partial")
     if output_board.is_file():
         if not timed_out and proc.returncode == 0:
             _restore_input_copper_locks(output_board, temporary_locks)
@@ -1950,6 +2056,11 @@ def _route_krt_pass(
         "source_version": runtime["version"],
         "source_commit": runtime["commit"],
         "native_version": runtime["native_version"],
+        "history_scope_id": history_scope_id,
+        "history_source_scene_scope_id": source_scene_scope_id,
+        "history_board_scene_scope_id": board_scene["scope_id"] if board_scene else None,
+        "history_trace_status": ("unavailable" if descriptor and runtime.get("trace_stream_schema") != "1"
+                                 else "recorded" if history_scope_id else "disabled"),
         "source_input_path": str(input_board),
         "router_input_path": str(router_input),
         "npth_hole_clearance_keepouts": npth_keepouts,

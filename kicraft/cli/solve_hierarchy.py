@@ -100,6 +100,7 @@ def _solve_leaves(
     route: bool,
     only: list[str] | None = None,
     seed: int = 0,
+    history=None,
 ) -> str:
     """Solve all leaf subcircuits by delegating to solve_subcircuits.py."""
     cmd = [
@@ -120,7 +121,8 @@ def _solve_leaves(
 
     print(f"  command: {' '.join(cmd)}")
     result = subprocess.run(
-        cmd, capture_output=False, text=True, timeout=900
+        cmd, capture_output=False, text=True, timeout=900,
+        env=history.child_env() if history else None,
     )
     if result.returncode != 0:
         raise RuntimeError(f"Leaf solving failed with exit code {result.returncode}")
@@ -134,6 +136,7 @@ def _compose_and_route_parent(
     cfg: dict,
     spacing_mm: float,
     route: bool,
+    history=None,
 ) -> str:
     """Compose leaves into parent and optionally route via KiCad Routing Tools."""
     # Log constraints
@@ -155,7 +158,8 @@ def _compose_and_route_parent(
 
     print(f"  command: {' '.join(cmd)}")
     result = subprocess.run(
-        cmd, capture_output=False, text=True, timeout=600
+        cmd, capture_output=False, text=True, timeout=600,
+        env=history.child_env() if history else None,
     )
     if result.returncode != 0:
         raise RuntimeError(
@@ -258,7 +262,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 # ---------------------------------------------------------------------------
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, *, history=None) -> int:
     args = parse_args(argv or sys.argv[1:])
 
     project_dir = Path(args.schematic).resolve().parent
@@ -305,6 +309,7 @@ def main(argv: list[str] | None = None) -> int:
                         args.route,
                         args.only,
                         seed=args.seed,
+                        **({"history": history} if history else {}),
                     )
                 except Exception as exc:
                     print(
@@ -348,6 +353,7 @@ def main(argv: list[str] | None = None) -> int:
                         cfg,
                         args.spacing_mm,
                         args.route,
+                        **({"history": history} if history else {}),
                     )
                 except Exception as exc:
                     print(

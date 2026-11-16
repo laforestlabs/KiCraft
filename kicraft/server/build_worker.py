@@ -217,6 +217,8 @@ class BuildWorker:
         # mid-round with zero artifacts (same 0.9 factor as self_eval's
         # export); setdefault so an operator env override wins.
         env.setdefault("KICRAFT_BUILD_MAX_WALL_S", f"{self.timeout_s * 0.9:.0f}")
+        if job.attempt_generation is not None:
+            env["KICRAFT_ATTEMPT_GENERATION"] = str(job.attempt_generation)
         try:
             cmd = job_command(kind, cmd_base, ws, project_id=job.project_id,
                               attempt_generation=job.attempt_generation)
@@ -274,6 +276,16 @@ class BuildWorker:
         finally:
             with self._lock:
                 self._procs.pop(job.id, None)
+        from kicraft.layout_history_export import recover_terminated_capture
+        from .storage import _discover_generated_dir
+        project = self.store.get_project(job.project_id) if job.project_id is not None else None
+        if project is not None and project.attempt_generation == job.attempt_generation:
+            directory = _discover_generated_dir(ws)
+            expected = ws / "generated" / f"attempt-{job.attempt_generation}"
+            if directory is not None and (kind == "manual_route" or directory.parent.resolve() == expected.resolve()):
+                recover_terminated_capture(
+                    directory, generation=job.attempt_generation, build_rc=rc,
+                )
         # A shutdown abort already requeued/failed the row; finish_build's
         # status guard makes this a no-op in that case (no TOCTOU window).
         if self.store.finish_build(job.id, rc=rc, status="done"):

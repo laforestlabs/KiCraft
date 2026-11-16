@@ -348,6 +348,8 @@ def attempt_leaf_size_reduction(
     extraction: ExtractedSubcircuitBoard,
     best_round: SolveRoundResult,
     cfg: dict[str, Any],
+    *,
+    history=None,
 ) -> tuple[ExtractedSubcircuitBoard, SolveRoundResult, dict[str, Any]]:
     original_tl, original_br = extraction.local_state.board_outline
     original_width = extraction.local_state.board_width
@@ -555,6 +557,15 @@ def attempt_leaf_size_reduction(
                 candidate_extraction.local_state.components
             )
             total_attempts += 1
+            attempt_history = (history.child(
+                "placement", "leaf size reduction",
+                {"round_index": current_round.round_index, "attempt_index": total_attempts,
+                 "axis": candidate["axis"], "width_mm": candidate_width,
+                 "height_mm": candidate_height},
+            ) if history else None)
+            if attempt_history:
+                attempt_history.placement(candidate_extraction.local_state.components,
+                                          phase="reduction_candidate")
             attempt_record = {
                 "axis": candidate["axis"],
                 "step_mm": candidate["step_mm"],
@@ -575,11 +586,17 @@ def attempt_leaf_size_reduction(
             if actual_width > candidate_width + 1e-6 or actual_height > candidate_height + 1e-6:
                 attempt_record["rejection_reason"] = "edge_datum_outline_floor_failed"
                 summary["attempts"].append(attempt_record)
+                if attempt_history:
+                    attempt_history.decision("reject", phase="reduction", reason="edge_datum_outline_floor_failed")
+                    attempt_history.end("rejected")
                 continue
 
             if legality.get("pad_outside_count", 0) or legality.get("overlap_count", 0):
                 attempt_record["rejection_reason"] = "placement_legality_failed"
                 summary["attempts"].append(attempt_record)
+                if attempt_history:
+                    attempt_history.decision("reject", phase="reduction", reason="placement_legality_failed")
+                    attempt_history.end("rejected")
                 continue
 
             # Every accepted outline needs a board stamped and validated for
@@ -593,9 +610,20 @@ def attempt_leaf_size_reduction(
                     candidate_cfg,
                     generate_diagnostics=False,
                     round_index=current_round.round_index,
+                    **({"history": attempt_history} if attempt_history else {}),
                 )
             except Exception as exc:
                 _restore_round_boards(preserved_boards)
+                if attempt_history:
+                    from kicraft.layout_history import history_context
+                    from kicraft.autoplacer.hardware.history_geometry import capture_restored_external
+                    with history_context(attempt_history.child_descriptor()):
+                        for restored_path in preserved_boards:
+                            if restored_path.endswith(".kicad_pcb"):
+                                capture_restored_external(restored_path, phase="reduction_restore")
+                if attempt_history:
+                    attempt_history.decision("restore", phase="reduction", reason="reroute_exception")
+                    attempt_history.end("rejected")
                 attempt_record["rejection_reason"] = f"reroute_exception:{exc}"
                 summary["attempts"].append(attempt_record)
                 continue
@@ -623,6 +651,13 @@ def attempt_leaf_size_reduction(
             if (rerouted.get("failed", False) or not validation.get("accepted", False)
                     or not leaf_acceptance.accepted):
                 _restore_round_boards(preserved_boards)
+                if attempt_history:
+                    from kicraft.layout_history import history_context
+                    from kicraft.autoplacer.hardware.history_geometry import capture_restored_external
+                    with history_context(attempt_history.child_descriptor()):
+                        for restored_path in preserved_boards:
+                            if restored_path.endswith(".kicad_pcb"):
+                                capture_restored_external(restored_path, phase="reduction_restore")
                 attempt_record["rejection_reason"] = (
                     validation.get("rejection_stage")
                     or ",".join(leaf_acceptance.rejection_reasons)
@@ -630,6 +665,10 @@ def attempt_leaf_size_reduction(
                     or rerouted.get("reason")
                     or "reroute_validation_failed"
                 )
+                if attempt_history:
+                    attempt_history.decision("reject", phase="reduction", reason=str(attempt_record["rejection_reason"]))
+                    attempt_history.decision("restore", phase="reduction", reason="rejected_candidate")
+                    attempt_history.end("rejected")
                 summary["attempts"].append(attempt_record)
                 continue
 
@@ -648,6 +687,9 @@ def attempt_leaf_size_reduction(
             current_extraction = candidate_extraction
             current_round = accepted_round
             attempt_record["accepted"] = True
+            if attempt_history:
+                attempt_history.decision("accept", phase="reduction")
+                attempt_history.end("accepted")
             summary["attempts"].append(attempt_record)
             summary["passes"] = int(summary["passes"]) + 1
             accepted_candidate = True

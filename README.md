@@ -206,6 +206,31 @@ run the deterministic build.
 kicraft build .kicraft/state.json ./generated --quality good
 ```
 
+### Placement and routing history
+
+`build`, `replay`, and `manual-route` record effective placement moves, routed
+copper changes, rejected board-changing attempts, restorations, and selection.
+The Place/Route tab offers **Watch layout history** and a self-contained HTML
+download on successful and failed builds. The file runs offline in a modern
+browser with `DecompressionStream`; no video encoder or per-frame server work
+is used. Manual routing starts from the saved layout, not earlier drag gestures.
+
+Each invocation has its own capture directory under `layout-history/`; the
+atomic `layout-history.json` pointer identifies the current capture and attempt.
+The finalized `timelapse.html` and `manifest.json` bind the selected board hash.
+Placement-model proxies are labelled separately from native pad/copper geometry.
+History completeness is independent of fabrication approval. Interrupted captures
+show usable complete gzip members and explicit gaps; the buffered tail can be
+lost. Recording failures never change the build exit code.
+
+Set `KICRAFT_LAYOUT_HISTORY=0` to disable capture. The pinned routing-tools bundle
+must advertise trace stream schema 1. To check a finalized capture and compare
+its selected final scene with a fresh native board extraction:
+
+```bash
+python -m kicraft.layout_history_export --project generated/MYPROJ --check
+```
+
 ### Using the skills in another project
 
 Copy the standards-compliant skill directories into the target project's

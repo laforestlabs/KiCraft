@@ -130,6 +130,7 @@ def test_krt_preflight_observes_runtime_and_caches_success(monkeypatch, tmp_path
     root = tmp_path / "krt"
     (root / "py_router").mkdir(parents=True)
     (root / "py_router" / "route.py").write_text("# route\n")
+    (root / "py_router" / "route_trace.py").write_text("TRACE_STREAM_SCHEMA_VERSION = 1\n")
     (root / "VERSION").write_text("0.20.2\n")
     (root / ".git").mkdir()
     calls = []
@@ -161,6 +162,7 @@ def test_krt_preflight_observes_runtime_and_caches_success(monkeypatch, tmp_path
     assert first["version"] == "0.20.2"
     assert first["commit"] == rb.KICAD_ROUTING_TOOLS_COMMIT
     assert first["native_version"] == "0.20.1"
+    assert first["trace_stream_schema"] == "1"
     assert len(calls) == 2
 
 
@@ -2007,7 +2009,7 @@ def test_usb_review_geometry_requires_explicit_opt_in_and_valid_floors(tmp_path)
 
 
 def test_usb_review_geometry_uses_native_stackup_and_rejects_impossible_floors(tmp_path):
-    root = Path("/home/kicraft/KiCadRoutingTools-8eeee55fd4ba")
+    root = Path(os.environ.get("KICRAFT_KICAD_ROUTING_TOOLS_PATH", "/home/kicraft/KiCadRoutingTools"))
     python = Path("/home/kicraft/krt-venv/bin/python")
     if not python.is_file() or not (root / "py_router" / "impedance.py").is_file():
         pytest.skip("pinned KiCadRoutingTools runtime not installed")
@@ -2068,3 +2070,195 @@ def test_usb_review_geometry_uses_native_stackup_and_rejects_impossible_floors(t
     with pytest.raises(ValueError, match="stackup"):
         rb.calculate_usb_review_geometry(board, config, _usb_contract(), nets,
                                         runtime=runtime, floors=floors, timeout=30)
+
+
+def test_real_router_stream_preserves_coincident_items_and_recovery(tmp_path, monkeypatch):
+    import gzip
+    import importlib.util
+
+    root = Path(os.environ.get("KICRAFT_KICAD_ROUTING_TOOLS_PATH", "/home/kicraft/KiCadRoutingTools"))
+    source = root / "py_router" / "route_trace.py"
+    if not os.environ.get("KICRAFT_KICAD_ROUTING_TOOLS_PATH") and (
+            not source.is_file() or "TRACE_STREAM_SCHEMA_VERSION = 1" not in source.read_text()):
+        pytest.skip("derived router source not installed")
+    assert source.is_file(), "configured router observer is missing"
+    spec = importlib.util.spec_from_file_location("krt_history_trace", source)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert module.TRACE_STREAM_SCHEMA_VERSION == 1
+    path = tmp_path / "scope.jsonl.gz"
+    monkeypatch.setenv("KICAD_ROUTE_TRACE_STREAM", str(path))
+    monkeypatch.setenv("KICAD_ROUTE_TRACE_CONTEXT", json.dumps({
+        "capture_id": "a" * 32, "scope_id": "b" * 32, "parent_scope_id": None,
+        "scope_kind": "router_pass", "label": "test", "identity": {},
+    }))
+    def segment():
+        return SimpleNamespace(start_x=1, start_y=2, end_x=3, end_y=4,
+                               width=0.2, layer="F.Cu", net_id=1)
+    first, twin = segment(), segment()
+    board = SimpleNamespace(segments=[first, twin], vias=[],
+                            board_info=SimpleNamespace(copper_layers=["F.Cu", "B.Cu"]),
+                            nets={1: SimpleNamespace(name="signal")})
+    trace = module.StreamTrace(board)
+    trace.record_add([first], [], event="route")
+    board.segments.remove(first)
+    trace.record_remove([first], [], event="rip")
+    trace.flush()
+    records = [json.loads(line) for line in gzip.decompress(path.read_bytes()).splitlines()]
+    assert [r["kind"] for r in records] == ["header", "scene", "delta"]
+    assert len(records[1]["objects"]) == 2
+    assert len(records[2]["remove"]) == 1
+    assert records[2]["remove"][0] != records[1]["objects"][1]["id"]
+    assert len(trace.live) == 1
+    board.segments.append(first)
+    trace.record_add([first], [], event="restore")
+    trace.dump("", board)
+    records = [json.loads(line) for line in gzip.decompress(path.read_bytes()).splitlines()]
+    assert records[-2]["phase"] == "restore"
+    assert records[-1]["kind"] == "end"
+    assert records[-1]["recorder_cpu_ns"] > 0
+
+
+def test_real_router_hooks_record_actual_identity_mutations(tmp_path, monkeypatch):
+    import gzip
+    import importlib
+    import importlib.util
+
+    root = Path(os.environ.get("KICRAFT_KICAD_ROUTING_TOOLS_PATH", "/home/kicraft/KiCadRoutingTools"))
+    source = root / "py_router" / "route_trace.py"
+    if not os.environ.get("KICRAFT_KICAD_ROUTING_TOOLS_PATH") and (
+            not source.is_file() or "TRACE_STREAM_SCHEMA_VERSION = 1" not in source.read_text()):
+        pytest.skip("derived router source not installed")
+    assert source.is_file(), "configured router observer is missing"
+    assert "TRACE_STREAM_SCHEMA_VERSION = 1" in source.read_text()
+    monkeypatch.syspath_prepend(str(root / "py_router"))
+    copper = importlib.import_module("pcb_modification")
+    monkeypatch.setattr(copper, "_safe_prune_net",
+                        lambda _net, segments, *_args, **_kwargs: (segments, []))
+    spec = importlib.util.spec_from_file_location("krt_hook_trace", source)
+    trace_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(trace_module)
+    path = tmp_path / "scope.jsonl.gz"
+    monkeypatch.setenv("KICAD_ROUTE_TRACE_STREAM", str(path))
+    monkeypatch.setenv("KICAD_ROUTE_TRACE_CONTEXT", json.dumps({
+        "capture_id": "a" * 32, "scope_id": "b" * 32, "parent_scope_id": None,
+        "scope_kind": "router_pass", "label": "test", "identity": {},
+    }))
+    board = SimpleNamespace(segments=[], vias=[], pads_by_net={}, zones=[],
+                            board_info=SimpleNamespace(copper_layers=["F.Cu", "B.Cu"]),
+                            nets={1: SimpleNamespace(name="N")})
+    board._route_trace = trace_module.StreamTrace(board)
+    def segment():
+        return SimpleNamespace(start_x=0, start_y=0, end_x=1, end_y=0,
+                               width=0.2, layer="F.Cu", net_id=1)
+    first, twin = segment(), segment()
+    result = {"new_segments": [first, twin], "new_vias": []}
+    copper.add_route_to_pcb_data(board, result)
+    copper.add_route_to_pcb_data(board, result)
+    copper.remove_route_from_pcb_data(board, {"new_segments": [first], "new_vias": []})
+    copper.remove_route_from_pcb_data(board, {"new_segments": [segment()], "new_vias": []})
+    board._route_trace.dump("", board)
+    records = [json.loads(line) for line in gzip.decompress(path.read_bytes()).splitlines()]
+    changes = [r for r in records if r["kind"] == "delta"]
+    assert [len(r["put"]) for r in changes] == [2, 0, 0]
+    assert [len(r["remove"]) for r in changes] == [0, 1, 1]
+    assert changes[1]["remove"] != changes[2]["remove"]
+
+
+def _installed_stream_router():
+    root = Path(os.environ.get("KICRAFT_KICAD_ROUTING_TOOLS_PATH", "/home/kicraft/KiCadRoutingTools"))
+    source = root / "py_router" / "route_trace.py"
+    configured = bool(os.environ.get("KICRAFT_KICAD_ROUTING_TOOLS_PATH"))
+    if not configured and (not source.is_file() or
+                           "TRACE_STREAM_SCHEMA_VERSION = 1" not in source.read_text()):
+        pytest.skip("derived router source not installed")
+    assert source.is_file() and "TRACE_STREAM_SCHEMA_VERSION = 1" in source.read_text()
+    return root
+
+
+def _stream_environment(tmp_path):
+    env = os.environ.copy()
+    env.update(KICAD_ROUTE_TRACE="1", KICAD_ROUTE_TRACE_STREAM=str(tmp_path / "scope.jsonl.gz"),
+               KICAD_ROUTE_TRACE_CONTEXT=json.dumps({
+                   "capture_id": "a" * 32, "scope_id": "b" * 32,
+                   "parent_scope_id": None, "scope_kind": "router_pass",
+                   "label": "test", "identity": {},
+               }))
+    return env
+
+
+def _read_stream(path):
+    import gzip
+    return [json.loads(line) for line in gzip.decompress(path.read_bytes()).splitlines()]
+
+
+def test_router_fully_connected_entry_emits_skip_scene_and_end(tmp_path):
+    root = _installed_stream_router()
+    board = tmp_path / "input.kicad_pcb"
+    board.write_text('''(kicad_pcb (version 20240108) (generator pcbnew)
+      (general (thickness 1.6))
+      (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))
+      (net 0 "") (net 1 "N")
+      (footprint "test" (layer "F.Cu") (at 5 5)
+        (property "Reference" "J1")
+        (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "N")))
+      (footprint "test" (layer "F.Cu") (at 10 5)
+        (property "Reference" "J2")
+        (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "N")))
+      (segment (start 5 5) (end 10 5) (width 0.2) (layer "F.Cu") (net 1))
+      (gr_rect (start 0 0) (end 15 10) (stroke (width 0.05) (type default)) (fill none) (layer "Edge.Cuts")))
+''')
+    python = os.environ.get("KICRAFT_KICAD_ROUTING_TOOLS_PYTHON", "/home/kicraft/krt-venv/bin/python")
+    completed = subprocess.run([python, str(root / "py_router" / "route.py"),
+                                str(board), str(tmp_path / "output.kicad_pcb"), "--nets", "N"],
+                               cwd=root, env=_stream_environment(tmp_path),
+                               capture_output=True, text=True, timeout=60)
+    assert completed.returncode == 0, completed.stderr
+    records = _read_stream(tmp_path / "scope.jsonl.gz")
+    assert records[1]["kind"] == "scene"
+    assert any(r.get("action") == "skip" and r.get("reason") == "already_connected" for r in records)
+    assert records[-1]["kind"] == "end" and records[-1]["recorder_cpu_ns"] > 0
+    assert len([o for o in records[1]["objects"] if o["type"] == "track"]) == 1
+
+
+def test_real_strict_cleanup_emits_exact_removed_copper(tmp_path, monkeypatch):
+    import importlib
+    root = _installed_stream_router()
+    monkeypatch.syspath_prepend(str(root / "py_router"))
+    for name, value in _stream_environment(tmp_path).items():
+        if name.startswith("KICAD_ROUTE_TRACE"):
+            monkeypatch.setenv(name, value)
+    parser = importlib.import_module("kicad_parser")
+    cleanup = importlib.import_module("cleanup_pipeline")
+    trace_module = importlib.import_module("route_trace")
+    config = importlib.import_module("routing_config").GridRouteConfig(clearance=0.1)
+    def pad(ref, x):
+        return parser.Pad(component_ref=ref, pad_number="1", global_x=x, global_y=0,
+                          local_x=0, local_y=0, size_x=0.6, size_y=0.6, shape="rect",
+                          layers=["F.Cu"], net_id=7, net_name="/N7", rotation=0.0)
+    def segment(x1, y1, x2, y2):
+        return parser.Segment(start_x=x1, start_y=y1, end_x=x2, end_y=y2,
+                              width=0.2, layer="F.Cu", net_id=7)
+    live, detour1, detour2 = segment(0, 0, 10, 0), segment(0, 0, 5, 4), segment(5, 4, 10, 0)
+    board = parser.PCBData(board_info=parser.BoardInfo(layers={}, copper_layers=["F.Cu", "B.Cu"],
+                                                       board_bounds=None),
+                           nets={7: parser.Net(net_id=7, name="/N7")}, footprints={},
+                           vias=[], segments=[live, detour1, detour2], pads_by_net={7: [pad("A", 0), pad("B", 10)]})
+    board._route_trace = trace_module.StreamTrace(board)
+    cleanup.run_post_route_cleanup([], board, {7}, config, snap=False, phantom=False,
+                                   graze=False, octolinear=False, via_nudge=False,
+                                   cycles=False, neck=False, smooth=False)
+    board._route_trace.dump("", board)
+    records = _read_stream(tmp_path / "scope.jsonl.gz")
+    scene = next(r for r in records if r["kind"] == "scene")
+    state = {o["id"]: o for o in scene["objects"]}
+    strict = next(r for r in records if r.get("phase") == "cleanup_strict_collapse")
+    assert len(strict["remove"]) == 2
+    for event in records:
+        if event["kind"] == "delta":
+            for key in event["remove"]:
+                del state[key]
+            state.update({obj["id"]: obj for obj in event["put"]})
+    assert [(o["start"], o["end"]) for o in state.values()] == [([0.0, 0.0], [10.0, 0.0])]
+    assert len(board.segments) == 1 and board.segments[0] is live
+    assert not any(r.get("gap") for r in records)

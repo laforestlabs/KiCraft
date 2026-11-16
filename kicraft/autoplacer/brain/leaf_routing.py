@@ -292,6 +292,8 @@ def _finish_leaf_current_landings(board_path: Path, cfg: dict[str, Any]) -> dict
             board = pcbnew.LoadBoard(str(board_path))
             pcbnew.ZONE_FILLER(board).Fill(board.Zones())
             pcbnew.SaveBoard(str(board_path), board)
+            from kicraft.autoplacer.hardware.history_geometry import capture_board
+            capture_board(board, phase="leaf_current_landings_fill")
         return result
     finally:
         for path, content in rules:
@@ -740,6 +742,25 @@ def route_local_subcircuit(
     *,
     generate_diagnostics: bool = True,
     round_index: int | None = None,
+    history=None,
+) -> tuple[dict[str, Any], dict[str, float]]:
+    from kicraft.layout_history import HistoryDescriptor, history_context
+    descriptor = history.child_descriptor() if history is not None else HistoryDescriptor.from_env()
+    with history_context(descriptor):
+        return _route_local_subcircuit_impl(
+            extraction, solved_components, cfg, generate_diagnostics=generate_diagnostics,
+            round_index=round_index, history=history,
+        )
+
+
+def _route_local_subcircuit_impl(
+    extraction: ExtractedSubcircuitBoard,
+    solved_components: dict[str, Component],
+    cfg: dict[str, Any],
+    *,
+    generate_diagnostics: bool = True,
+    round_index: int | None = None,
+    history=None,
 ) -> tuple[dict[str, Any], dict[str, float]]:
     fast_smoke_mode = bool(cfg.get("subcircuit_fast_smoke_mode", False))
     # Intermediate per-round diagnostics: headless build/worker runs set
@@ -784,6 +805,8 @@ def route_local_subcircuit(
         # workflow as every other leaf -- pin_best_leaves can promote it,
         # the GUI snapshot picker shows its rounds, and the composer reads
         # uniformly from leaf_routed.kicad_pcb.
+        if history is not None:
+            history.decision("skip", phase="leaf_router", reason="no routable internal nets")
         return _stamp_trivial_leaf(
             extraction=extraction,
             solved_components=solved_components,
@@ -792,6 +815,7 @@ def route_local_subcircuit(
             generate_diagnostics=generate_diagnostics,
             render_intermediate=render_intermediate,
             fast_smoke_mode=fast_smoke_mode,
+            history=history,
         )
 
     artifact_paths = resolve_artifact_paths(
@@ -1348,12 +1372,16 @@ def route_local_subcircuit(
         shutil.copyfile(_cache_pcb, routed_board)
         routing_stats = json.loads(_cache_meta.read_text())
         routing_stats["route_cache_hit"] = True
+        if history is not None:
+            history.decision("reuse", phase="leaf_route_cache", reason="deterministic route cache hit",
+                             source=_cache_pcb.name)
         print("  [route-cache] deterministic leaf unchanged -> reused routed board (skipped KRT)")
     else:
         routing_stats = route_with_kicad_routing_tools(
             str(pre_route_board),
             str(routed_board),
             leaf_routing_cfg,
+            history=history,
         )
         if _ground_marker:
             from kicraft.autoplacer.kicad_routing_tools import _strip_router_keepouts
@@ -1462,6 +1490,10 @@ def route_local_subcircuit(
     if _new_outline is not None:
         _new_tl, _new_br = _new_outline
         _delta, _centered_outline = _center_on_leaf_page(_new_tl, _new_br, cfg)
+        if history is not None:
+            history.decision("restore", phase="frame-transform",
+                             reason="Recenter board frame; not optimization",
+                             frame_transform={"translation": [_delta.x, _delta.y], "rotation": 0})
         if abs(_delta.x) > 1e-6 or abs(_delta.y) > 1e-6:
             from kicraft.autoplacer.brain.leaf_geometry import (
                 copy_components_with_translation,
@@ -1982,6 +2014,7 @@ def _stamp_trivial_leaf(
     generate_diagnostics: bool,
     render_intermediate: bool,
     fast_smoke_mode: bool,
+    history=None,
 ) -> tuple[dict[str, Any], dict[str, float]]:
     """Stamp a placed-but-not-routed PCB for a leaf with no internal nets.
 
@@ -2068,6 +2101,10 @@ def _stamp_trivial_leaf(
     if _new_outline is not None:
         _new_tl, _new_br = _new_outline
         _delta, _centered_outline = _center_on_leaf_page(_new_tl, _new_br, cfg)
+        if history is not None:
+            history.decision("restore", phase="frame-transform",
+                             reason="Recenter board frame; not optimization",
+                             frame_transform={"translation": [_delta.x, _delta.y], "rotation": 0})
         if abs(_delta.x) > 1e-6 or abs(_delta.y) > 1e-6:
             from kicraft.autoplacer.brain.leaf_geometry import (
                 copy_components_with_translation,
@@ -2116,6 +2153,8 @@ def _stamp_trivial_leaf(
         _filled_board = pcbnew.LoadBoard(str(routed_board))
         pcbnew.ZONE_FILLER(_filled_board).Fill(_filled_board.Zones())
         _filled_board.Save(str(routed_board))
+        from kicraft.autoplacer.hardware.history_geometry import capture_board
+        capture_board(_filled_board, phase="leaf_ground_finish_fill")
     _finish_leaf_ground_planes(routed_board, cfg)
     from kicraft.autoplacer.brain.gnd_pour import finish_local_thermal_ground
     finish_local_thermal_ground(str(routed_board), cfg)

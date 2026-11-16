@@ -1810,6 +1810,7 @@ class ArtifactPaths(BaseModel):
     fab_zip: Path | None = None  # set by `build`: zipped Gerber/drill/CPL/BOM package
     step_file: Path | None = None  # STEP export; body-reference coverage may be partial
     board_3d_png: Path | None = None  # set by `build`: rendered 3D view of the board
+    layout_history_manifest: Path | None = None
     # None = unmeasured/uninterpretable; [] = every expected assembly ref occurs.
     # Occurrence presence alone does not qualify model geometry or placement.
     step_model_missing_refs: list[str] | None = None

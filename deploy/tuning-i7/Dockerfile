@@ -17,7 +17,7 @@ COPY kicad-routing-tools-connectivity.bundle /tmp/kicad-routing-tools-connectivi
 RUN git clone https://github.com/drandyhaas/KiCadRoutingTools.git /opt/KiCadRoutingTools \
  && git -C /opt/KiCadRoutingTools checkout 3ceb773722bea67aa3685e7ee430c0c0d17ef38d \
  && git -C /opt/KiCadRoutingTools fetch /tmp/kicad-routing-tools-connectivity.bundle main \
- && git -C /opt/KiCadRoutingTools checkout 8eeee55fd4ba4ed600b11bd8214de9994e8f5396 \
+ && git -C /opt/KiCadRoutingTools checkout f6fa93122db463ff3f3a1617605c69f7959d2cd9 \
  && python3 -m venv --system-site-packages /opt/krt-venv \
  && /opt/krt-venv/bin/pip install --no-cache-dir -r /opt/KiCadRoutingTools/requirements.txt \
  && cd /opt/KiCadRoutingTools \

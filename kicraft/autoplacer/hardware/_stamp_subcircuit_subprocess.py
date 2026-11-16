@@ -290,6 +290,9 @@ def main(argv: list[str]) -> int:
         # A previous round's valid file must never stand in for a failed save.
         print(f"SELF_LOAD_FAILED save_status={_save_status!r} output={_out_path!r}")
         return 2
+    from kicraft.autoplacer.hardware.history_geometry import capture_board, close_native_history
+    capture_board(board, phase="leaf_stamp")
+    close_native_history()
 
     # pcbnew.Save() emits a sidecar .kicad_pro with KiCad defaults.
     # Overwrite with the source PCB's pro so kicad-cli pcb drc sees

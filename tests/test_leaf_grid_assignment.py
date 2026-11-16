@@ -340,3 +340,41 @@ def test_resnap_exclude_preserves_step16_moves():
     moved_x = comps["C1"].pos.x
     assert resnap_to_grid(comps, grid, exclude={"C1"}) == 0
     assert comps["C1"].pos.x == moved_x
+
+
+def test_grid_history_preserves_rng_and_reconstructs_discarded_input(tmp_path):
+    import gzip
+    import json
+
+    from kicraft.layout_history import HistoryDescriptor
+
+    def run(history):
+        u1 = _ic_4pads()
+        comps = {u1.ref: u1, "C1": _decap("C1", 52.0, 52.0)}
+        state = _state(comps)
+        grid = build_anchor_grid(comps, board_outline=BOARD, pitch_gap_mm=1.0)
+        rng = random.Random(0)
+        best = grid_assignment_sa(comps, grid, state, _CollapseScorer(state),
+                                  rng=rng, history=history, max_iters=60)
+        return best, grid, rng.getstate()
+
+    writer = HistoryDescriptor(str(tmp_path), "b" * 32).writer("placement", "test", {})
+    plain, plain_grid, plain_rng = run(None)
+    captured, grid, captured_rng = run(writer)
+    writer.end("complete")
+    assert plain_rng == captured_rng
+    assert plain_grid.stats == grid.stats
+    assert plain["C1"].pos == captured["C1"].pos
+    records = [json.loads(line) for line in gzip.decompress(writer.path.read_bytes()).splitlines()]
+    assert any(r.get("phase") == "grid_guard" and r["action"] == "reject"
+               and r["grid_discarded"] for r in records)
+    objects = {}
+    for record in records:
+        if record["kind"] == "scene":
+            objects = {obj["id"]: obj for obj in record["objects"]}
+        elif record["kind"] == "delta":
+            for key in record["remove"]:
+                objects.pop(key)
+            objects.update({obj["id"]: obj for obj in record["put"]})
+    pose = objects["footprint:C1"]["pose"]
+    assert (pose["x"], pose["y"]) == (captured["C1"].pos.x, captured["C1"].pos.y)

@@ -333,6 +333,9 @@ def main(argv: list[str]) -> int:
 
     board.BuildConnectivity()
     board.Save(_out_path)
+    from kicraft.autoplacer.hardware.history_geometry import capture_board, close_native_history
+    capture_board(board, phase="parent_stamp")
+    close_native_history()
     # Success sentinel (must match routing_board._PCBNEW_OK_SENTINEL) so a
     # pcbnew/wx teardown SIGSEGV after this successful Save is not mistaken for
     # a stamping failure by _retry_pcbnew_run.

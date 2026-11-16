@@ -273,6 +273,8 @@ class StagePanel:
                     )
                 )
                 with insp:
+                    # Independent from board/gallery rebuilds and inspector polling.
+                    self.history_slot = ui.column().classes("w-full p-2 gap-2")
                     self.view_slot = ui.column().classes("w-full p-2 gap-2")
                     # Persistent issues for THIS stage (severity, message, code,
                     # evidence, jump-to-stage). Kept out of _insp so rebuilding the
@@ -361,6 +363,7 @@ class StagePanel:
         self.issues_slot.set_visibility(False)
         self._issues_sig = ()
         self.view_slot.clear()
+        self.history_slot.clear()
         self._insp.clear()
         self._think.clear()
         self._act.clear()
@@ -1960,6 +1963,10 @@ class StageTabs:
     def view_slot(self, key: str):
         """The empty column at the top of a panel's inspector for KiCanvas/download."""
         return self.panels[key].view_slot
+
+    def history_slot(self, key: str):
+        """Persistent controls, unaffected by board/gallery and inspector refreshes."""
+        return self.panels[key].history_slot
 
     def on_show(self, key: str, fn) -> None:
         """Run `fn` when `key`'s tab becomes the visible one (see _on_tab_change)."""

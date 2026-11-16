@@ -47,6 +47,8 @@ def _cleanup_native(board_path: str, ownership_path: str, receipt_path: str) -> 
     board = pcbnew.LoadBoard(board_path)
     if board is None:
         raise ValueError("could not load cleanup board")
+    from kicraft.autoplacer.hardware.history_geometry import capture_board
+    capture_board(board, phase="signal_escape_cleanup_input")
     ownership = json.loads(Path(ownership_path).read_text())
     if ownership.get("version") != 1:
         raise ValueError("unsupported escape ownership receipt")
@@ -229,6 +231,9 @@ def _cleanup_native(board_path: str, ownership_path: str, receipt_path: str) -> 
             retained.append({"branch": list(group), "reason": "proof_failed", "detail": str(exc)})
     if removed:
         board.Save(board_path)
+        from kicraft.autoplacer.hardware.history_geometry import close_native_history
+        capture_board(board, phase="signal_escape_cleanup")
+        close_native_history()
     receipt = {"version": 1, "ownership_sha256": _sha(ownership_path),
                "board_before_sha256": before_sha, "board_after_sha256": _sha(board_path),
                "accepted": not any(row["reason"] in {

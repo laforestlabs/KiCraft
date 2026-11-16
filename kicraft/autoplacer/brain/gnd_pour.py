@@ -251,6 +251,8 @@ def finish_local_thermal_ground(pcb_path: str, cfg: dict[str, Any]) -> int:
         try:
             pcbnew.ZONE_FILLER(board).Fill(board.Zones())
             board.Save(pcb_path)
+            from kicraft.autoplacer.hardware.history_geometry import capture_board
+            capture_board(board, phase="thermal_ground_fill")
         finally:
             for path, content in rules:
                 if content is None:
@@ -259,6 +261,8 @@ def finish_local_thermal_ground(pcb_path: str, cfg: dict[str, Any]) -> int:
                     path.write_bytes(content)
 
     board = pcbnew.LoadBoard(pcb_path)
+    from kicraft.autoplacer.hardware.history_geometry import capture_board
+    capture_board(board, phase="thermal_ground_input")
     net_name = cfg.get("gnd_zone_net", "GND")
     net = board.GetNetInfo().GetNetItem(net_name)
     if not net or not net.GetNetCode():
@@ -394,6 +398,8 @@ def pour_gnd_planes(
     if not gnd_name:
         return {"zones": 0}
     board = pcbnew.LoadBoard(pcb_path)
+    from kicraft.autoplacer.hardware.history_geometry import capture_board
+    capture_board(board, phase="ground_plane_input")
     gnd_net = board.GetNetInfo().GetNetItem(gnd_name)
     if not gnd_net or gnd_net.GetNetCode() == 0:
         return {"zones": 0, "error": f"net {gnd_name!r} not found"}
@@ -449,6 +455,8 @@ def pour_gnd_planes(
 
     pcbnew.ZONE_FILLER(board).Fill(board.Zones())
     board.Save(pcb_path)
+    from kicraft.autoplacer.hardware.history_geometry import capture_board
+    capture_board(board, phase="ground_plane_fill")
     return {"zones": zones}
 
 
@@ -570,6 +578,8 @@ def _pour_power_planes(
         return summary
 
     board = pcbnew.LoadBoard(pcb_path)
+    from kicraft.autoplacer.hardware.history_geometry import capture_board
+    capture_board(board, phase="power_plane_input")
     power_nets = _detect_power_nets(board, cfg)
     if not power_nets:
         return summary
@@ -643,6 +653,8 @@ def _pour_power_planes(
     # Fill every zone together so priorities resolve power vs. GND overlap.
     pcbnew.ZONE_FILLER(board).Fill(board.Zones())
     board.Save(pcb_path)
+    from kicraft.autoplacer.hardware.history_geometry import capture_board
+    capture_board(board, phase="power_plane_fill")
     return summary
 
 
@@ -970,6 +982,8 @@ def repair_stranded_net(
         return summary
 
     board = pcbnew.LoadBoard(pcb_path)
+    from kicraft.autoplacer.hardware.history_geometry import capture_board
+    capture_board(board, phase="ground_island_tie_input")
     max_tie_mm = float(cfg.get("gnd_strand_repair_max_mm", 30.0))
 
     clusters, all_nodes = _collect_net_clusters(board, net_name)
@@ -1059,6 +1073,8 @@ def repair_stranded_net(
         board = pcbnew.LoadBoard(pcb_path)
         pcbnew.ZONE_FILLER(board).Fill(board.Zones())
         board.Save(pcb_path)
+        from kicraft.autoplacer.hardware.history_geometry import capture_board
+        capture_board(board, phase="ground_island_tie_fill")
         # Verify on the refilled board: a tie that stamped but did not merge
         # its cluster (wrong pad, wrong layer, refill split) must be LOUD --
         # the silent version shipped boards whose ratsnest still showed the
@@ -1141,6 +1157,8 @@ def _repair_ground_anchor_detours(pcb_path: str, cfg: dict[str, Any]) -> int:
                         updated = pcbnew.LoadBoard(pcb_path)
                         pcbnew.ZONE_FILLER(updated).Fill(updated.Zones())
                         updated.Save(pcb_path)
+                        from kicraft.autoplacer.hardware.history_geometry import capture_board
+                        capture_board(updated, phase="ground_island_repair_fill")
                         return 1
                 if attempts >= max_attempts:
                     break
@@ -1261,6 +1279,8 @@ def add_gnd_pour_and_thermal_vias(
         return summary
 
     board = pcbnew.LoadBoard(pcb_path)
+    from kicraft.autoplacer.hardware.history_geometry import capture_board
+    capture_board(board, phase="ground_finishing_input")
     if any(board.FindFootprintByReference(r["owner_ref"]) is not None
            for r in cfg.get("thermal_requirements", [])):
         from pathlib import Path
@@ -1643,6 +1663,8 @@ def add_gnd_pour_and_thermal_vias(
     #         board outline -- exactly the guards a routed board demands.
     if escape_pads:
         board.Save(pcb_path)
+        from kicraft.autoplacer.hardware.history_geometry import capture_board
+        capture_board(board, phase="ground_escape_pads")
         try:
             from kicraft.autoplacer.brain.breakout_stubs import (
                 BreakoutSpec,
@@ -1718,6 +1740,8 @@ def add_gnd_pour_and_thermal_vias(
     summary["zone_filled"] = True
 
     board.Save(pcb_path)
+    from kicraft.autoplacer.hardware.history_geometry import capture_board
+    capture_board(board, phase="ground_plane_construction")
 
     # A stack with inner copper layers carries its planes there (signals keep the outer
     # pair), so the GND plane grows to the inner layers. The single-zone block above only
@@ -1919,6 +1943,8 @@ def stamp_gnd_edge_spine(
         board = pcbnew.LoadBoard(pcb_path)
         pcbnew.ZONE_FILLER(board).Fill(board.Zones())
         board.Save(pcb_path)
+        from kicraft.autoplacer.hardware.history_geometry import capture_board
+        capture_board(board, phase="ground_stitch_fill")
         del board
     return summary
 
@@ -2087,6 +2113,8 @@ def repair_parent_gnd_islands(
     for iteration in range(1, max_iter + 1):
         vias_before = summary["vias"]
         board = pcbnew.LoadBoard(pcb_path)
+        from kicraft.autoplacer.hardware.history_geometry import capture_board
+        capture_board(board, phase="ground_island_iteration_input")
         clusters, all_nodes = _collect_net_clusters(board, gnd_name)
         n_clusters = len(clusters)
         summary["iterations"] = iteration
@@ -2159,6 +2187,8 @@ def repair_parent_gnd_islands(
 
         # Save vias, then run the track-based repair
         board.Save(pcb_path)
+        from kicraft.autoplacer.hardware.history_geometry import capture_board
+        capture_board(board, phase="ground_island_vias")
         del board
 
         if summary["vias"] > vias_before:
@@ -2166,6 +2196,7 @@ def repair_parent_gnd_islands(
             board = pcbnew.LoadBoard(pcb_path)
             pcbnew.ZONE_FILLER(board).Fill(board.Zones())
             board.Save(pcb_path)
+            capture_board(board, phase="ground_island_via_fill")
             del board
 
         # Run track-based repair
@@ -2194,6 +2225,8 @@ def repair_parent_gnd_islands(
     board = pcbnew.LoadBoard(pcb_path)
     pcbnew.ZONE_FILLER(board).Fill(board.Zones())
     board.Save(pcb_path)
+    from kicraft.autoplacer.hardware.history_geometry import capture_board
+    capture_board(board, phase="ground_island_final_fill")
     clusters, _ = _collect_net_clusters(board, gnd_name)
     summary["clusters"] = len(clusters)
     summary["unresolved"] = max(0, len(clusters) - 1)

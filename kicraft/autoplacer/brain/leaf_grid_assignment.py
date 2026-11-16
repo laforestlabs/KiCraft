@@ -595,6 +595,7 @@ def grid_assignment_sa(
     scorer,
     *,
     rng,
+    history=None,
     max_iters: int = 300,
     init_temp: float = 5.0,
     cooling_rate: float = 0.995,
@@ -637,8 +638,12 @@ def grid_assignment_sa(
     work_state.components = input_comps
     input_score = scorer.score().total
     input_pin_mm = _median_pin_mm(input_comps, plane_nets)
+    if history:
+        history.placement(input_comps, phase="grid_input", metrics={"score": input_score})
 
     assign_initial(comps, grid, plane_nets)
+    if history:
+        history.placement(comps, phase="grid_initial_assignment")
     if not grid.occupied_by_ref:
         grid.stats.update({
             "grid_discarded": True,
@@ -646,6 +651,10 @@ def grid_assignment_sa(
             "input_score": round(input_score, 2),
             "input_pin_median_mm": _round_mm(input_pin_mm),
         })
+        if history:
+            history.placement(input_comps, phase="grid_input_restore")
+            history.decision("restore", phase="grid_input_restore", reason="no_occupants",
+                             grid_discarded=True, guard="no_occupants")
         return input_comps
 
     work_state.components = comps
@@ -660,7 +669,7 @@ def grid_assignment_sa(
     temp_floor = init_temp * 0.001
     since_improve = 0
 
-    for _ in range(max_iters):
+    for iteration in range(max_iters):
         occupied = sorted(grid.occupied_by_ref.keys())
         roll = rng.random()
         undo = None
@@ -668,6 +677,7 @@ def grid_assignment_sa(
         if roll < swap_prob and len(occupied) >= 2:
             a, b = rng.sample(occupied, 2)
             _swap(comps, grid, a, b)
+            moved_refs = (a, b)
             undo = lambda a=a, b=b: _swap(comps, grid, a, b)  # swap is its own inverse
         elif roll < swap_prob + move_prob and grid.free:
             a = rng.choice(occupied)
@@ -677,6 +687,7 @@ def grid_assignment_sa(
                 continue
             new_rot = _pick_rotation(grid.slots[dest].admitted_rotations, old_rot)
             _move_to(comps, grid, a, dest, new_rot)
+            moved_refs = (a,)
             undo = lambda a=a, src=src, old_rot=old_rot: _move_to(comps, grid, a, src, old_rot)
         else:
             a = rng.choice(occupied)
@@ -686,6 +697,7 @@ def grid_assignment_sa(
             if not cands:
                 continue
             _rerotate(comps, grid, a, rng.choice(cands))
+            moved_refs = (a,)
             undo = lambda a=a, old_rot=old_rot: _rerotate(comps, grid, a, old_rot)
 
         work_state.components = comps
@@ -701,6 +713,10 @@ def grid_assignment_sa(
                 since_improve = 0
             else:
                 since_improve += 1
+            if history:
+                history.placement(comps, phase="grid_accepted", iteration=iteration,
+                                  refs=moved_refs, metrics={"score": new_score,
+                                                           "became_best": since_improve == 0})
         else:
             undo()
             since_improve += 1
@@ -735,6 +751,9 @@ def grid_assignment_sa(
         "grid_pin_median_mm": _round_mm(best_pin_mm),
         "seated": len(best_assign),
     })
+    if history:
+        history.decision("select" if keep else "reject", phase="grid_guard", reason=verdict,
+                         **grid.stats)
 
     # Guard fired: keep the input placement verbatim and neutralize the grid so
     # the caller's resnap_to_grid finds no occupants and leaves it untouched.
@@ -744,6 +763,10 @@ def grid_assignment_sa(
         grid.free = set(range(len(grid.slots)))
         grid.occupied_by_ref = {}
         grid.rotation_by_ref = {}
+        if history:
+            history.placement(input_comps, phase="grid_input_restore",
+                              metrics={"score": input_score})
+            history.decision("restore", phase="grid_input_restore", reason=verdict)
         return input_comps
 
     # Restore grid bookkeeping to the best assignment so a downstream re-snap
@@ -758,6 +781,9 @@ def grid_assignment_sa(
         grid.slots[sid].occupant = ref
         grid.occupied_by_ref[ref] = sid
         grid.rotation_by_ref[ref] = best_rot[ref]
+    if history:
+        history.placement(best_comps, phase="grid_best_restore", metrics={"score": best})
+        history.decision("restore", phase="grid_best_restore", reason=verdict)
     return best_comps
 
 

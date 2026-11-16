@@ -200,6 +200,8 @@ def materialize_sibling(
     sib_solved_layout = remap_solved_layout(
         rep_solved_layout, ref_map, net_map, _sibling_identity(sib_node)
     )
+    # A remapped replica cannot reference the representative's original refs.
+    sib_solved_layout.pop("layout_history_source", None)
     sib_solved_layout["artifact_paths"] = dict(sib_paths)
     Path(sib_paths["solved_layout_json"]).write_text(
         json.dumps(sib_solved_layout, indent=2, default=str), encoding="utf-8"
@@ -260,6 +262,13 @@ def materialize_sibling(
     Path(sib_paths["debug_json"]).write_text(
         json.dumps(debug_payload, indent=2, default=str), encoding="utf-8"
     )
+    from kicraft.layout_history import history_from_env
+    history = history_from_env("leaf", "replicated leaf", {"instance_path": sib_node.id.instance_path})
+    if history:
+        history.decision("reuse", phase="materialize_sibling",
+                         source_instance_path=rep_metadata.get("instance_path"),
+                         ref_map=ref_map, net_map=net_map)
+        history.end("completed")
 
     return sib_metadata
 
@@ -323,6 +332,7 @@ def finalize_leaf_replication(project_dir: str | Path) -> int:
             if isinstance(sib_meta.get("subcircuit_id"), dict):
                 sib_identity["subcircuit_id"] = sib_meta["subcircuit_id"]
             new_sib = remap_solved_layout(rep_solved, ref_map, net_map, sib_identity)
+            new_sib.pop("layout_history_source", None)
             new_sib["artifact_paths"] = sib_meta.get("artifact_paths", {})
             (sib_dir / "solved_layout.json").write_text(
                 json.dumps(new_sib, indent=2, default=str), encoding="utf-8"
@@ -352,6 +362,13 @@ def finalize_leaf_replication(project_dir: str | Path) -> int:
                 (sib_dir / "leaf_routed.kicad_pcb").write_text(
                     text, encoding="utf-8"
                 )
+            from kicraft.layout_history import history_from_env
+            history = history_from_env("leaf", "finalized replica",
+                                       {"instance_path": sib_meta.get("instance_path")})
+            if history:
+                history.decision("reuse", phase="finalize_sibling", source_instance_path=rep_ip,
+                                 ref_map=ref_map, net_map=net_map)
+                history.end("completed")
             refreshed += 1
         except Exception as exc:  # pragma: no cover - defensive
             log.warning(

@@ -5126,7 +5126,8 @@ def _quality_presets() -> dict:
 
 
 def _run_layout(
-    quality: str, root_sch: Path, pcb: Path, *, seed: int | None = None, route: bool = True
+    quality: str, root_sch: Path, pcb: Path, *, seed: int | None = None, route: bool = True,
+    history=None,
 ) -> int:
     """Run the placement+routing engine in-process (inherits this env's pcbnew).
 
@@ -5191,7 +5192,7 @@ def _run_layout(
         argv = [str(root_sch), "--pcb", str(pcb), *seed_args]
         if route:
             argv.append("--route")
-        return _solve_hierarchy_main(argv)
+        return _solve_hierarchy_main(argv, **({"history": history} if history else {}))
     from kicraft.cli.autoexperiment import main as _autoexperiment_main
 
     if not route:
@@ -5237,7 +5238,8 @@ def _run_layout(
             "--leaf-rounds",
             str(preset["leaf_attempts"]),
             *leaf_wall_args,
-        ]
+        ],
+        **({"history": history} if history else {}),
     )
     if leaf_rc != 0:
         return leaf_rc
@@ -5249,7 +5251,8 @@ def _run_layout(
         parent_wall_args = ["--max-wall-s", str(_remaining)]
     print(f"[build]   parent phase: {preset['parent_rounds']} round(s) from pinned leaves ...")
     return _autoexperiment_main(
-        common + ["--parents-only", "--rounds", str(preset["parent_rounds"]), *parent_wall_args]
+        common + ["--parents-only", "--rounds", str(preset["parent_rounds"]), *parent_wall_args],
+        **({"history": history} if history else {}),
     )
 
 
@@ -7802,6 +7805,32 @@ def _preflight_project_router(project_dir: Path) -> dict[str, str]:
 
 
 def _cmd_manual_route(args: argparse.Namespace) -> int:
+    from kicraft.layout_history import run_capture
+    try:
+        state = _load_state(Path(args.state))
+        project_dir = Path(args.out_dir)
+        stem = state.project_stem
+        if stem and project_dir.name != stem:
+            project_dir /= stem
+        if not stem or not project_dir.is_dir():
+            return _cmd_manual_route_impl(args)
+    except (OSError, ValueError):
+        return _cmd_manual_route_impl(args)
+    rc, manifest = run_capture(
+        project_dir, project_dir / f"{stem}.kicad_pcb", lambda: _cmd_manual_route_impl(args),
+    )
+    if manifest is not None:
+        try:
+            state = _load_state(Path(args.state))
+            if state.artifacts is not None:
+                state.artifacts.layout_history_manifest = manifest
+                _persist_artifacts(state, Path(args.state), state.artifacts)
+        except (OSError, ValueError) as exc:
+            print(f"[layout-history] artifact persistence failed: {exc}", file=sys.stderr)
+    return rc
+
+
+def _cmd_manual_route_impl(args: argparse.Namespace) -> int:
     """Route + promote a saved manual layout, end to end.
 
     Expects a workspace that already carries a synthesized project
@@ -7888,7 +7917,12 @@ def _cmd_manual_route(args: argparse.Namespace) -> int:
             str(project_dir / ".experiments" / "manual" / "manual_routed.json"),
             "--route",
         ]
-        rc = subprocess.run(cmd, cwd=str(project_dir)).returncode
+        from kicraft.layout_history import HistoryDescriptor
+        descriptor = HistoryDescriptor.from_env()
+        rc = subprocess.run(
+            cmd, cwd=str(project_dir),
+            **({"env": descriptor.child_env()} if descriptor else {}),
+        ).returncode
         if rc != 0:
             print(f"error: manual compose/route exited {rc}", file=sys.stderr)
             _write_manual_route_result(project_dir, rc=6, stage="route")
@@ -8110,7 +8144,22 @@ def _cmd_build_impl(args: argparse.Namespace) -> int:
         )
 
 
-def _layout_route_fab(
+def _layout_route_fab(args, state, state_path, artifacts, results, stem: str,
+                      project_dir: Path, root_sch: Path, pcb: Path) -> int:
+    from kicraft.layout_history import run_capture
+    rc, manifest = run_capture(
+        project_dir, pcb,
+        lambda: _layout_route_fab_impl(
+            args, state, state_path, artifacts, results, stem, project_dir, root_sch, pcb,
+        ),
+    )
+    if artifacts is not None:
+        artifacts.layout_history_manifest = manifest
+        _persist_artifacts(state, state_path, artifacts)
+    return rc
+
+
+def _layout_route_fab_impl(
     args,
     state,
     state_path,
@@ -8214,7 +8263,9 @@ def _layout_route_fab(
     print(
         f"[build] 2/5 {action} (quality={args.quality}, seed={seed_label}) -- may take minutes ..."
     )
-    rc = _run_layout(args.quality, root_sch, pcb, seed=seed, route=route)
+    from kicraft.layout_history import HistoryDescriptor
+    rc = _run_layout(args.quality, root_sch, pcb, seed=seed, route=route,
+                     history=HistoryDescriptor.from_env())
 
     # Pre-render the manual-layout canvas PNG for every solved leaf while
     # we're in the worker process (blocking on kicad-cli is free here), so

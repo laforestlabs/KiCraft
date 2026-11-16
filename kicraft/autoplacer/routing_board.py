@@ -28,6 +28,10 @@ def _kicad_subprocess_env() -> dict[str, str]:
     Python processes. This adds common KiCad locations to PYTHONPATH.
     """
     env = os.environ.copy()
+    from kicraft.layout_history import HistoryDescriptor
+    descriptor = HistoryDescriptor.from_env()
+    if descriptor is not None:
+        env = descriptor.child_env(env)
 
     candidates = []
     ver = f"{sys.version_info.major}.{sys.version_info.minor}"

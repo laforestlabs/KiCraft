@@ -312,8 +312,9 @@ class PlacementSolver:
     when score improvement plateaus.
     """
 
-    def __init__(self, state: BoardState, config: dict = None, seed: int = 0):
+    def __init__(self, state: BoardState, config: dict = None, seed: int = 0, *, history=None):
         self.state = state
+        self.history = history
         # Effective config is solver-local: inferred antenna defaults never
         # mutate the caller's project config.
         self.cfg = copy.deepcopy(config or {})
@@ -384,6 +385,8 @@ class PlacementSolver:
 
         # Deep copy so we don't mutate the original
         comps = {ref: copy.deepcopy(c) for ref, c in self.state.components.items()}
+        if self.history:
+            self.history.placement(comps, phase="initial")
         # Build a working state for scoring
         work_state = copy.copy(self.state)
         work_state.components = comps
@@ -399,6 +402,8 @@ class PlacementSolver:
         array_refs, array_fully_handled = place_array_leaves(
             comps, self.cfg.get("arrays", []) or [], self.cfg
         )
+        if self.history:
+            self.history.placement(comps, phase="array_placement")
         if array_refs:
             print(
                 f"  Grid-placed {len(array_refs)} array member(s)"
@@ -432,13 +437,19 @@ class PlacementSolver:
             # Step 0.5: Assign layers BEFORE edge pinning so pad positions
             # reflect the flip when computing connector placement
             self._assign_layers(comps)
+            if self.history:
+                self.history.placement(comps, phase="assign_layers")
 
             # Step 1: Pin edge components (connectors, mounting holes)
             self._pin_edge_components(comps)
+            if self.history:
+                self.history.placement(comps, phase="pin_edges")
 
         with _timed_phase(phase_t, "solve_align_pairs_ms", capture_comps=lambda: comps):
             # Step 1.3: Align large paired components side-by-side
             self._align_large_pairs(comps)
+            if self.history:
+                self.history.placement(comps, phase="align_pairs")
 
         with _timed_phase(phase_t, "solve_clusters_ms", capture_comps=lambda: comps):
             # Step 1.5: Use explicit IC groups to boost connectivity weights
@@ -488,6 +499,8 @@ class PlacementSolver:
         with _timed_phase(phase_t, "solve_place_clusters_ms", capture_comps=lambda: comps):
             # Step 3: Initial cluster placement (with seeded jitter)
             self._place_clusters(comps, clusters, conn_graph)
+            if self.history:
+                self.history.placement(comps, phase="cluster_initialization")
 
         with _timed_phase(phase_t, "solve_intra_cluster_ms", capture_comps=lambda: comps):
             # Step 4: Optimize layout within each cluster before global layout
@@ -557,12 +570,19 @@ class PlacementSolver:
             if iteration % self.score_every_n == 0:
                 work_state.components = comps
                 s = scorer.score()
+                if prefer_legal:
+                    diag = self.legality_diagnostics(comps)
+                    violations = diag["overlap_count"] + diag["pad_outside_count"]
+                if self.history:
+                    became_best = (violations < best_violations or (
+                        violations == best_violations and s.total > best_score.total
+                    )) if prefer_legal else s.total > best_score.total
+                    self.history.placement(comps, phase="force_iteration", iteration=iteration,
+                                           metrics={"score": s.total, "became_best": became_best})
                 # When prefer_legal_states is on, factor legality into
                 # best-state selection: fewer violations wins even if
                 # placement score is slightly lower.
                 if prefer_legal:
-                    diag = self.legality_diagnostics(comps)
-                    violations = diag["overlap_count"] + diag["pad_outside_count"]
                     # Accept if: fewer violations, OR same violations + better score
                     if violations < best_violations or (
                         violations == best_violations and s.total > best_score.total
@@ -575,6 +595,9 @@ class PlacementSolver:
                         stagnant += 1
                         if stagnant >= 3 and stagnant % 3 == 0:
                             comps = {r: copy.deepcopy(c) for r, c in best_comps.items()}
+                            if self.history:
+                                self.history.placement(comps, phase="force_restore", iteration=iteration)
+                                self.history.decision("restore", phase="force_restore", reason="stagnation")
                 elif s.total > best_score.total:
                     best_score = s
                     best_comps = {r: copy.deepcopy(c) for r, c in comps.items()}
@@ -583,10 +606,16 @@ class PlacementSolver:
                     stagnant += 1
                     if stagnant >= 3 and stagnant % 3 == 0:
                         comps = {r: copy.deepcopy(c) for r, c in best_comps.items()}
+                        if self.history:
+                            self.history.placement(comps, phase="force_restore", iteration=iteration)
+                            self.history.decision("restore", phase="force_restore", reason="stagnation")
 
                 if stagnant >= 20:
                     print(f"  Converged at iteration {iteration + 1}")
                     break
+            elif self.history:
+                self.history.placement(comps, phase="force_iteration", iteration=iteration,
+                                       metrics={"became_best": False})
 
             if max_disp < self.convergence_threshold and iteration > 30:
                 print(f"  Displacement converged at iteration {iteration + 1}")
@@ -626,11 +655,16 @@ class PlacementSolver:
         # of best_comps so the diagnostic compares apples-to-apples with
         # the SA phase that consumes best_comps as its input.
         _record_placed_extent(phase_t, "solve_force_loop", best_comps)
+        if self.history:
+            self.history.placement(best_comps, phase="force_best_restore")
+            self.history.decision("restore", phase="force_best_restore", reason="selected_best")
 
         # Reserve mandatory owned supply groups before the passive grid spends
         # their pin-adjacent space. The normal legalizers then move unowned
         # components around these locked, courtyard-legal groups.
         self._reserve_local_bypasses(best_comps)
+        if self.history:
+            self.history.placement(best_comps, phase="reserve_local_bypasses")
 
         # Discrete anchor-relative grid (connectivity-first) is the leaf placement
         # path: with the anchors placed, derive pin-adjacent slots from their pad
@@ -733,6 +767,8 @@ class PlacementSolver:
             # current group mean and redistributes at fixed pitch.
             if alignment_groups:
                 apply_alignment_repair(best_comps, alignment_groups)
+            if self.history:
+                self.history.placement(best_comps, phase="alignment_repair")
 
         with _timed_phase(phase_t, "solve_swap_opt_ms", capture_comps=lambda: best_comps):
             # Step 7: Swap optimization — directly minimize crossovers. Disabled
@@ -772,6 +808,10 @@ class PlacementSolver:
                             if cross < best_cross:
                                 best_cross = cross
                                 improved = True
+                                if self.history:
+                                    self.history.placement(comps, phase="crossover_swap",
+                                                           refs=(a.ref, b.ref),
+                                                           metrics={"crossings": cross})
                             else:
                                 # Revert
                                 a.pos, b.pos = (
@@ -788,12 +828,16 @@ class PlacementSolver:
 
             # Re-snap aligned pairs after swap optimization
             self._re_snap_aligned_pairs(best_comps)
+            if self.history:
+                self.history.placement(best_comps, phase="crossover_repair")
 
             # Step 8: Snap to grid
             self._snap_to_grid(best_comps)
 
             # Re-snap aligned pairs after grid snap
             self._re_snap_aligned_pairs(best_comps)
+            if self.history:
+                self.history.placement(best_comps, phase="snap_to_grid")
 
         with _timed_phase(phase_t, "solve_orderedness_ms", capture_comps=lambda: best_comps):
             # Step 8.5: Orderedness — align passives into neat rows/columns.
@@ -804,6 +848,8 @@ class PlacementSolver:
                 self._apply_orderedness(best_comps, orderedness)
                 # Re-snap aligned pairs after orderedness
                 self._re_snap_aligned_pairs(best_comps)
+            if self.history:
+                self.history.placement(best_comps, phase="orderedness")
 
         with _timed_phase(phase_t, "solve_stack_blocks_ms", capture_comps=lambda: best_comps):
             # Step 8.7: Block stacking pass -- for parent-side blocks only.
@@ -817,6 +863,8 @@ class PlacementSolver:
             # neighbor whose bbox can accommodate it.
             if self.cfg.get("opposite_side_stacking_pass", True):
                 self._stack_compatible_blocks(best_comps)
+            if self.history:
+                self.history.placement(best_comps, phase="stack_blocks")
 
         with _timed_phase(phase_t, "solve_nest_blocks_ms", capture_comps=lambda: best_comps):
             # Step 8.8: Interior-hole nesting pass -- shaped parents only.
@@ -825,6 +873,8 @@ class PlacementSolver:
             # ring + MCU pack side-by-side and the requested circle can
             # never fit (docs/plans/shaped-compose-leaf-nesting.md).
             self._nest_blocks_in_interior_holes(best_comps)
+            if self.history:
+                self.history.placement(best_comps, phase="nest_blocks")
 
         with _timed_phase(phase_t, "solve_resolve_overlaps_ms", capture_comps=lambda: best_comps):
             # Step 9: Final exhaustive overlap resolution — guarantee no courtyard
@@ -835,6 +885,8 @@ class PlacementSolver:
             # Re-snap aligned pairs after overlap resolution
             self._re_snap_aligned_pairs(best_comps)
 
+            if self.history:
+                self.history.placement(best_comps, phase="resolve_overlaps")
             # Step 9.1: Push any unlocked components out of parent-local
             # keep-in zones (mounting holes etc.). Runs after stacking/SA
             # so we correct any drift those passes introduced; runs before
@@ -846,6 +898,8 @@ class PlacementSolver:
                 if self._resolve_keep_in_rects(best_comps) == 0:
                     break
                 self._resolve_overlaps(best_comps)
+            if self.history:
+                self.history.placement(best_comps, phase="resolve_keep_in")
 
             # Step 9.2: Push unlocked parts out of antenna keep-out rects (RF
             # near-field, from BoardState.keepout_rects). Same bounded
@@ -855,6 +909,8 @@ class PlacementSolver:
                 if self._resolve_keepout_rects(best_comps) == 0:
                     break
                 self._resolve_overlaps(best_comps)
+            if self.history:
+                self.history.placement(best_comps, phase="resolve_keepout")
 
             # Step 9.3: Push unlocked non-array parts clear of the locked array
             # grid. A part wider than the grid pitch can't escape the dense grid
@@ -865,12 +921,16 @@ class PlacementSolver:
                 if self._resolve_array_grid(best_comps) == 0:
                     break
                 self._resolve_overlaps(best_comps)
+            if self.history:
+                self.history.placement(best_comps, phase="resolve_array_grid")
 
         with _timed_phase(phase_t, "solve_legalize_ms", capture_comps=lambda: best_comps):
             # Step 9.5: Comprehensive legalization repair for subcircuit mode
             if prefer_legal:
                 repair_passes = int(self.cfg.get("leaf_legality_repair_passes", 12))
                 self.legalize_components(best_comps, max_passes=repair_passes)
+            if self.history:
+                self.history.placement(best_comps, phase="legalize")
 
         with _timed_phase(phase_t, "solve_clamp_ms", capture_comps=lambda: best_comps):
             # Step 10: Hard clamp — nothing outside the board
@@ -878,6 +938,8 @@ class PlacementSolver:
 
             # Step 11: Ensure all pads are inside the board boundary
             self._clamp_pads_to_board(best_comps)
+            if self.history:
+                self.history.placement(best_comps, phase="initial_clamp")
 
             # Step 12: Validate pad containment — re-clamp if any pads still outside
             for clamp_pass in range(3):
@@ -901,12 +963,16 @@ class PlacementSolver:
                     break
                 self._clamp_to_board(best_comps)
                 self._clamp_pads_to_board(best_comps)
+                if self.history:
+                    self.history.placement(best_comps, phase="clamp", iteration=clamp_pass)
                 if clamp_pass == 2:
                     print("  WARNING: some pads still outside board after 3 clamp passes")
 
             # Step 13: Re-pin edge/corner components that may have drifted
             # during overlap resolution (both-locked case can push pinned parts)
             self._restore_pinned_positions(best_comps)
+            if self.history:
+                self.history.placement(best_comps, phase="pinned_restore")
 
             # Step 13.5: Overlap resolution after restoration — restoring pinned
             # components can introduce new overlaps (e.g. a mounting hole restored
@@ -915,6 +981,8 @@ class PlacementSolver:
             # overlap-free placement AND correct pinned positions.
             self._resolve_overlaps(best_comps)
             self._restore_pinned_positions(best_comps)
+            if self.history:
+                self.history.placement(best_comps, phase="pinned_overlap_repair")
 
             # Step 14: Re-validate pad containment after restoring pinned positions
             self._clamp_pads_to_board(best_comps)
@@ -927,6 +995,8 @@ class PlacementSolver:
             # Updates _pinned_targets, so no later restore re-introduces it.
             if self._clear_pinned_from_keepouts(best_comps):
                 self._clamp_pads_to_board(best_comps)
+            if self.history:
+                self.history.placement(best_comps, phase="clamp_and_keepout")
 
         with _timed_phase(phase_t, "solve_compaction_ms", capture_comps=lambda: best_comps):
             # Step 15.5: Deterministic compaction squeeze (area-compaction
@@ -959,6 +1029,8 @@ class PlacementSolver:
                     )
                     self._re_snap_aligned_pairs(best_comps)
                     self._clamp_pads_to_board(best_comps)
+            if self.history:
+                self.history.placement(best_comps, phase="compaction")
 
         _step16_moved: set[str] = set()
         with _timed_phase(phase_t, "solve_courtyard_ms", capture_comps=lambda: best_comps):
@@ -991,6 +1063,8 @@ class PlacementSolver:
                         "locked/pinned parts could not be legalized (left for the "
                         "minor-overlap gate tolerance)"
                     )
+            if self.history:
+                self.history.placement(best_comps, phase="courtyard_separation")
 
         # Grid-assignment: the legality tail moves individual parts, which can
         # nudge a gridded passive off its (legal-by-construction) slot. Re-snap
@@ -1004,14 +1078,20 @@ class PlacementSolver:
 
             resnap_to_grid(best_comps, self._grid, exclude=_step16_moved)
             self._clamp_pads_to_board(best_comps)
+            if self.history:
+                self.history.placement(best_comps, phase="grid_resnap")
 
         # Castellations intentionally violate the normal "all copper inside"
         # invariant. Restore their exact drill datums after every generic clamp
         # and courtyard pass; no subsequent geometry pass may move them.
         self._restore_fabricated_edge_interfaces(best_comps)
+        if self.history:
+            self.history.placement(best_comps, phase="edge_interface_restore")
         # A compiler-owned bypass must survive every legalization and grid
         # operation. Never hand an unsatisfied local pair to the router.
         self._place_local_bypasses(best_comps)
+        if self.history:
+            self.history.placement(best_comps, phase="local_bypass_placement")
 
 
         # Final score
@@ -2998,7 +3078,7 @@ class PlacementSolver:
 
             # Mini force-directed loop: attract connected, repel overlapping
             damping = 1.0
-            for _ in range(self.intra_cluster_iters):
+            for iteration in range(self.intra_cluster_iters):
                 forces = {r: Point(0, 0) for r in unlocked}
 
                 # Attract connected pairs within cluster
@@ -3052,6 +3132,9 @@ class PlacementSolver:
                     comps[r].pos.x = max(tl.x + hw + 1.0, min(br.x - hw - 1.0, comps[r].pos.x))
                     comps[r].pos.y = max(tl.y + hh + 1.0, min(br.y - hh - 1.0, comps[r].pos.y))
                     _update_pad_positions(comps[r], old_pos, comps[r].rotation)
+                if self.history:
+                    self.history.placement(comps, phase="intra_cluster", iteration=iteration,
+                                           refs=unlocked)
 
                 damping *= 0.95
 
@@ -3101,6 +3184,8 @@ class PlacementSolver:
                     continue
                 handled_groups.update(group)
                 self._optimize_block_rotation_group(group, comps, work_state)
+                if self.history:
+                    self.history.placement(comps, phase="greedy_rotation", refs=group)
                 continue
 
             rotations = comp.allowed_rotations if comp.allowed_rotations else [0, 90, 180, 270]
@@ -3108,6 +3193,8 @@ class PlacementSolver:
             # Synthetic blocks retain their measured per-rotation geometry.
             if is_subcircuit_block:
                 self._optimize_block_rotation(comp, rotations, work_state)
+                if self.history:
+                    self.history.placement(comps, phase="greedy_rotation", refs=(ref,))
                 continue
 
             if len(comp.pads) < 2:
@@ -3131,6 +3218,8 @@ class PlacementSolver:
 
             # Apply best rotation (revert from the last-tried candidate)
             rotate_component_in_place(comp, best_rot - comp.rotation)
+            if self.history:
+                self.history.placement(comps, phase="greedy_rotation", refs=(ref,))
 
     def _replica_rotation_groups(
         self, comps: dict[str, Component]
@@ -3668,6 +3757,8 @@ class PlacementSolver:
         current_score = scorer.score().total
         best_score = current_score
         best_comps = {r: copy.deepcopy(c) for r, c in comps.items()}
+        if self.history:
+            self.history.placement(comps, phase="sa_initial", metrics={"score": current_score})
 
         # Get unlocked component refs
         unlocked = [r for r, c in comps.items() if not c.locked]
@@ -3731,6 +3822,11 @@ class PlacementSolver:
                         best_score = new_score
                         best_comps = {r: copy.deepcopy(c) for r, c in comps.items()}
                         improved += 1
+                    if self.history:
+                        self.history.placement(comps, phase="sa_swap", iteration=iteration,
+                                               refs=(ref_a, ref_b), metrics={
+                                                   "score": new_score,
+                                                   "became_best": improved > prev_improved})
                 else:
                     # Revert swap
                     comp_a.pos = Point(old_a.x, old_a.y)
@@ -3803,6 +3899,11 @@ class PlacementSolver:
                         best_score = new_score
                         best_comps = {r: copy.deepcopy(c) for r, c in comps.items()}
                         improved += 1
+                    if self.history:
+                        self.history.placement(comps, phase="sa_rotation", iteration=iteration,
+                                               refs=move_refs, metrics={
+                                                   "score": new_score,
+                                                   "became_best": improved > prev_improved})
                 else:
                     # Revert: restore every moved member's exact rotation and
                     # extents. A coupled group is restored from the snapshot
@@ -3849,6 +3950,11 @@ class PlacementSolver:
                         best_score = new_score
                         best_comps = {r: copy.deepcopy(c) for r, c in comps.items()}
                         improved += 1
+                    if self.history:
+                        self.history.placement(comps, phase="sa_displacement", iteration=iteration,
+                                               refs=(ref,), metrics={
+                                                   "score": new_score,
+                                                   "became_best": improved > prev_improved})
                 else:
                     # Revert displacement
                     comp.pos = Point(old_pos.x, old_pos.y)
@@ -3882,6 +3988,9 @@ class PlacementSolver:
             )
         else:
             print(f"  SA refine: no improvement after {iters_run}/{max_iters} iterations")
+        if self.history:
+            self.history.placement(best_comps, phase="sa_best_restore", metrics={"score": best_score})
+            self.history.decision("restore", phase="sa_best_restore", reason="selected_best")
 
         return best_comps
 
@@ -3899,6 +4008,7 @@ class PlacementSolver:
             work_state,
             scorer,
             rng=self.rng,
+            history=self.history,
             max_iters=int(self.cfg.get("sa_refine_iterations", 300)),
             init_temp=float(self.cfg.get("sa_refine_initial_temp", 5.0)),
             cooling_rate=float(self.cfg.get("sa_refine_cooling_rate", 0.995)),

@@ -391,3 +391,90 @@ class TestSARefineReplicaGroups:
         for ref in group:
             assert comps[ref].rotation == 0.0
             assert (comps[ref].width_mm, comps[ref].height_mm) == (4.0, 2.0)
+
+
+def test_history_preserves_rng_and_restores_accepted_downhill(tmp_path):
+    import gzip
+    import json
+
+    from kicraft.layout_history import HistoryDescriptor
+
+    class Downhill:
+        def __init__(self):
+            self.calls = 0
+
+        def score(self):
+            self.calls += 1
+            return SimpleNamespace(total=1.0 if self.calls == 1 else 0.0)
+
+    def run(history):
+        comps = {"R1": _make_component("R1", 20, 20)}
+        state = _make_board_state(comps)
+        solver = _make_solver(state)
+        solver.history = history
+        result = solver._sa_refine(
+            comps, state, Downhill(), max_iters=1, init_temp=1e9,
+            swap_prob=0, rotation_prob=0,
+        )
+        return result, solver.rng.getstate()
+
+    writer = HistoryDescriptor(str(tmp_path), "a" * 32).writer("placement", "test", {})
+    plain, plain_rng = run(None)
+    captured, captured_rng = run(writer)
+    writer.end("complete")
+    assert plain_rng == captured_rng
+    assert plain["R1"].pos == captured["R1"].pos
+    records = [json.loads(line) for line in gzip.decompress(writer.path.read_bytes()).splitlines()]
+    downhill = [r for r in records if r.get("phase") == "sa_displacement"]
+    assert downhill and downhill[0]["metrics"]["became_best"] is False
+    objects = {}
+    for record in records:
+        if record["kind"] == "scene":
+            objects = {obj["id"]: obj for obj in record["objects"]}
+        elif record["kind"] == "delta":
+            for key in record["remove"]:
+                objects.pop(key)
+            objects.update({obj["id"]: obj for obj in record["put"]})
+    pose = objects["footprint:R1"]["pose"]
+    assert (pose["x"], pose["y"]) == (captured["R1"].pos.x, captured["R1"].pos.y)
+    assert any(r.get("phase") == "sa_best_restore" and r["kind"] == "delta"
+               for r in records)
+
+
+def test_solve_history_matches_unrecorded_geometry_and_rng(tmp_path):
+    import gzip
+    import json
+
+    from kicraft.layout_history import HistoryDescriptor
+
+    def run(history):
+        state = _make_board_state({
+            "R1": _make_component("R1", 10, 10),
+            "R2": _make_component("R2", 30, 25),
+        })
+        solver = _make_solver(state)
+        solver.history = history
+        result = solver.solve()
+        return result, solver.rng.getstate()
+
+    writer = HistoryDescriptor(str(tmp_path), "c" * 32).writer("placement", "test", {})
+    plain, plain_rng = run(None)
+    captured, captured_rng = run(writer)
+    writer.end("complete")
+    assert plain_rng == captured_rng
+    for ref in plain:
+        assert (plain[ref].pos, plain[ref].rotation, plain[ref].layer) == (
+            captured[ref].pos, captured[ref].rotation, captured[ref].layer)
+    records = [json.loads(line) for line in gzip.decompress(writer.path.read_bytes()).splitlines()]
+    objects = {}
+    for record in records:
+        if record["kind"] == "scene":
+            objects = {obj["id"]: obj for obj in record["objects"]}
+        elif record["kind"] == "delta":
+            for key in record["remove"]:
+                objects.pop(key)
+            objects.update({obj["id"]: obj for obj in record["put"]})
+    for ref, component in captured.items():
+        pose = objects["footprint:" + ref]["pose"]
+        assert (pose["x"], pose["y"], pose["rotation"]) == (
+            round(component.pos.x, 4), round(component.pos.y, 4), round(component.rotation, 4))
