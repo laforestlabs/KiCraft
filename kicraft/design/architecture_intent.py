@@ -34,7 +34,9 @@ from .lowering import (
     _stated_contact_count,
     RegisteredLowerer,
     lowerer_contract_diagnostic,
+    lowerer_canonical_port_name,
     lowerer_port_direction,
+    lowerer_supports_external_interface,
     registered_lowerers,
 )
 from .models import (
@@ -188,7 +190,7 @@ _NATIVE_USB_MCU_RECIPES = frozenset(
         "esp32-s3-wroom-1-n16r8-minimal@1",
         "esp32-c3-mini-1-minimal@2",
         "esp32-c3-mini-1-h4x-minimal@2",
-        "rp2040-minimal@3",
+        "rp2040-minimal@4",
     }
 )
 # Recipes whose own expansion carries the MCU-specific series pair, so the
@@ -201,7 +203,7 @@ _MCU_OWNED_USB_SERIES_RECIPES = frozenset(
         "esp32-s3-wroom-1-n16r8-minimal@1",
         "esp32-c3-mini-1-minimal@2",
         "esp32-c3-mini-1-h4x-minimal@2",
-        "rp2040-minimal@3",
+        "rp2040-minimal@4",
     }
 )
 _HEADER_FAMILY = "pin-header"
@@ -664,6 +666,9 @@ def _supply_port(catalog: _Catalog, rail: str) -> str | None:
     when several exist let the rail's own name pick (`+5V_LOGIC` -> `vdd_logic`). Anything else
     stays a refusal — the compiler does not guess which pin takes the rail.
     """
+    if catalog.lowerer is not None and catalog.lowerer.supply_port_keys:
+        published = catalog.lowerer.supply_port_keys
+        return published[0] if len(published) == 1 and published[0] in catalog.directions else None
     for name in _SUPPLY_PORTS:
         if name in catalog.directions:
             return name
@@ -1681,7 +1686,9 @@ def _complete_pd_power_paths(intent: ArchitectureIntent) -> ArchitectureIntent:
     })
 
 
-def complete_architecture_payload(payload: dict) -> dict:
+def complete_architecture_payload(
+    payload: dict, *, intent: object | None = None, functional_spec: object | None = None,
+) -> dict:
     """Drop the duplicate power statements the deterministic contracts can only refuse.
 
     The writer states one supply twice -- a port's `supply` (or a declared rail) *and* a signal
@@ -1698,6 +1705,9 @@ def complete_architecture_payload(payload: dict) -> dict:
     if not isinstance(payload, dict):
         return payload
     payload = copy.deepcopy(payload)
+    from .board_measurements import prune_board_measurement_requirements
+
+    prune_board_measurement_requirements(payload, intent=intent, functional_spec=functional_spec)
     # Requirement production precedes family/interface repairs so the same contracts see generated
     # and authored controls. The producer acts only on one unowned, unambiguous safe jumper fact.
     _complete_explicit_input_sources(payload)
@@ -2047,6 +2057,8 @@ def _resolve_port(
     requirement: IntentRequirement, catalog: _Catalog, name: str
 ) -> tuple[str, str] | None:
     """The canonical (port key, direction) `name` denotes on this requirement, or None."""
+    if catalog.lowerer is not None:
+        name = lowerer_canonical_port_name(catalog.lowerer, name)
     direction = _direction(catalog, requirement, name)
     if direction is not None:
         return name, direction
@@ -2364,12 +2376,19 @@ def derive_architecture(
             definition = catalog.recipe.definition if catalog and catalog.recipe else None
             required = [port.name for port in definition.ports if port.required] if definition else []
             wired = {pin.net for pin in definition.pins} if definition else set()
-            if (
-                definition is None
-                or obligation.protocol not in definition.external_interface_protocols
-                or not required
-                or not set(required) <= wired
-            ):
+            recipe_witness = (
+                definition is not None
+                and obligation.protocol in definition.external_interface_protocols
+                and bool(required)
+                and set(required) <= wired
+            )
+            lowerer_witness = (
+                catalog is not None and catalog.lowerer is not None
+                and lowerer_supports_external_interface(row.family, obligation.protocol)
+            )
+            # Lowerer contacts are checked after binding, then the delivered BOM
+            # must witness the complete reviewed graph at the same physical gate.
+            if not (recipe_witness or lowerer_witness):
                 _fail(
                     "external_interface_unrealized",
                     f"requirement {row.id!r} must select a reviewed construction for "
@@ -2467,7 +2486,11 @@ def derive_architecture(
             # The recipe's own exact part is the identity the resolver would settle on anyway;
             # stating it here keeps the resolved payload explicit instead of inferred.
             exact_part=row.exact_part
-            or (catalog.recipe.definition.exact_part if catalog.recipe is not None else None),
+            or (
+                catalog.recipe.definition.exact_part if catalog.recipe is not None
+                else catalog.lowerer.reviewed_exact_part if catalog.lowerer is not None
+                else None
+            ),
             parameters=dict(row.parameters),
             interfaces=list(row.interfaces),
             functional_blocks=list(row.functional_blocks),
@@ -2663,17 +2686,27 @@ def derive_architecture(
                     "duplicates it"
                 )
             else:
-                tail = ", so bind this connection to another of this requirement's ports"
+                tail = (
+                    ". For fan-out, keep ONE signal name and list every destination in its "
+                    "`to` array. Independent signals need distinct real output contacts; "
+                    "never move an output signal onto supply/reference contacts"
+                    if direction == "output"
+                    else ", so bind this connection to another of this requirement's ports"
+                )
             _fail(
                 "conflicting_port_binding",
                 (
                     f"{context}: port {port!r} of {requirement_id!r} is already bound to "
-                    f"{existing!r} — one port carries one net"
+                    f"{existing!r}, but this binding requests {net!r} — one port carries one net"
                     + tail
                     + (f" ({catalog.choices})" if catalog is not None else "")
                 ),
                 requirement_id=requirement_id,
                 sheet=requirements[requirement_id].sheet,
+                evidence=[
+                    f"contact={requirement_id}.{port}", f"existing_net={existing}",
+                    f"requested_net={net}", f"direction={direction}",
+                ],
             )
             return
         bindings[requirement_id][port] = net
@@ -3015,6 +3048,15 @@ def derive_architecture(
         for rail, stated in dict.fromkeys(deferred_rails):
             port = _supply_port(catalog, rail)
             if port is None:
+                if catalog.lowerer is not None and len(catalog.lowerer.supply_port_keys) > 1:
+                    _fail(
+                        "ambiguous_supply_binding",
+                        f"{requirement_id!r} publishes several supply contacts; use explicit "
+                        f"supply_bindings for {list(catalog.lowerer.supply_port_keys)!r}, "
+                        f"not an inferred shared {rail!r} rail.",
+                        requirement_id=requirement_id, sheet=requirement.sheet,
+                    )
+                    continue
                 # The family publishes no supply port at all: a status LED draws its current from
                 # its own drive signal, not from a rail pin. Nothing is invented and nothing is
                 # refused — the part simply has no pin on this rail.
@@ -3029,9 +3071,12 @@ def derive_architecture(
                 # The authored binding owns the pin; a stated supply that would need the same pin
                 # for another rail is reported rather than silently dropped.
                 if bound != rail:
-                    derived_notes.append(
-                        f"{requirement_id}: supply {rail} ({stated}) is not bound — its supply port "
-                        f"{port} already carries {bound} (derived)"
+                    _fail(
+                        "conflicting_port_binding",
+                        f"{requirement_id}.{port} explicitly carries {bound!r}, but "
+                        f"supply={rail!r} ({stated}) requests another rail on that contact.",
+                        requirement_id=requirement_id, sheet=requirement.sheet,
+                        evidence=[f"{port}={bound}", f"{stated}={rail}"],
                     )
                 continue
             _bind(requirement_id, port, rail, "input", context="legacy supply")

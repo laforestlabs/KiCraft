@@ -5,6 +5,8 @@ Safety-critical entries remain canary until the required independent human revie
 
 from __future__ import annotations
 
+import math
+
 from .models import (
     RecipeComponentGroup as Group,
     RecipeDefinition,
@@ -764,6 +766,7 @@ def _three_pin_ldo(
     cin: str,
     cout: str,
     rated_output_current_a: float,
+    supply_voltage_range_v: tuple[float, float],
     extra_nc: str | None = None,
     enable_pin: str | None = None,
     extra_assertions: tuple[Assertion, ...] = (),
@@ -776,13 +779,15 @@ def _three_pin_ldo(
         exact_part=part,
         rated_output_current_a=rated_output_current_a,
         ports=(
-            Port(name="input", direction="power"),
+            Port(name="input", direction="power", supply_voltage_range_v=supply_voltage_range_v),
             Port(name="gnd", direction="power"),
             Port(name="output", direction="power"),
             *((Port(name="enable", direction="input", required=False, default_tie="input"),)
               if enable_pin else ()),
         ),
         internal_nets=(),
+        parameters={"output_voltage": 3.3},
+        allowed={"output_voltage": (3.3,)},
         parts=(
             _part("regulator", "U", part, symbol, footprint, mpn=part),
             _passive("input_cap", "C", cin),
@@ -834,6 +839,9 @@ ME6211_3V3 = _three_pin_ldo(
     cin="1uF",
     cout="1uF",
     rated_output_current_a=0.5,
+    # ME6211C33 datasheet characterizes the fixed output at VIN=VOUT+1 V;
+    # 6 V is the stated operating maximum. Thermal/stability review remains.
+    supply_voltage_range_v=(4.3, 6.0),
     extra_nc="4",
     enable_pin="3",
 )
@@ -850,6 +858,8 @@ MCP1700_3V3 = _three_pin_ldo(
     cin="1uF",
     cout="1uF",
     rated_output_current_a=0.25,
+    # MCP1700 DS20001826, electrical characteristics: VR+1 V through 6 V.
+    supply_voltage_range_v=(4.3, 6.0),
 )
 AMS1117_3V3 = _three_pin_ldo(
     recipe="ams1117-3v3@2",
@@ -864,6 +874,9 @@ AMS1117_3V3 = _three_pin_ldo(
     cin="10uF",
     cout="22uF",
     rated_output_current_a=1.0,
+    # AMS1117-3.3 datasheet specifies load regulation at 4.75 V and cites
+    # the 5 V-to-3.3 V application; this is a bounded 5 V supply contract.
+    supply_voltage_range_v=(4.75, 5.25),
     extra_assertions=(
         Assertion(
             code="ldo_thermal_derating",
@@ -1023,7 +1036,9 @@ def _buck(
         exact_part=part,
         rated_output_current_a=rated_output_current_a,
         ports=(
-            Port(name="input", direction="power"),
+            # TI TLV62569 recommended VIN range; regulation and support-network
+            # performance still require the independent circuit checks.
+            Port(name="input", direction="power", supply_voltage_range_v=(2.5, 5.5)),
             Port(name="gnd", direction="power"),
             Port(name="output", direction="power"),
             *(
@@ -1373,7 +1388,11 @@ def _tps54331_buck(
             "enable_control": (False, True),
         },
         ports=(
-            Port(name="input", direction="power"),
+            # The 3.3 V implementation documents 7--28 V. The 12 V network
+            # has only an 18 V analytical operating point, not a swept range.
+            Port(name="input", direction="power", supply_voltage_range_v=(
+                (7.0, 28.0) if output_voltage == 3.3 else (18.0, 18.0)
+            )),
             Port(name="gnd", direction="power"),
             Port(name="output", direction="power"),
             # This is an active-low, sink-to-ground control -- not a high-true
@@ -1546,7 +1565,10 @@ YLPTEC_K7803M_1000R3 = _power_recipe(
     parameters={"output_voltage": 3.3},
     allowed={"output_voltage": (3.3,)},
     ports=(
-        Port(name="input", direction="power"),
+        # The fitted input capacitors omit the 33 uF low-ESR electrolytic
+        # required by the manufacturer at 30 V and above.
+        Port(name="input", direction="power",
+             supply_voltage_range_v=(6.0, math.nextafter(30.0, -math.inf))),
         Port(name="gnd", direction="power"),
         Port(name="output", direction="power"),
     ),
@@ -1790,6 +1812,7 @@ def _tps61088_boost(
     input_bottom: str,
     input_bulk: Group,
     source_contract: str,
+    input_voltage_range_v: tuple[float, float],
     current_math: str,
 ) -> RecipeDefinition:
     """Build the bounded 12 V / 1 A TPS61088 boost implementation.
@@ -1806,7 +1829,7 @@ def _tps61088_boost(
         parameters={"output_voltage": 12.0, "enable_control": False},
         allowed={"output_voltage": (12.0,), "enable_control": (False, True)},
         ports=(
-            Port(name="input", direction="power"),
+            Port(name="input", direction="power", supply_voltage_range_v=input_voltage_range_v),
             Port(name="gnd", direction="power"),
             Port(name="output", direction="power"),
             # Active-low, local eFuse EN/UVLO sink; it is not a high-true VIN
@@ -2047,6 +2070,7 @@ TPS61088_2S_12V_1A = _tps61088_boost(
     exact_part="TPS61088RHLR",
     input_top="22k 1%",
     input_bottom="10k 1%",
+    input_voltage_range_v=(6.0, 8.4),
     input_bulk=_part(
         "input_bulk",
         "C",
@@ -2076,6 +2100,7 @@ TPS61088_HOST5_12V_1A = _tps61088_boost(
     exact_part=None,
     input_top="10k 1%",
     input_bottom="10k 1%",
+    input_voltage_range_v=(4.75, 5.25),
     input_bulk=_part(
         "input_bulk",
         "C",
@@ -2134,7 +2159,8 @@ LM2577T_ADJ_12V_BOOST = _power_recipe(
     parameters={"output_voltage": 12.0, "enable_control": False},
     allowed={"output_voltage": (12.0,), "enable_control": (False, True)},
     ports=(
-        Port(name="input", direction="power"),
+        # 5 V host composition: analytical 4.75 V corner and its 5 V source.
+        Port(name="input", direction="power", supply_voltage_range_v=(4.75, 5.25)),
         Port(name="gnd", direction="power"),
         Port(name="output", direction="power"),
         # The eFuse EN/UVLO node is pulled up locally; an external controller
@@ -2363,6 +2389,10 @@ LM2577T_ADJ_2S_12V_BOOST = LM2577T_ADJ_12V_BOOST.model_copy(
         "exact_part": None,
         "protected_aliases": ("lm2577t-adj-2s-12v-boost",),
         "identity_aliases": (),
+        "ports": tuple(
+            port.model_copy(update={"supply_voltage_range_v": (6.0, 8.4)})
+            if port.name == "input" else port for port in LM2577T_ADJ_12V_BOOST.ports
+        ),
         "parts": tuple(
             group.model_copy(
                 update={

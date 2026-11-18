@@ -29,24 +29,26 @@ _RETRY_NETWORK_EXC = (
 )
 
 
+def _safe_request_id(value):
+    return value if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", value) else None
+
+
 def classify_provider_exception(exc: BaseException) -> dict:
     """Return redacted stable provider/transport facts without response bodies."""
     response = getattr(exc, "response", None)
     status = getattr(response, "status_code", None)
     headers = getattr(response, "headers", {}) or {}
-    request_id = headers.get("x-request-id") or headers.get("x-openrouter-request-id")
-    error_code = None
+    request_id = (_safe_request_id(headers.get("x-request-id"))
+                  or _safe_request_id(headers.get("x-openrouter-request-id"))
+                  or _safe_request_id(getattr(exc, "_kicraft_request_id", None)))
+    detail = str(exc).lower()
     if response is not None:
         try:
             payload = response.json()
-            error = payload.get("error") if isinstance(payload, dict) else None
-            if isinstance(error, dict):
-                raw_code = error.get("code")
-                if isinstance(raw_code, (str, int)):
-                    error_code = str(raw_code)[:96]
-        except (ValueError, TypeError):
+            detail += " " + json.dumps(payload, default=str).lower()
+        except (AttributeError, ValueError, TypeError):
             pass
-    text = str(exc).lower()
+    text = detail
     if status is None and isinstance(exc, requests.exceptions.HTTPError):
         match = re.search(r"\b([1-5][0-9]{2})\b", text)
         if match:
@@ -58,9 +60,18 @@ def classify_provider_exception(exc: BaseException) -> dict:
     elif status in {401, 403}:
         kind = "provider_auth"
     elif status is not None and 400 <= status < 500:
-        if "response_format" in text or "response format" in text:
-            kind = "provider_response_format_rejected"
-        elif any(word in text for word in ("tool", "reasoning", "schema", "capability")):
+        code = None
+        if any(phrase in text for phrase in ("context length", "context window", "maximum context", "context_length_exceeded", "max context", "maximum token", "max_tokens exceeded")):
+            kind, code = "provider_context_limit", "context_length_exceeded"
+        elif ("invalid_schema" in text or "invalid schema" in text) and ("required" in text or "additionalproperties" in text):
+            kind, code = "provider_capability_rejected", "invalid_schema"
+        elif "response_format" in text or "response format" in text or "responseformat" in text:
+            kind, code = "provider_response_format_rejected", "unsupported_response_format"
+        elif "reasoning" in text:
+            kind, code = "provider_capability_rejected", "unsupported_reasoning"
+        elif "tool" in text:
+            kind, code = "provider_capability_rejected", "unsupported_tool"
+        elif any(word in text for word in ("schema", "capability")):
             kind = "provider_capability_rejected"
         else:
             kind = "provider_request_rejected"
@@ -77,8 +88,8 @@ def classify_provider_exception(exc: BaseException) -> dict:
     return {
         "failure_kind": kind,
         "http_status": status,
-        "error_code": error_code,
-        "request_id": str(request_id)[:128] if request_id else None,
+        "error_code": code if status is not None and 400 <= status < 500 and status not in {401, 403, 429} else None,
+        "request_id": request_id,
     }
 
 
@@ -99,6 +110,17 @@ _OPENROUTER_UNSUPPORTED_PARAMETERS = {
     "openai/gpt-6-luna": frozenset({"temperature", "parallel_tool_calls"}),
 }
 _FALLBACK_DEFAULT = (10.0, 30.0)  # unknown model: assume expensive
+
+
+def _has_open_schema_objects(node) -> bool:
+    """OpenAI strict output cannot represent arbitrary map keys."""
+    if isinstance(node, dict):
+        if node.get("type") == "object" and node.get("additionalProperties") not in (None, False):
+            return True
+        return any(_has_open_schema_objects(value) for value in node.values())
+    if isinstance(node, list):
+        return any(_has_open_schema_objects(value) for value in node)
+    return False
 
 # Tool-loop convergence caps. A weak model (e.g. deepseek-flash) fills the whole
 # round budget re-verifying parts it already resolved, repeating identical
@@ -814,6 +836,8 @@ class CappedOpenRouterClient:
         *,
         run_id: str | None = None,
         call_ceiling_usd: float = 0.0,
+        max_retries: int | None = None,
+        attempt_context: dict | None = None,
     ):
         """POST and return a streamed Response with a non-retryable status.
 
@@ -834,7 +858,7 @@ class CappedOpenRouterClient:
         }
         if getattr(self.s, "backend", "openrouter") != "deepseek":
             headers["X-Title"] = "KiCraft"
-        max_retries = max(0, int(getattr(self.s, "llm_max_retries", 0)))
+        max_retries = max(0, int(getattr(self.s, "llm_max_retries", 0) if max_retries is None else max_retries))
         backoff = float(getattr(self.s, "llm_retry_backoff_s", 1.0))
         for attempt in range(max_retries + 1):
             reservation = None
@@ -882,7 +906,39 @@ class CappedOpenRouterClient:
                     raise
                 if attempt >= max_retries:
                     raise
+                self._record_retry_post(attempt_context, payload.get("model"), e)
                 time.sleep(backoff * (2**attempt))
+
+    def _record_retry_post(self, context, model, exc):
+        """Record an intermediate POST; the stage driver records the final POST."""
+        if not context or not context.get("stage") or not hasattr(self.guard, "record_stage_attempt"):
+            return
+        facts = classify_provider_exception(exc)
+        try:
+            self.guard.record_stage_attempt(
+                run_id=context.get("run_id"), stage=context["stage"],
+                attempt=context.get("attempt", 0), call_mode=context.get("call_mode", "normal"),
+                model=model, outcome=facts["failure_kind"], http_status=facts["http_status"],
+                error_code=facts["error_code"], request_id=facts["request_id"],
+            )
+        except Exception:
+            pass
+
+    def _record_tool_post(self, context, model, msg, cost):
+        if not context or not context.get("stage") or not hasattr(self.guard, "record_stage_attempt"):
+            return
+        usage = msg.get("usage") or {}
+        try:
+            self.guard.record_stage_attempt(
+                run_id=context.get("run_id"), stage=context["stage"],
+                attempt=context.get("attempt", 0), call_mode=context.get("call_mode", "normal"),
+                model=model or self.s.model, provider=msg.get("provider"), outcome="tool_round",
+                http_status=msg.get("http_status"), request_id=msg.get("request_id"),
+                input_tokens=usage.get("prompt_tokens"), output_tokens=usage.get("completion_tokens"),
+                cost_usd=cost, finish_reason=msg.get("finish_reason"),
+            )
+        except Exception:
+            pass
 
     @staticmethod
     def _reasoning_abort_reason(
@@ -971,6 +1027,17 @@ class CappedOpenRouterClient:
             rf = payload.get("response_format")
             if isinstance(rf, dict) and rf.get("type") == "json_schema":
                 payload["response_format"] = {"type": "json_object"}
+        elif (
+            meta_ctx.get("stage") == "architecture"
+            and str(payload["model"]).startswith("openai/")
+            and isinstance(response_format_guard, dict)
+            and response_format_guard.get("type") == "json_schema"
+            and _has_open_schema_objects(response_format_guard.get("json_schema", {}).get("schema"))
+        ):
+            # Rails/parameters are genuine maps. Closing them would change the
+            # circuit contract; sending them in OpenAI strict mode is unsupported.
+            # Keep the canonical schema for the prompt, guard and local gates.
+            payload["response_format"] = {"type": "json_object"}
         # Mid-stream retry: _open_stream retries transient failures only up to
         # the 2xx header; a connection dropped DURING iter_lines (e.g.
         # "Connection broken: InvalidChunkLength" -- live board 625) used to
@@ -979,7 +1046,8 @@ class CappedOpenRouterClient:
         # partial buffers and re-POST the identical payload from scratch. The
         # only cost is cosmetic: on_delta already streamed the discarded
         # partials to the UI, so the viewer sees the reasoning restart.
-        max_stream_retries = max(0, int(getattr(self.s, "llm_max_retries", 0)))
+        architecture_call = meta_ctx.get("stage") == "architecture"
+        max_stream_retries = 0 if architecture_call else max(0, int(getattr(self.s, "llm_max_retries", 0)))
         stream_backoff = float(getattr(self.s, "llm_retry_backoff_s", 1.0))
         for stream_attempt in range(max_stream_retries + 1):
             content, reasoning = [], []
@@ -987,6 +1055,7 @@ class CappedOpenRouterClient:
             tool_calls: dict = {}
             finish = None
             provider = None
+            generation_id = None
             usage: dict = {}
             loop_abort_reason = None
             collection_limit = None
@@ -1004,6 +1073,8 @@ class CappedOpenRouterClient:
                     payload,
                     run_id=str(run_id) if run_id else None,
                     call_ceiling_usd=call_ceiling_usd,
+                    **({"attempt_context": meta_ctx} if meta_ctx.get("stage") else {}),
+                    **({"max_retries": 0} if architecture_call else {}),
                 )
                 with resp:
                     for raw in resp.iter_lines(decode_unicode=True):
@@ -1015,6 +1086,10 @@ class CappedOpenRouterClient:
                         try:
                             chunk = json.loads(data)
                         except json.JSONDecodeError:
+                            continue
+                        if isinstance(chunk, dict):
+                            generation_id = _safe_request_id(chunk.get("id")) or generation_id
+                        else:
                             continue
                         if chunk.get("error"):
                             error = chunk["error"]
@@ -1098,6 +1173,10 @@ class CappedOpenRouterClient:
                         if loop_abort_reason or collection_limit:
                             break
             except BaseException as exc:
+                headers = getattr(resp, "headers", {}) or {}
+                exc._kicraft_request_id = (_safe_request_id(headers.get("x-request-id"))
+                                            or _safe_request_id(headers.get("x-openrouter-request-id"))
+                                            or generation_id)
                 status = getattr(getattr(exc, "response", None), "status_code", None)
                 in_band = isinstance(exc, requests.exceptions.HTTPError) and getattr(
                     exc, "_kicraft_in_band", False
@@ -1111,6 +1190,7 @@ class CappedOpenRouterClient:
                 # no accepted response to account for here.
                 if resp is None:
                     if retryable and stream_attempt < max_stream_retries:
+                        self._record_retry_post(meta_ctx, payload.get("model"), exc)
                         time.sleep(stream_backoff * (2**stream_attempt))
                         continue
                     raise
@@ -1129,6 +1209,7 @@ class CappedOpenRouterClient:
                 self.guard.mark_uncertain(resp._kicraft_reservation, retry_cost)
                 if not retryable or stream_attempt >= max_stream_retries:
                     raise
+                self._record_retry_post(meta_ctx, payload.get("model"), exc)
                 time.sleep(stream_backoff * (2**stream_attempt))
                 continue
             break  # stream ended cleanly or by a client-owned policy abort
@@ -1171,6 +1252,12 @@ class CappedOpenRouterClient:
         # requested max_tokens, and the selected reasoning policy. Null-safe
         # for mocks and legacy providers (None is the "not supplied" value).
         msg["provider"] = provider
+        msg["http_status"] = getattr(resp, "status_code", None)
+        msg["response_format_mode"] = (payload.get("response_format") or {}).get("type", "none")
+        headers = getattr(resp, "headers", {}) or {}
+        msg["request_id"] = (_safe_request_id(headers.get("x-request-id"))
+                             or _safe_request_id(headers.get("x-openrouter-request-id"))
+                             or generation_id)
         msg["usage"] = dict(usage) if usage else None
         msg["content_chars"] = content_chars
         msg["reasoning_chars"] = reasoning_chars
@@ -1227,6 +1314,7 @@ class CappedOpenRouterClient:
             "reasoning_policy": reasoning_policy,
             "collection_limit": collection_limit,
             **meta_ctx,
+            "response_format_mode": msg["response_format_mode"],
             "collection_counts": collection_guard.counts(),
         }
         reservation = resp._kicraft_reservation
@@ -1298,6 +1386,9 @@ class CappedOpenRouterClient:
             "reasoning_policy_name": msg.get("reasoning_policy_name"),
             "collection_limit": msg.get("collection_limit"),
             "provider": msg.get("provider"),
+            "http_status": msg.get("http_status"),
+            "response_format_mode": msg.get("response_format_mode"),
+            "request_id": msg.get("request_id"),
             "profile": getattr(self.s, "design_profile", "custom"),
             "max_tokens": msg.get("requested_max_tokens"),
             "reasoning_policy": msg.get("reasoning_policy"),
@@ -1386,6 +1477,8 @@ class CappedOpenRouterClient:
             if getattr(self.s, "backend", "openrouter") == "deepseek" and msg.get("reasoning"):
                 assistant["reasoning_content"] = msg["reasoning"]
             tcs = msg.get("tool_calls") or []
+            if msg.get("loop_detected") or (tcs and not msg.get("collection_limit")):
+                self._record_tool_post(meta_ctx, model, msg, cost)
             if tcs:
                 assistant["tool_calls"] = tcs
             messages.append(assistant)
@@ -1401,6 +1494,10 @@ class CappedOpenRouterClient:
                 return {
                     "text": msg.get("content") or "",
                     "cost_usd": total_cost,
+                    "last_call_cost_usd": cost,
+                    "http_status": msg.get("http_status"),
+                    "response_format_mode": msg.get("response_format_mode"),
+                    "request_id": msg.get("request_id"),
                     "rounds": rnd + 1,
                     "tool_calls": n_tool_calls,
                     "finish_reason": msg.get("finish_reason"),
@@ -1538,6 +1635,10 @@ class CappedOpenRouterClient:
         return {
             "text": msg.get("content") or "",
             "cost_usd": total_cost,
+            "last_call_cost_usd": cost,
+            "http_status": msg.get("http_status"),
+            "response_format_mode": msg.get("response_format_mode"),
+            "request_id": msg.get("request_id"),
             "rounds": max_rounds,
             "tool_calls": n_tool_calls,
             "finish_reason": msg.get("finish_reason"),

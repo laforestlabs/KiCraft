@@ -59,6 +59,48 @@ def test_provider_failures_have_stable_detailed_kinds(exc, kind):
     assert not ({"messages", "payload", "response_body"} & facts.keys())
 
 
+@pytest.mark.parametrize(("message", "kind"), [
+    ("maximum context length exceeded", "provider_context_limit"),
+    ("response_format unsupported", "provider_response_format_rejected"),
+    ("reasoning parameter unsupported", "provider_capability_rejected"),
+    ("other rejection", "provider_request_rejected"),
+])
+def test_provider_error_body_is_classified_but_never_returned(message, kind):
+    response = requests.Response()
+    response.status_code = 400
+    response._content = json.dumps({"error": {"message": message, "code": "secret-key"}}).encode()
+    response.headers["x-request-id"] = "req-123"
+    facts = client_mod.classify_provider_exception(
+        requests.exceptions.HTTPError("400 Bad Request", response=response)
+    )
+    assert facts["failure_kind"] == kind
+    assert facts["request_id"] == "req-123"
+    assert "secret-key" not in json.dumps(facts)
+    assert message not in json.dumps(facts)
+
+
+@pytest.mark.parametrize(("message", "kind", "code"), [
+    ("Invalid schema: required must include every property; additionalProperties must be false",
+     "provider_capability_rejected", "invalid_schema"),
+    ("maximum context length exceeded", "provider_context_limit", "context_length_exceeded"),
+    ("responseFormat unsupported", "provider_response_format_rejected", "unsupported_response_format"),
+    ("tools unsupported", "provider_capability_rejected", "unsupported_tool"),
+    ("reasoning unsupported", "provider_capability_rejected", "unsupported_reasoning"),
+])
+def test_rejection_reason_allowlist_does_not_expose_provider_content(message, kind, code):
+    response = requests.Response()
+    response.status_code = 400
+    response.headers["x-request-id"] = "req-safe"
+    response._content = json.dumps({"error": {"message": message + " SECRET", "code": "SECRET"}}).encode()
+    facts = client_mod.classify_provider_exception(
+        requests.HTTPError("400", response=response)
+    )
+    assert facts == {
+        "failure_kind": kind, "http_status": 400, "error_code": code, "request_id": "req-safe"
+    }
+    assert "SECRET" not in json.dumps(facts)
+
+
 # ---- fakes ----------------------------------------------------------------
 
 
@@ -137,6 +179,43 @@ def test_guard_without_reservation_protocol_cannot_dispatch(monkeypatch):
     with pytest.raises(TypeError, match="reservation guard protocol"):
         CappedOpenRouterClient(Settings(api_key="k"), guard=guard)
     assert calls == []
+
+@pytest.mark.parametrize("headers,expected", [
+    ({}, "gen-abc123"),
+    ({"x-request-id": "req-header"}, "req-header"),
+])
+@pytest.mark.parametrize("bounded", [False, True])
+def test_stream_preserves_generation_id_without_request_header(monkeypatch, headers, expected, bounded):
+    content = '{"parts":[{},{}]}' if bounded else '{"ok":true}'
+    response = _FakeResp([
+        {"id": "gen-abc123", "choices": [{"delta": {"content": content}, "finish_reason": "stop"}]},
+        _usage_chunk(),
+    ])
+    response.headers = headers
+    monkeypatch.setattr(client_mod.requests, "post", lambda *a, **kw: response)
+    client = CappedOpenRouterClient(Settings(api_key="k"), guard=_RecordingGuard())
+    body = {"messages": [{"role": "user", "content": "hello"}]}
+    if bounded:
+        body["_collection_bounds"] = (CollectionBound(field="parts", total=1),)
+    message, _ = client._stream(body)
+    assert message["request_id"] == expected
+    if bounded:
+        assert message["finish_reason"] == "collection_limit"
+        assert response.lines_read == 1
+
+
+def test_interrupted_stream_preserves_generation_id(monkeypatch):
+    response = _FakeResp([
+        {"id": "gen-interrupted", "choices": [{"delta": {"content": "partial"}}]},
+        {"error": {"code": 429, "message": "private body"}},
+    ])
+    monkeypatch.setattr(client_mod.requests, "post", lambda *a, **kw: response)
+    client = CappedOpenRouterClient(Settings(api_key="k", llm_max_retries=0), guard=_RecordingGuard())
+    with pytest.raises(requests.exceptions.HTTPError) as error:
+        client._stream({"messages": [{"role": "user", "content": "hello"}]})
+    facts = client_mod.classify_provider_exception(error.value)
+    assert facts["request_id"] == "gen-interrupted"
+    assert "private body" not in str(facts)
 
 
 def test_missing_usage_retains_uncertain_completion_exposure(monkeypatch):
@@ -390,11 +469,39 @@ def test_open_stream_retries_transient_5xx_then_succeeds(monkeypatch):
     monkeypatch.setattr(client_mod.requests, "post", fake_post)
     monkeypatch.setattr(client_mod.time, "sleep", lambda s: sleeps.append(s))
     s = Settings(api_key="k", llm_max_retries=3, llm_retry_backoff_s=0.5)
-    c = CappedOpenRouterClient(s, guard=_RecordingGuard())
-    msg, cost = c._stream({"messages": [{"role": "user", "content": "hi"}]})
+    guard = _RecordingGuard()
+    recorded = []
+    guard.record_stage_attempt = lambda **row: recorded.append(row)
+    c = CappedOpenRouterClient(s, guard=guard)
+    msg, cost = c._stream({
+        "messages": [{"role": "user", "content": "hi"}],
+        "_meta_ctx": {"run_id": "run", "stage": "intent", "attempt": 1, "call_mode": "normal"},
+    })
     assert calls["n"] == 3  # 2 failures + 1 success
     assert sleeps == [0.5, 1.0]  # exponential backoff between attempts
     assert cost == 0.001
+    assert len(recorded) == 2
+    assert all((row["stage"], row["attempt"], row["call_mode"], row["http_status"]) ==
+               ("intent", 1, "normal", 503) for row in recorded)
+
+
+def test_architecture_transport_does_not_make_hidden_retry(monkeypatch):
+    calls = []
+
+    def fake_post(*args, **kwargs):
+        calls.append(1)
+        return _FakeResp([], status_code=503, reason="Service Unavailable")
+
+    monkeypatch.setattr(client_mod.requests, "post", fake_post)
+    client = CappedOpenRouterClient(
+        Settings(api_key="k", llm_max_retries=3), guard=_RecordingGuard()
+    )
+    with pytest.raises(requests.exceptions.HTTPError):
+        client._stream({
+            "messages": [{"role": "user", "content": "hi"}],
+            "_meta_ctx": {"stage": "architecture"},
+        })
+    assert len(calls) == 1
 
 
 def test_open_stream_retries_connection_error(monkeypatch):
@@ -1589,6 +1696,33 @@ def test_syntax_abort_does_not_execute_previously_streamed_tool_calls(monkeypatc
     assert len(spend.uncertain) == 1 and spend.uncertain[0][1] > 0
 
 
+def test_tool_rounds_record_each_intermediate_post_at_its_own_cost(monkeypatch):
+    tool_call = {"index": 0, "id": "t1", "type": "function",
+                 "function": {"name": "lookup", "arguments": "{}"}}
+    responses = iter([
+        _FakeResp([{"choices": [{"delta": {"tool_calls": [tool_call]}}]}, _usage_chunk()]),
+        _FakeResp([{"choices": [{"delta": {"content": "{}"}, "finish_reason": "stop"}]},
+                   _usage_chunk()]),
+    ])
+    monkeypatch.setattr(client_mod.requests, "post", lambda *a, **kw: next(responses))
+    guard = _RecordingGuard()
+    rows = []
+    guard.record_stage_attempt = lambda **row: rows.append(row)
+    client = CappedOpenRouterClient(Settings(api_key="k"), guard=guard)
+    result = client.chat_with_tools(
+        [{"role": "user", "content": "draft"}], tools=[],
+        executor=lambda *a: "found",
+        meta_ctx={"run_id": "run", "stage": "bom", "attempt": 3, "call_mode": "normal"},
+    )
+    assert len(rows) == 1
+    assert (rows[0]["stage"], rows[0]["attempt"], rows[0]["call_mode"], rows[0]["outcome"]) == (
+        "bom", 3, "normal", "tool_round"
+    )
+    assert rows[0]["cost_usd"] == pytest.approx(0.001)
+    assert result["last_call_cost_usd"] == pytest.approx(0.001)
+    assert result["cost_usd"] == pytest.approx(0.002)
+
+
 @pytest.mark.parametrize("chunk_size", [1, 5, 4096])
 @pytest.mark.parametrize(
     "wrapper",
@@ -2283,3 +2417,45 @@ def test_model_preflight_merges_campaign_metadata_into_fixed_role_context():
         "phase": "model_preflight",
         "role": "designer",
     }
+
+
+@pytest.mark.parametrize("invalid_rail", [False, True])
+def test_openai_architecture_maps_use_json_transport_without_weakening_circuit_gate(monkeypatch, invalid_rail):
+    from kicraft.server.stage_contracts import (
+        StageSchemaError, _normalize_stage_response, build_stage_response_contract,
+    )
+    from kicraft.server.stage_prompts import _WORKED_EXAMPLES
+
+    slot = json.loads(_WORKED_EXAMPLES["architecture"])
+    if invalid_rail:
+        slot["power"]["rails"]["+3V3"]["voltage"] = 12.0
+    wire_reply = json.dumps(slot)
+    requests_seen = []
+
+    def endpoint(url, headers=None, json=None, **kwargs):
+        requests_seen.append(json)
+        if json["response_format"]["type"] != "json_object":
+            return _FakeResp([], status_code=400, reason="Strict object maps unsupported")
+        return _FakeResp([
+            {"choices": [{"delta": {"content": wire_reply}, "finish_reason": "stop"}]},
+            _usage_chunk(cost=.001),
+        ])
+
+    monkeypatch.setattr(client_mod.requests, "post", endpoint)
+    guard = _RecordingGuard()
+    client = CappedOpenRouterClient(Settings(api_key="k", model="openai/gpt-6-luna"), guard=guard)
+    contract = build_stage_response_contract("architecture", {}, allow_questions=False)
+    result = client.chat(
+        [{"role": "user", "content": "Return the complete architecture JSON."}],
+        response_format=contract.response_format,
+        meta_ctx={"stage": "architecture", "attempt": 1, "call_mode": "normal", "run_id": "map-test"},
+    )
+    assert len(requests_seen) == 1
+    assert result["response_format_mode"] == guard.records[0]["meta"]["response_format_mode"] == "json_object"
+    decoded = json.loads(result["text"])
+    if invalid_rail:
+        with pytest.raises(StageSchemaError):
+            _normalize_stage_response("architecture", decoded, {})
+    else:
+        canonical, _ = _normalize_stage_response("architecture", decoded, {})
+        assert canonical["rail_voltages"]["+3V3"] == 3.3

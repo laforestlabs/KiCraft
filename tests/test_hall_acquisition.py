@@ -128,3 +128,37 @@ def test_hall_bypass_is_exported_as_owned_physical_proximity(tmp_path):
         "owner_ref": "U1", "bypass_ref": "C1", "power_pins": ["1", "1"],
         "ground_pins": [["3"], "2"], "max_distance_mm": 3.0,
     }]
+
+
+@pytest.mark.parametrize(
+    ("recipe", "pin", "blocked"),
+    [("rp2040-minimal@4", "38", False), ("esp32-s3-mini-1-minimal@1", "6", True)],
+)
+def test_hall_adc_consumer_must_tolerate_supply_rail(recipe, pin, blocked):
+    from kicraft.design.models import Architecture
+    from kicraft.design.recipes.registry import get_recipe
+    from kicraft.design.recipes.resolver import ResolutionResult, _hall_adc_diagnostics
+
+    payload = _architecture()
+    payload["requirements"] = payload["requirements"][:1]
+    payload["requirements"].append({
+        "id": "mcu", "sheet": "HALL", "role": "mcu_core", "family": "test-mcu",
+        "ports": {"vdd": "+3V3", "gnd": "GND", "input_hall": "SENSOR_1_OUT"},
+    })
+    architecture = Architecture.model_validate(payload)
+    peer = RecipeSelection(
+        recipe=recipe, instance="mcu", sheets={"mcu": "HALL"},
+        requirement_ids=["mcu"], port_bindings={"vdd": "+3V3", "gnd": "GND"},
+        parameters={"consumer_input_max_v": 3.3},
+        pin_allocations=[{"net": "SENSOR_1_OUT", "pin": pin, "capability": "adc"}],
+    )
+    result = ResolutionResult(
+        requirements=architecture.requirements, selections=[_selection(), peer],
+    )
+    _hall_adc_diagnostics(
+        result, {RECIPE: get_recipe(RECIPE), recipe: get_recipe(recipe)}, architecture,
+    )
+    errors = [row for row in result.blocking if row.code == "unqualified_hall_analog_domain"]
+    assert bool(errors) is blocked
+    if blocked:
+        assert "adc_input_max_v=2.9" in errors[0].evidence

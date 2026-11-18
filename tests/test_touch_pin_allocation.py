@@ -12,6 +12,7 @@ from kicraft.design.recipes.pin_allocator import (
     allocate_requirement_pins,
 )
 from kicraft.design.recipes.registry import get_recipe
+from kicraft.design.recipes.rp2040_minimal_v2 import effective_rp2040_definition
 
 
 @pytest.mark.parametrize(("output_count", "touch_count"), [(6, 2), (5, 6)])
@@ -169,3 +170,93 @@ def test_touch_scarcity_order_preserves_only_legal_contiguous_bus_window():
     }
     assert allocate_pins(pins, list(reversed(requests))) == allocations
     assert allocate_pins(pins, requests, existing=allocations) == allocations
+
+
+def _rp2040_requirement(*, adc_count=4, **ports):
+    return CircuitRequirement(
+        id="controller", sheet="MCU", role="mcu_core", family="rp2040",
+        ports={**{f"adc_{i}": f"SENSOR_{i}" for i in range(adc_count)}, **ports},
+    )
+
+
+def _rp2040_definition(*, exposed=30, bindings=None):
+    definition = get_recipe("rp2040-minimal@4")
+    return effective_rp2040_definition(
+        definition, {**definition.parameter_defaults, "gpio_exposed": exposed}, bindings or {}
+    )
+
+
+def test_rp2040_four_adc_allocations_reach_physical_mcu_and_exposed_contacts():
+    allocations = allocate_requirement_pins(_rp2040_definition(), _rp2040_requirement())
+    assert {row.pin for row in allocations} == {"38", "39", "40", "41"}
+    assert {row.capability for row in allocations} == {"adc"}
+    assert len({row.net for row in allocations}) == 4
+    expansion = expand_recipe(RecipeSelection(
+        recipe="rp2040-minimal@4", instance="main",
+        sheets={"mcu": "MCU", "io": "IO"},
+        port_bindings={"vdd": "+3V3", "gnd": "GND", "usb_dm": "DM", "usb_dp": "DP"},
+        pin_allocations=allocations,
+    ))
+    mcu = next(part for part in expansion.parts if part.recipe_role == "mcu")
+    contacts = {part.ref for part in expansion.parts if part.recipe_role == "cast_right"}
+    nets = {
+        (endpoint.ref, endpoint.pin): connection.net_name
+        for connection in expansion.connections for endpoint in connection.endpoints
+    }
+    for allocation in allocations:
+        assert nets[mcu.ref, allocation.pin] == allocation.net
+        assert sum(nets.get((ref, "1")) == allocation.net for ref in contacts) == 1
+    assert {pin.pin for pin in expansion.no_connect_pins if pin.ref == mcu.ref}.isdisjoint(
+        row.pin for row in allocations
+    )
+
+
+def test_rp2040_adc_capacity_respects_exposed_gpio_limit():
+    with pytest.raises(PinAllocationError):
+        allocate_requirement_pins(_rp2040_definition(), _rp2040_requirement(adc_count=5))
+    definition = _rp2040_definition(exposed=29)
+    allocations = allocate_requirement_pins(definition, _rp2040_requirement(adc_count=3))
+    assert {row.pin for row in allocations} == {"38", "39", "40"}
+    with pytest.raises(PinAllocationError):
+        allocate_requirement_pins(definition, _rp2040_requirement())
+    expansion = expand_recipe(RecipeSelection(
+        recipe="rp2040-minimal@4", instance="limited",
+        sheets={"mcu": "MCU", "io": "IO"},
+        parameters={"gpio_exposed": 29},
+        port_bindings={"vdd": "+3V3", "gnd": "GND", "usb_dm": "DM", "usb_dp": "DP"},
+        pin_allocations=allocations,
+    ))
+    mcu = next(part for part in expansion.parts if part.recipe_role == "mcu")
+    assert "41" in {pin.pin for pin in expansion.no_connect_pins if pin.ref == mcu.ref}
+    assert all(
+        endpoint.pin != "41"
+        for connection in expansion.connections for endpoint in connection.endpoints
+        if endpoint.ref == mcu.ref
+    )
+
+
+def test_rp2040_adc_cannot_share_explicit_gpio_with_another_net():
+    requirement = _rp2040_requirement(gpio26="DIGITAL")
+    with pytest.raises(PinAllocationError):
+        allocate_requirement_pins(_rp2040_definition(), requirement)
+
+
+@pytest.mark.parametrize("gpio", [0, 1])
+def test_rp2040_uart_reservation_rejects_explicit_gpio_collision(gpio):
+    ports = {"uart_tx": "TX", "uart_rx": "RX", f"gpio{gpio}": "OTHER"}
+    with pytest.raises((PinAllocationError, ValueError)):
+        definition = _rp2040_definition(bindings=ports)
+        allocate_requirement_pins(definition, _rp2040_requirement(adc_count=0, **ports))
+
+
+def test_rp2040_uart_reservation_leaves_adc_pins_available():
+    ports = {"uart_tx": "TX", "uart_rx": "RX"}
+    allocations = allocate_requirement_pins(
+        _rp2040_definition(bindings=ports), _rp2040_requirement(**ports)
+    )
+    by_net = {row.net: row.pin for row in allocations}
+    assert by_net["TX"] == "2"
+    assert by_net["RX"] == "3"
+    assert {pin for net, pin in by_net.items() if net.startswith("SENSOR_")} == {
+        "38", "39", "40", "41",
+    }

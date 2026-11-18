@@ -943,7 +943,7 @@ def test_missing_external_load_current_parks_with_one_question(tmp_path):
     ) -> tuple[dict, list[dict], _ScriptedClient]:
         events: list[dict] = []
         client = _ScriptedClient(
-            [_reply(_hub75_intent()), _reply(_hub75_intent()), _reply(_hub75_intent())]
+            [_reply(_hub75_intent()) for _ in range(4)]
         )
         client.s = Settings(api_key="test")
         result = drive_stage(
@@ -4530,11 +4530,14 @@ def test_external_adc_typed_voltage_requirement_is_not_replaced():
 
 
 def test_external_adc_notes_bind_actual_wiring_and_refuse_missing_endpoint(tmp_path):
-    from kicraft.design.models import Architecture, BOM, BomPart, NetConnection
+    from kicraft.design.models import Architecture, BOM, BomPart, NetConnection, Sheet
     from kicraft.design.synthesis.emitter import _emit_root, _external_adc_notes
 
     result = _external_adc_resolution()
-    architecture = Architecture.model_construct(
+    architecture = Architecture(
+        sheets=[Sheet(name="INPUT", stem="INPUT", function="External analog source"),
+                Sheet(name="MCU", stem="MCU", function="ADC acquisition")],
+        power_nets=["VLOGIC", "GND"], inter_sheet_nets=[],
         requirements=result.requirements, external_adc_contracts=result.external_adc_contracts,
     )
     bom = BOM.model_construct(
@@ -5010,3 +5013,75 @@ def test_authored_pd_vbus_wire_preserves_the_one_actual_source_domain(socket_sup
     endpoints = _pd_expanded_endpoints(architecture)
     assert {("USB4085-GF-A", "connector", pin) for pin in ("A4", "A9", "B4", "B9")} <= endpoints[raw]
     assert {("TPS26631RGER", "efuse", pin) for pin in ("1", "2", "5")} <= endpoints[raw]
+
+
+def _relay_supply_intent():
+    requirement = {
+        "id": "relay_bank", "role": "driver", "family": "relay-output",
+        "parameters": {"channel_count": 2, "motor_voltage_v": 5.0},
+        "supply": "+5V",
+    }
+    signals = [
+        {"name": f"CTRL{number}", "from": f"input.pin{number + 2}",
+         "to": f"relay_bank.control_{number}"}
+        for number in (1, 2)
+    ]
+    signals.extend(
+        {"name": f"CONTACT_{number}_{contact.upper()}",
+         "from": f"relay_bank.relay_{number}_{contact}", "to": f"input.pin{pin}"}
+        for pin, (number, contact) in enumerate(
+            ((number, contact) for number in (1, 2)
+             for contact in ("common", "normally_open", "normally_closed")), start=5,
+        )
+    )
+    return _one_part_intent(requirement, signals)
+
+
+def test_relay_declared_supply_reaches_actual_driver_and_coils():
+    from kicraft.design.lowering import lower_requirement
+
+    architecture = derive_architecture(_relay_supply_intent())
+    relay = _requirement(architecture, "relay_bank")
+    artifact = lower_requirement(relay)
+    assert relay.ports["vmotor"] == "+5V"
+    assert {(pin.role, pin.pin, pin.net) for pin in artifact.pins
+            if (pin.role, pin.pin) in {("driver", "9"), ("relay", "1")}} == {
+                ("driver", "9", "+5V"), ("relay", "1", "+5V"),
+            }
+    assert {pin.net for pin in artifact.pins if pin.role == "relay_contact_terminal"} == {
+        f"CONTACT_{number}_{contact.upper()}"
+        for number in (1, 2) for contact in ("common", "normally_open", "normally_closed")
+    }
+    assert len(architecture.requirements) == 2
+
+
+def test_relay_explicit_supply_conflict_retains_both_rail_bindings():
+    payload = _relay_supply_intent()
+    payload["power"]["rails"]["OTHER5V"] = {"voltage": 5.0, "from": "input.pin11"}
+    payload["requirements"][1]["supply_bindings"] = {"vmotor": "OTHER5V"}
+    with pytest.raises(ArchitectureIntentError) as rejected:
+        derive_architecture(payload)
+    conflict = next(row for row in rejected.value.diagnostics
+                    if row.code == "conflicting_port_binding")
+    assert "OTHER5V" in conflict.message and "+5V" in conflict.message
+
+
+def test_barrel_aliases_resolve_one_physical_contact_and_reviewed_default():
+    from kicraft.design.lowering import lower_requirement
+
+    payload = _one_part_intent({
+        "id": "jack", "role": "connector", "family": "barrel-jack",
+        "ties": {"tip": "+5V", "positive": "+5V", "sleeve": "GND"},
+    })
+    jack = _requirement(derive_architecture(payload), "jack")
+    artifact = lower_requirement(jack)
+    assert jack.exact_part == "DC005"
+    assert jack.ports == {"positive": "+5V", "gnd": "GND"}
+    assert {group.mpn for group in artifact.groups} == {"DC005"}
+    assert len(artifact.pins) == 2 and len(artifact.no_connects) == 1
+    payload["requirements"][1]["ties"]["positive"] = "GND"
+    with pytest.raises(ArchitectureIntentError) as rejected:
+        derive_architecture(payload)
+    assert any(row.code == "conflicting_port_binding"
+               and "+5V" in row.message and "GND" in row.message
+               for row in rejected.value.diagnostics)

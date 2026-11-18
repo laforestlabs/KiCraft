@@ -16,9 +16,7 @@ from kicraft.design.synthesis.validation import check_spec_named_mpn_substitutio
 from kicraft.server.config import STAGE_COLLECTION_BOUNDS, CollectionBound
 from kicraft.server.stage_contracts import (
     IntentStageResponse,
-    _is_free_form_object,
     _normalize_bom_stage_response,
-    _strict_provider_schema,
     _normalize_stage_response,
     _normalize_wiring_stage_response,
     apply_collection_bounds,
@@ -290,28 +288,6 @@ def test_deepseek_json_object_prompts_name_json(stage):
     assert "json" in build_system(stage).lower()
 
 
-def test_strict_provider_schema_is_openai_compatible():
-    schema = build_stage_response_contract("architecture", {}).schema
-    canonical = json.loads(json.dumps(schema))
-    strict = _strict_provider_schema(schema)
-
-    assert strict is not schema
-    assert strict["type"] == "object"
-    assert strict["additionalProperties"] is False
-    # Every fixed-shape root property is required; free-form maps are not.
-    fixed = {
-        name
-        for name, subschema in strict["properties"].items()
-        if not _is_free_form_object(subschema)
-    }
-    assert set(strict["required"]) == fixed
-    assert "topologies" in strict["properties"]
-    assert "topologies" not in strict["required"]
-    nested = strict["$defs"]["IntentSheet"]
-    assert nested["additionalProperties"] is False
-    assert set(nested["required"]) == set(nested["properties"])
-    # The canonical schema is untouched.
-    assert schema == canonical
 
 
 def test_interactive_contract_merges_questions_and_empty_list_is_a_slot():
@@ -1097,7 +1073,7 @@ def test_recipe_only_bom_work_unit_may_return_no_additional_groups():
             "requirements": [{"id": "mcu", "sheet": "MCU"}],
             "recipe_selections": [
                 {
-                    "recipe": "rp2040-minimal@3",
+                    "recipe": "rp2040-minimal@4",
                     "instance": "mcu",
                     "sheets": {"mcu": "MCU", "io": "MCU"},
                     "requirement_ids": ["mcu"],
@@ -1113,7 +1089,11 @@ def test_recipe_only_bom_work_unit_may_return_no_additional_groups():
 
 @pytest.mark.parametrize("allow_questions", [True, False])
 def test_architecture_provider_requires_explicit_nonempty_implementation_contracts(allow_questions):
+    from jsonschema import Draft202012Validator
+
     contract = build_stage_response_contract("architecture", {}, allow_questions=allow_questions)
+    Draft202012Validator.check_schema(contract.schema)
+    Draft202012Validator.check_schema(contract.response_format["json_schema"]["schema"])
     architecture = contract.schema
     assert "requirements" in architecture["required"]
     assert architecture["properties"]["requirements"]["minItems"] == 1

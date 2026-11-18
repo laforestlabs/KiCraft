@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import time
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Literal, Mapping, Sequence
 
@@ -251,6 +252,8 @@ def decide(
     run_id: str | None = None,
     stage: str | None = None,
     recorder=None,
+    reserve_call=None,
+    call_mode: str = "decision",
     session: requests.Session | None = None,
 ) -> list[Answer]:
     """Take one decision over ``state``: every question answered in a single pass.
@@ -280,6 +283,48 @@ def decide(
     # bound; this endpoint's documented Jev 1.13 pricing is input-only.
     input_bytes = len(json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
     reservation = guard.reserve(max(1, input_bytes) * price / 1_000_000, run_id)
+    attempt = 1
+    if reserve_call is not None:
+        try:
+            admitted = reserve_call()
+        except BaseException:
+            guard.settle_reservation(
+                reservation, model, 0, 0, 0.0,
+                meta={"run_id": run_id, "stage": stage, "phase": "decision_not_dispatched"},
+            )
+            raise
+        if not admitted:
+            guard.settle_reservation(
+                reservation, model, 0, 0, 0.0,
+                meta={"run_id": run_id, "stage": stage, "phase": "decision_not_dispatched"},
+            )
+            raise DecisionUnavailable("decision call budget exhausted")
+        if isinstance(admitted, int) and not isinstance(admitted, bool):
+            attempt = admitted
+    started = time.monotonic()
+
+    def record(outcome, *, response=None, usage=None, cost=None, exc=None, generation_id=None):
+        if not stage or not callable(getattr(guard, "record_stage_attempt", None)):
+            return
+        from .client import classify_provider_exception
+
+        error = exc or requests.HTTPError(response=response)
+        error._kicraft_request_id = generation_id
+        facts = classify_provider_exception(error)
+        usage = usage or {}
+        try:
+            guard.record_stage_attempt(
+                run_id=run_id, stage=stage, attempt=attempt, call_mode=call_mode,
+                model=model, provider="OpenRouter", outcome=outcome,
+                http_status=getattr(response, "status_code", facts["http_status"]),
+                error_code=facts["error_code"], request_id=facts["request_id"],
+                wall_s=time.monotonic() - started,
+                input_tokens=usage.get("input_tokens"), output_tokens=usage.get("output_tokens"),
+                cost_usd=cost,
+            )
+        except Exception:
+            pass
+
     http = session or requests
     try:
         response = http.post(
@@ -293,26 +338,25 @@ def decide(
         )
     except BaseException as exc:
         guard.mark_uncertain(reservation)
+        record("transport_error", exc=exc)
         if isinstance(exc, requests.RequestException):
-            raise DecisionUnavailable(f"the decisions endpoint could not be reached: {exc}") from exc
+            raise DecisionUnavailable("the decisions endpoint could not be reached") from exc
         raise
     if response.status_code >= 400:
         guard.mark_uncertain(reservation)
-        detail = ""
-        try:
-            detail = str((response.json() or {}).get("error", {}).get("message") or "")
-        except Exception:
-            detail = (response.text or "")[:300]
-        raise DecisionUnavailable(
-            f"the decisions endpoint refused the request ({response.status_code}): {detail[:400]}"
-        )
+        from .client import classify_provider_exception
+        failure = classify_provider_exception(requests.HTTPError(response=response))
+        record(failure["failure_kind"], response=response)
+        raise DecisionUnavailable(f"the decisions endpoint refused the request ({response.status_code})")
     try:
         payload = response.json()
     except ValueError as exc:
         guard.mark_uncertain(reservation)
-        raise DecisionUnavailable(f"the decisions endpoint returned no JSON: {exc}") from exc
+        record("invalid_json", response=response)
+        raise DecisionUnavailable("the decisions endpoint returned no JSON") from exc
     if not isinstance(payload, Mapping):
         guard.mark_uncertain(reservation)
+        record("invalid_response", response=response)
         raise DecisionUnavailable("the decisions payload is not an object")
     usage = payload.get("usage")
     usage = usage if isinstance(usage, Mapping) else {}
@@ -326,10 +370,14 @@ def decide(
         out_tok = out_tok if isinstance(out_tok, int) and out_tok >= 0 else 0
         guard.settle_reservation(
             reservation, model, in_tok, out_tok, cost,
-            meta={"run_id": run_id, "stage": stage, "phase": "decision"},
+            meta={"run_id": run_id, "stage": stage, "phase": "decision",
+                  "attempt": attempt, "call_mode": call_mode, "model": model},
         )
     else:
         guard.mark_uncertain(reservation)
+    record("decision", response=response, usage=usage,
+           cost=cost if math.isfinite(cost) and cost > 0 else None,
+           generation_id=payload.get("id"))
     if recorder is not None and usage:
         recorder(usage)
     return parse_answers(payload, questions)

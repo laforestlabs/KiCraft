@@ -1006,6 +1006,8 @@ def test_semantic_repair_is_bounded_to_one_correction(tmp_path):
         [reply(intent), reply(initial), reply(first_repair), reply(second_repair)]
     )
     client.s = Settings(api_key="test")
+    recorded = []
+    client.guard.record_stage_attempt = lambda **row: recorded.append(row)
 
     events = []
     result = run_session(
@@ -1026,6 +1028,11 @@ def test_semantic_repair_is_bounded_to_one_correction(tmp_path):
     assert functional["semantic_clean"] is True
     assert functional["diagnostics"] == []
     assert len(client.calls) == 3
+    functional_calls = [row for row in recorded if row["stage"] == "functional_spec"]
+    assert [(row["attempt"], row["call_mode"]) for row in functional_calls] == [
+        (1, "normal"), (2, "semantic_repair")
+    ]
+    assert "functional_spec_premature_topology" in functional_calls[0]["diagnostic_codes"]
     assert any(
         event.get("kind") == "stage_diagnostic"
         and event.get("code") == "functional_spec_premature_topology"
@@ -4110,15 +4117,8 @@ def _header_board(rails: dict) -> dict:
     }
 
 
-def test_a_changing_design_defect_earns_bounded_preserving_corrections(tmp_path):
-    """A design-contract refusal is a design defect: keep the draft while the defect set changes.
-
-    Stock behaviour answered the first refusal with one serialization pass and one from-scratch
-    rewrite, then failed the stage outright — which is how four live architecture drafts died
-    without ever producing a candidate (seed-37 walkthrough). A *changed* defect set is progress,
-    the same rule the commit path and the optional ladder already used, so it now earns up to two
-    preserving corrections on its own. An unchanged defect set still terminates immediately.
-    """
+def test_architecture_contract_repairs_preserve_candidate_and_obey_four_call_budget(tmp_path):
+    """Changing circuit defects never purchase a fifth provider call."""
     def reply(payload):
         return {
             "text": json.dumps(payload),
@@ -4143,13 +4143,21 @@ def test_a_changing_design_defect_earns_bounded_preserving_corrections(tmp_path)
         client, "architecture", "a header breakout", state_path, tmp_path
     )
 
-    assert result["commit_ok"] is True, result
-    assert len(client.calls) == 5  # normal, serialization, escape, then two design-contract rounds
-    assert json.loads(state_path.read_text())["architecture"] is not None
+    assert result["commit_ok"] is False
+    assert result["failure_kind"] == "contract_rejected"
+    assert len(client.calls) == 4
+    assert "absent_rail" in json.dumps(result["diagnostic"])
+    assert "phantom" not in json.dumps(result["diagnostic"])
+    assert _rungs(client) == ["normal"] * 4
+    for index, call in enumerate(client.calls[1:], 1):
+        assert any(m["role"] == "assistant" and json.loads(m["content"]) == defects[index - 1]
+                   for m in call["messages"])
+        assert any("Concrete diagnostic" in m["content"] for m in call["messages"]
+                   if m["role"] == "user")
 
 
-def test_a_repeated_design_defect_stays_terminal(tmp_path):
-    """No progress, no extra rounds: the same defect twice ends the stage as before."""
+def test_repeated_architecture_defect_stays_within_four_call_budget(tmp_path):
+    """Each correction preserves the draft, even when the defect repeats."""
     def reply(payload):
         return {
             "text": json.dumps(payload),
@@ -4167,7 +4175,256 @@ def test_a_repeated_design_defect_stays_terminal(tmp_path):
     )
 
     assert result["commit_ok"] is False
-    assert len(client.calls) == 3  # unchanged defect set: nothing is earned
+    assert len(client.calls) == 4
+
+
+def test_architecture_contract_correction_commits(tmp_path):
+    bad = _header_board({"VBUS": {"voltage": 5.0, "from": "ghost.vbus"}})
+    good = _header_board({"VBUS": {"voltage": 5.0, "from": None}})
+    client = _ladder_client([_bad_reply(json.dumps(bad)), _bad_reply(json.dumps(good))])
+    result = stage_driver_mod.drive_stage(
+        client, "architecture", "a header breakout", tmp_path / ".kicraft" / "state.json", tmp_path
+    )
+    assert result["commit_ok"] is True
+    assert _rungs(client) == ["normal", "normal"]
+    assert any(m["role"] == "assistant" and json.loads(m["content"]) == bad
+               for m in client.calls[1]["messages"])
+
+
+def test_architecture_malformed_json_uses_only_one_formatting_recovery(tmp_path):
+    client = _ladder_client([_bad_reply("not json")] * 4)
+    result = stage_driver_mod.drive_stage(
+        client, "architecture", "a header breakout", tmp_path / ".kicraft" / "state.json", tmp_path
+    )
+    assert result["failure_kind"] == "invalid_json"
+    assert len(client.calls) == 4
+    assert _rungs(client) == ["normal", "serialization", "normal", "normal"]
+
+
+def test_architecture_audit_shares_call_budget_and_fails_when_exhausted(tmp_path, monkeypatch):
+    from kicraft.server import draft_audit
+
+    audited = []
+    monkeypatch.setattr(draft_audit, "architecture_questions", lambda candidate: [object()])
+    def audit(candidate, **kwargs):
+        if kwargs["reserve_call"]():
+            audited.append(candidate)
+        return []
+
+    monkeypatch.setattr(draft_audit, "audit_architecture", audit)
+    good = _header_board({"VBUS": {"voltage": 5.0, "from": None}})
+    client = _ladder_client(
+        [_bad_reply("not json")] * 3 + [_bad_reply(json.dumps(good))],
+        enable_draft_audit=True,
+    )
+    result = stage_driver_mod.drive_stage(
+        client, "architecture", "a header breakout", tmp_path / ".kicraft" / "state.json", tmp_path
+    )
+    assert result["failure_kind"] == "provider_call_budget_exhausted"
+    assert result["attempts"] == 4
+    assert len(client.calls) == 4
+    assert not audited
+
+
+def test_architecture_actual_audit_calls_share_four_call_budget(tmp_path, monkeypatch):
+    from kicraft.server import decision_layer, draft_audit
+    from kicraft.server.spend_guard import SpendGuard
+
+    monkeypatch.setattr(decision_layer, "_api_key", lambda: "test")
+    monkeypatch.setattr(
+        draft_audit, "architecture_questions",
+        lambda candidate: [decision_layer.Question(key="q", prompt="Question?", kind="noul")],
+    )
+    posts = []
+
+    def post(*args, **kwargs):
+        posts.append(True)
+        return type("Response", (), {
+            "status_code": 200,
+            "json": lambda self: {"answers": {}, "usage": {"cost": 0.000001}},
+        })()
+
+    monkeypatch.setattr(decision_layer.requests, "post", post)
+    bad = _header_board({"VBUS": {"voltage": 5.0, "from": "ghost.vbus"}})
+    client = _ladder_client([_bad_reply(json.dumps(bad))] * 4)
+    client.guard = SpendGuard(Settings(api_key="test", ledger_path=tmp_path / "decisions.db"))
+    result = stage_driver_mod.drive_stage(
+        client, "architecture", "a header breakout", tmp_path / ".kicraft" / "state.json", tmp_path
+    )
+    assert result["failure_kind"] == "contract_rejected"
+    assert result["attempts"] == 4
+    assert len(client.calls) == 4
+    assert posts == []
+
+
+@pytest.mark.parametrize("malformed_first", [False, True])
+def test_audit_receives_original_draft_after_normal_or_serialization(
+    tmp_path, monkeypatch, malformed_first,
+):
+    from kicraft.server import draft_audit
+
+    seen = []
+
+    def audit(candidate, **kwargs):
+        assert kwargs["reserve_call"]()
+        seen.append(candidate)
+        return []
+
+    monkeypatch.setattr(draft_audit, "audit_architecture", audit)
+    draft = _header_board({"VBUS": {"voltage": 5.0, "from": None}})
+    replies = ([_bad_reply("not json")] if malformed_first else []) + [_bad_reply(json.dumps(draft))]
+    client = _ladder_client(replies, stage_semantics="observe")
+    result = stage_driver_mod.drive_stage(
+        client, "architecture", "a header breakout", tmp_path / ".kicraft" / "state.json",
+        tmp_path, review_before_commit=True,
+    )
+    assert result["needs_review"]
+    assert result["attempts"] == len(replies) + 1
+    assert seen == [draft]
+
+
+def test_semantic_repair_audits_its_own_parsed_answer_and_keeps_full_findings(
+    tmp_path, monkeypatch,
+):
+    from kicraft.server import draft_audit
+
+    first = _header_board({"VBUS": {"voltage": 5.0, "from": None}})
+    second = _header_board({"VCC": {"voltage": 5.0, "from": None}})
+    evidence = ["first evidence", "second evidence " + "x" * 160]
+    seen = []
+
+    def audit(candidate, **kwargs):
+        assert kwargs["reserve_call"]()
+        seen.append(candidate)
+        if len(seen) == 1:
+            return [StageDiagnostic(
+                code="audit_repair", severity="repair_required",
+                message="repair the first draft", evidence=evidence,
+            )]
+        return []
+
+    monkeypatch.setattr(draft_audit, "audit_architecture", audit)
+    monkeypatch.setattr(stage_driver_mod, "diagnose_stage", lambda *args, **kwargs: [])
+    client = _ladder_client([_bad_reply(json.dumps(first)), _bad_reply(json.dumps(second))])
+    result = stage_driver_mod.drive_stage(
+        client, "architecture", "a header breakout", tmp_path / ".kicraft" / "state.json",
+        tmp_path, review_before_commit=True,
+    )
+    assert result["needs_review"]
+    assert result["attempts"] == 4
+    assert seen == [first, second]
+    correction = client.calls[1]["messages"]
+    assert any(m["role"] == "assistant" and json.loads(m["content"]) == first for m in correction)
+    assert all(item in correction[-1]["content"] for item in evidence)
+
+
+def test_denied_fourth_answer_audit_keeps_current_semantic_diagnostics(tmp_path, monkeypatch):
+    from kicraft.server import draft_audit
+
+    seen = []
+
+    def audit(candidate, **kwargs):
+        if kwargs["reserve_call"]():
+            seen.append(candidate)
+        return []
+
+    monkeypatch.setattr(draft_audit, "audit_architecture", audit)
+    monkeypatch.setattr(
+        stage_driver_mod, "diagnose_stage",
+        lambda *args, **kwargs: [StageDiagnostic(
+            code="fourth_answer_fault", severity="repair_required",
+            message="The fourth answer has a fault", evidence=["fourth-value"],
+        )],
+    )
+    good = _header_board({"VBUS": {"voltage": 5.0, "from": None}})
+    client = _ladder_client([_bad_reply("not json")] * 3 + [_bad_reply(json.dumps(good))])
+    result = stage_driver_mod.drive_stage(
+        client, "architecture", "a header breakout", tmp_path / ".kicraft" / "state.json", tmp_path
+    )
+    assert result["failure_kind"] == "provider_call_budget_exhausted"
+    assert result["attempts"] == len(client.calls) == 4
+    assert seen == []
+    assert result["diagnostics"][0]["code"] == "fourth_answer_fault"
+    assert result["diagnostics"][0]["evidence"] == ["fourth-value"]
+
+
+def test_semantic_repair_fourth_answer_keeps_construction_refusal(tmp_path, monkeypatch):
+    from kicraft.server import draft_audit
+
+    def audit(candidate, **kwargs):
+        assert kwargs["reserve_call"]()
+        return []
+
+    monkeypatch.setattr(draft_audit, "audit_architecture", audit)
+    monkeypatch.setattr(
+        stage_driver_mod, "diagnose_stage",
+        lambda *args, **kwargs: [StageDiagnostic(
+            code="needs_repair", severity="repair_required", message="repair the design",
+        )],
+    )
+    good = _header_board({"VBUS": {"voltage": 5.0, "from": None}})
+    bad = _header_board({"VBUS": {"voltage": 5.0, "from": "fourth_ghost.vbus"}})
+    client = _ladder_client([
+        _bad_reply("not json"), _bad_reply(json.dumps(good)), _bad_reply(json.dumps(bad)),
+    ])
+    result = stage_driver_mod.drive_stage(
+        client, "architecture", "a header breakout", tmp_path / ".kicraft" / "state.json", tmp_path
+    )
+    assert result["failure_kind"] == "contract_rejected"
+    assert result["attempts"] == 4
+    assert len(client.calls) == 3
+    assert "fourth_ghost" in json.dumps(result["diagnostic"])
+
+
+def test_decision_budget_counts_only_dispatchable_calls(tmp_path, monkeypatch):
+    from kicraft.server import decision_layer
+    from kicraft.server.spend_guard import SpendGuard
+
+    question = decision_layer.Question(key="q", prompt="Question?", kind="noul")
+    reserved = []
+    reserve_call = lambda: reserved.append(True) or True
+    monkeypatch.setattr(decision_layer, "_api_key", lambda: "")
+    with pytest.raises(decision_layer.DecisionUnavailable):
+        decision_layer.decide({}, [question], reserve_call=reserve_call)
+    monkeypatch.setattr(decision_layer, "_api_key", lambda: "test")
+    with pytest.raises(decision_layer.DecisionUnavailable):
+        decision_layer.decide({}, [question], guard=object(), reserve_call=reserve_call)
+    assert not reserved
+
+    guard = SpendGuard(Settings(api_key="test", ledger_path=tmp_path / "decisions.db"))
+    posts = []
+
+    class Session:
+        def post(self, *args, **kwargs):
+            posts.append(True)
+            return type("Response", (), {
+                "status_code": 200,
+                "json": lambda self: {"answers": {}, "usage": {"cost": 0.001}},
+            })()
+
+    decision_layer.decide({}, [question], guard=guard, session=Session(), reserve_call=reserve_call)
+    assert len(reserved) == len(posts) == 1
+    with pytest.raises(decision_layer.DecisionUnavailable, match="budget exhausted"):
+        decision_layer.decide({}, [question], guard=guard, session=Session(), reserve_call=lambda: False)
+    assert len(posts) == 1
+    assert guard.status()["reserved_exposure_usd"] == 0
+
+
+def test_architecture_provider_rejection_retains_previous_diagnostic(tmp_path):
+    import requests
+
+    bad = _header_board({"VBUS": {"voltage": 5.0, "from": "ghost.vbus"}})
+    client = _ladder_client([
+        _bad_reply(json.dumps(bad)),
+        requests.exceptions.HTTPError("400 rejected secret-provider-body"),
+    ])
+    result = stage_driver_mod.drive_stage(
+        client, "architecture", "a header breakout", tmp_path / ".kicraft" / "state.json", tmp_path
+    )
+    assert result["failure_kind"] == "provider_request_rejected"
+    assert result["diagnostic"]
+    assert len(client.calls) == 2
+    assert "secret-provider-body" not in json.dumps(result)
 
 
 def test_native_construction_failure_stops_without_provider_retry(tmp_path, monkeypatch):

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import re
@@ -14,11 +15,6 @@ from typing import Callable, Literal
 import requests
 
 from kicraft.design import models
-from kicraft.design.stage_reference import (
-    architecture_recipe_summaries as _architecture_recipe_summaries,
-    reviewed_class_options_block as _reviewed_class_options_block,
-    standard_form_factor_block as _standard_form_factor_block,
-)
 from kicraft.design.stage_semantics import (
     DETECTOR_VERSION,
     EXTERNAL_LOAD_CURRENT_CODE,
@@ -188,7 +184,7 @@ def _record_attempt_facts(
         wall_s=facts.wall_s if facts is not None else None,
         input_tokens=usage.get("prompt_tokens"),
         output_tokens=usage.get("completion_tokens"),
-        cost_usd=facts.cost_usd if facts is not None else 0.0,
+        cost_usd=(facts.attempt_cost_usd if facts.attempt_cost_usd is not None else facts.cost_usd) if facts is not None else 0.0,
         provider_profile=getattr(getattr(client, "s", None), "design_profile", None),
         fallback_reason=fallback_reason,
         reasoning_failure_kind=_reasoning_failure_kind(facts),
@@ -210,9 +206,9 @@ def _record_attempt_facts(
             commit_result,
             candidate_retained=candidate_retained,
         ),
-        http_status=errors.get("http_status"),
+        http_status=errors.get("http_status") if errors else (facts.http_status if facts is not None else None),
         error_code=errors.get("error_code"),
-        request_id=errors.get("request_id"),
+        request_id=errors.get("request_id") if errors else (facts.request_id if facts is not None else None),
     )
 
 
@@ -1081,6 +1077,8 @@ _FAILURE_KIND_ERROR = {
     "provider_upstream_5xx": "provider service was temporarily unavailable",
     "provider_auth": "provider authentication failed",
     "provider_request_rejected": "provider rejected the request",
+    "provider_context_limit": "provider context limit exceeded",
+    "provider_call_budget_exhausted": "architecture provider call budget exhausted before a required decision",
     "provider_response_format_rejected": "provider rejected the response format",
     "provider_capability_rejected": "provider does not support a required capability",
     "provider_unknown": "provider request failed",
@@ -1089,12 +1087,9 @@ _FAILURE_KIND_ERROR = {
     "transport_stream_interrupted": "provider response stream was interrupted",
 }
 
-# Both kinds arrive through StageSchemaError and take the same bounded
-# correction path. They differ in CAUSE: ``invalid_schema`` is unusable provider
-# output, while ``contract_rejected`` is a schema-clean candidate that a
-# semantic/recipe contract (an attached `diagnostic`) refused. Callers that gate
-# on "this was a schema-path failure" must use this set, never the single kind —
-# the label is for investigators, not for routing.
+# The decoder distinguishes structural schema failures from construction refusals.
+# Other stages retain their legacy recovery ladder; architecture routes them to
+# preserving corrections rather than treating either as malformed JSON.
 _SCHEMA_REJECTION_KINDS = frozenset({"invalid_schema", "contract_rejected"})
 
 
@@ -1108,6 +1103,13 @@ _SERIALIZATION_RETRY_MSG = (
     "complete slot as ONE compact JSON object now: no markdown fences, no prose, "
     "no explanations. Omit null fields and keep every item on a single line so "
     "the whole slot fits the output budget."
+)
+
+_CONTRACT_RETRY_MSG = (
+    "Your previous architecture was valid JSON but failed circuit construction. "
+    "Nothing was committed. Correct every diagnostic below and return a complete "
+    "replacement matching the same schema. Preserve all committed obligations and "
+    "unrelated requirements, parts, nets, and bindings. {bounds_sentence}"
 )
 
 _SCHEMA_RETRY_MSG = (
@@ -1158,24 +1160,10 @@ _SYNTAX_LIMIT_RETRY_MSG = (
 
 
 def _audit_notes_sentence(audit_notes) -> str:
-    """One sentence naming what the Jev audit of the same draft reported.
-
-    The notes are left out of the rejection's identity (``_schema_rejection_signature`` reads the
-    diagnostic, not this message), so an audit note that changes wording can never be mistaken
-    for progress on the defect itself.
-    """
-    rows = [note for note in (audit_notes or []) if isinstance(note, dict) and note.get("code")]
+    rows = [note for note in (audit_notes or []) if isinstance(note, dict)]
     if not rows:
         return ""
-    described = "; ".join(
-        f"{row['code']}: {str(row.get('message') or '').strip()}"
-        + (f" [{str((row.get('evidence') or [''])[0])[:120]}]" if row.get("evidence") else "")
-        for row in rows[:4]
-    )
-    return (
-        "\nA Jev audit of this same draft, taken from the draft alone before the compiler "
-        f"derived it, additionally reports: {described}. Fix these in the same correction."
-    )
+    return "\nAudit findings for this draft (fix all): " + json.dumps(rows)
 
 
 def _stage_recovery_message(
@@ -1197,7 +1185,9 @@ def _stage_recovery_message(
         template = _DUPLICATE_IDENTITY_RETRY_MSG
     elif kind == "collection_limit":
         template = _COLLECTION_LIMIT_RETRY_MSG
-    elif kind in _SCHEMA_REJECTION_KINDS:
+    elif kind == "contract_rejected":
+        template = _CONTRACT_RETRY_MSG
+    elif kind == "invalid_schema":
         template = _SCHEMA_RETRY_MSG
     else:
         template = _SERIALIZATION_RETRY_MSG
@@ -1259,44 +1249,12 @@ _SEMANTIC_REPAIR_MSG = (
 )
 _MAX_SEMANTIC_REPAIR_ROUNDS = 1
 
-#: Preserving corrections a *design-contract* refusal earns by default (no ladder flag needed).
-#: A schema-clean draft that a design contract refused is a design defect, and one draft can carry
-#: several independent ones: the seed-37 walkthrough's four architecture drafts each fixed the
-#: reported defect and surfaced another (USB rail, unwired USB pins, unnumbered terminal contacts,
-#: a prose string where a part identity belongs). Stock behaviour answered them with a single
-#: from-scratch rewrite and then died; with this bound the loop keeps the draft while the defect
-#: set keeps changing, for two rounds. An unchanged defect set still terminates immediately.
+# Legacy non-architecture ladder allowance; architecture has a fixed call budget.
 _MAX_DESIGN_CONTRACT_REPAIR_ROUNDS = 2
 
 
-def _audit_parsed_draft(pre_audit, parsed) -> list[dict]:
-    """Audit a parsed draft if a hook is configured; findings as plain rows, never shared state."""
-    if pre_audit is None or not isinstance(parsed, dict):
-        return []
-    try:
-        findings = pre_audit(parsed)
-    except Exception:
-        return []
-    return [
-        finding.model_dump(exclude_none=True)
-        for finding in findings or []
-        if hasattr(finding, "model_dump")
-    ]
 
-
-def _pre_audit_hook(client, *, run_id=None):
-    """The pre-derivation audit hook for the stages that have one (architecture)."""
-
-    def audit(parsed: dict):
-        settings = getattr(client, "s", None)
-        if not getattr(settings, "enable_draft_audit", False):
-            return []
-        return _audit_architecture_draft(client, parsed, run_id=run_id)
-
-    return audit
-
-
-def _audit_architecture_draft(client, candidate: dict, *, run_id=None) -> list[models.StageDiagnostic]:
+def _audit_architecture_draft(client, candidate: dict, *, run_id=None, reserve_call=None) -> list[models.StageDiagnostic]:
     """Jev's typed findings about one architecture draft, billed and never blocking.
 
     The audit is one decision call over the draft (input-only pricing, a fraction of a cent at
@@ -1316,12 +1274,13 @@ def _audit_architecture_draft(client, candidate: dict, *, run_id=None) -> list[m
             guard=getattr(client, "guard", None),
             run_id=run_id,
             stage="architecture",
+            reserve_call=(lambda: reserve_call("draft_audit")) if reserve_call else None,
         )
     except Exception:
         return []
 
 
-def _name_reconciliation_decider(client, *, stage: str, run_id=None):
+def _name_reconciliation_decider(client, *, stage: str, run_id=None, reserve_call=None):
     """The typed-decision decider that reconciles naming differences, or None.
 
     One decider per drive: each batch of naming questions is a single typed decision
@@ -1339,7 +1298,10 @@ def _name_reconciliation_decider(client, *, stage: str, run_id=None):
     model = str(getattr(settings, "draft_audit_model", draft_audit.DEFAULT_MODEL))
 
 
-    return jev_decider(model=model, guard=getattr(client, "guard", None), run_id=run_id, stage=stage)
+    return jev_decider(
+        model=model, guard=getattr(client, "guard", None), run_id=run_id, stage=stage,
+        reserve_call=(lambda: reserve_call("name_reconciliation")) if reserve_call else None,
+    )
 
 
 def _semantic_repair_message(
@@ -1347,7 +1309,9 @@ def _semantic_repair_message(
 ) -> str:
     message = _SEMANTIC_REPAIR_MSG.format(
         diagnostics=json.dumps(
-            [{"code": d.code, "message": d.message, "evidence": d.evidence} for d in diagnostics],
+            [d.model_dump(exclude_none=True) if stage == "architecture"
+             else {"code": d.code, "message": d.message, "evidence": d.evidence}
+             for d in diagnostics],
             separators=(",", ":"),
         )
     )
@@ -1604,6 +1568,9 @@ class ProviderFacts:
     usage: dict | None = None
     wall_s: float | None = None
     response_format_mode: str | None = None
+    attempt_cost_usd: float | None = None
+    http_status: int | None = None
+    request_id: str | None = None
 
 
 def call_stage_provider(
@@ -1668,7 +1635,10 @@ def call_stage_provider(
         provider=result.get("provider"),
         usage=result.get("usage") or {},
         wall_s=round(time.monotonic() - call_t0, 3),
-        response_format_mode=("json_schema" if response_format is not None else "none"),
+        response_format_mode=result.get("response_format_mode") or ("json_schema" if response_format is not None else "none"),
+        attempt_cost_usd=result.get("last_call_cost_usd"),
+        http_status=result.get("http_status"),
+        request_id=result.get("request_id"),
     )
 
 
@@ -1711,7 +1681,9 @@ def run_serialization_recovery(
         provider=result.get("provider"),
         usage=result.get("usage") or {},
         wall_s=round(time.monotonic() - call_t0, 3),
-        response_format_mode=("json_schema" if response_format is not None else "none"),
+        response_format_mode=result.get("response_format_mode") or ("json_schema" if response_format is not None else "none"),
+        http_status=result.get("http_status"),
+        request_id=result.get("request_id"),
     )
 
 
@@ -1737,16 +1709,8 @@ def _unknown_sheet_references(prepared: PreparedStage, candidate: dict) -> list[
 def decode_stage_response(
     prepared: PreparedStage,
     facts: ProviderFacts,
-    *,
-    pre_audit=None,
 ) -> AttemptOutcome:
-    """Parse and normalize one response without mutating durable state.
-
-    ``pre_audit`` sees the *parsed* draft before ``_normalize_stage_response`` derives it — which
-    is where the compiler's contracts run, so a draft they refuse still gets audited and the
-    audit's findings travel with the refusal instead of being lost with it.
-    """
-    audit_findings: list[dict] = []
+    """Parse and normalize one response without mutating durable state."""
     try:
         if facts.finish == "collection_limit":
             raise ValueError("stream collection limit")
@@ -1765,19 +1729,18 @@ def decode_stage_response(
                     "expanded_component_count": 0,
                 },
             )
-        audit_findings = _audit_parsed_draft(pre_audit, parsed)
+        # Preserve the provider's representation for the audit after construction.
         candidate, expanded = _normalize_stage_response(
             prepared.stage,
-            parsed,
+            copy.deepcopy(parsed) if prepared.stage == "architecture" else parsed,
             prepared.prompt_state,
         )
         kind = "questions" if isinstance(candidate.get("questions"), list) else "candidate"
         payload = {
             "candidate": candidate,
             "expanded_component_count": expanded,
+            "parsed": parsed,
         }
-        if audit_findings:
-            payload["audit_findings"] = audit_findings
         return AttemptOutcome(kind, payload)
     except StageSchemaError as exc:
         diagnostic = getattr(exc, "diagnostic", None)
@@ -1791,7 +1754,6 @@ def decode_stage_response(
                 "failure_kind": "contract_rejected" if diagnostic else "invalid_schema",
                 "schema_error": str(exc),
                 "diagnostic": diagnostic,
-                "audit_findings": audit_findings,
             },
         )
     except (json.JSONDecodeError, ValueError):
@@ -3757,7 +3719,16 @@ def drive_stage(
     # One typed-decision decider per drive: it reconciles naming differences the deterministic
     # path cannot settle (a class spelling, an unbound count subject, a part class no group
     # claims, a declared contact no symbol publishes). None when the setting is off.
-    decider = _name_reconciliation_decider(client, stage=stage, run_id=run_id)
+    decision_attempts = 0
+
+    def reserve_decision(_call_mode: str) -> int:
+        nonlocal decision_attempts
+        decision_attempts += 1
+        return decision_attempts
+
+    decider = _name_reconciliation_decider(
+        client, stage=stage, run_id=run_id, reserve_call=reserve_decision
+    )
     if progress:
         progress({"kind": "stage_start", "stage": stage, "model": _client_model(client)})
 
@@ -3848,18 +3819,9 @@ def drive_stage(
         if block:
             extras["core_defaults_block"] = block
     if stage == "architecture":
-        extras["circuit_recipes"] = _architecture_recipe_summaries(
-            prep_json["state"].get("intent") or {}
-        )
-        from kicraft.design.lowering import lowerer_summaries
+        from kicraft.design.stage_reference import architecture_reference_extras
 
-        extras["circuit_lowerers"] = lowerer_summaries()
-        standard_block = _standard_form_factor_block(prep_json["state"].get("intent") or {})
-        if standard_block:
-            extras["standard_form_factor"] = standard_block
-        class_options = _reviewed_class_options_block(prep_json["state"].get("intent") or {})
-        if class_options:
-            extras["reviewed_class_options"] = class_options
+        extras.update(architecture_reference_extras(prep_json["state"].get("intent") or {}))
 
     # Bookkeeping the model has no use for stays out of its prompt.
     prompt_state = dict(prep_json["state"])
@@ -3993,9 +3955,22 @@ def drive_stage(
     # only needs the task, the model's last slot, and the correction: resolved
     # parts persist in the mpn cache + parts library and the executor memo
     # dedupes any re-issued lookup, so the dropped transcript is free to rebuild.
+    if progress and stage == "architecture":
+        progress({
+            "kind": "prompt_sections", "stage": stage,
+            "section_bytes": {
+                "system": len(messages[0]["content"].encode("utf-8")),
+                "brief": len(brief.encode("utf-8")),
+                "state": len(json.dumps(prompt_state).encode("utf-8")),
+                **{
+                    f"extras.{key}": len(json.dumps(value, separators=(",", ":")).encode("utf-8"))
+                    for key, value in extras.items()
+                },
+            },
+            "total_bytes": sum(len(message["content"].encode("utf-8")) for message in messages),
+        })
     base_messages = list(messages)
     ladder_modes = _contract_ladder_modes(active_client)
-    pre_audit = _pre_audit_hook(active_client, run_id=run_id)
     prepared = PreparedStage(
         stage=stage,
         prompt_state=prompt_state,
@@ -4071,6 +4046,7 @@ def drive_stage(
 
     total_cost = 0.0
     last: dict = {}
+    last_design_failure: dict = {}
     # Policy was resolved before prompt construction so the first attempt and
     # serialization retry consume the same immutable collection bounds.
     normal_cap = int(policy.normal_max_tokens)
@@ -4150,11 +4126,8 @@ def drive_stage(
     escape_temperature = float(
         getattr(getattr(active_client, "s", None), "serialization_escape_temperature", 0.4)
     )
-    # Recovery budgets are independent: reasoning recovery gets ONE
-    # reasoning-disabled retry, serialization recovery gets exactly ONE plain
-    # tool-free call at the fixed cap, and commit correction gets the normal
-    # `max_retries + 1` attempts. `attempts` counts ACTUAL provider calls made
-    # (never the configured maximum), and every call carries a finite cap.
+    # Architecture shares one four-call ceiling across all recovery lanes.
+    # Other stages retain their existing independent ladder policies.
     loop_retries = 0
     prior_rejection_signature = None
     clean_slate_next = False
@@ -4179,9 +4152,8 @@ def drive_stage(
     tool_calls_ct = None
     expanded_component_count = 0
     emitted_collection_count = 0
-    provider_call_budget = max_retries + 1
-    if native_candidate is not None:
-        # A supported native draft gets one pass, not a hidden provider retry.
+    provider_call_budget = 4 if stage == "architecture" else max_retries + 1
+    if native_candidate is not None and stage != "architecture":
         provider_call_budget = 0
     provider_ok = False
     schema_ok = False
@@ -4197,6 +4169,21 @@ def drive_stage(
     escalation_done = False
     provider_fallback_spent = False
     provider_fallback_active = False
+    auxiliary_budget_exhausted = False
+
+    def reserve_architecture_decision(call_mode: str) -> int | bool:
+        nonlocal attempts, auxiliary_budget_exhausted
+        if attempts >= provider_call_budget:
+            auxiliary_budget_exhausted = True
+            return False
+        attempts += 1
+        return attempts
+
+    if stage == "architecture":
+        decider = _name_reconciliation_decider(
+            active_client, stage=stage, run_id=run_id,
+            reserve_call=reserve_architecture_decision,
+        )
 
     def emit_candidate_decoded(
         decoded: AttemptOutcome,
@@ -4220,7 +4207,7 @@ def drive_stage(
             }
         )
 
-    for attempt in range(max_retries + 1 + _MAX_DESIGN_CONTRACT_REPAIR_ROUNDS):
+    for attempt in range(max(4 if stage == "architecture" else 0, max_retries + 1 + _MAX_DESIGN_CONTRACT_REPAIR_ROUNDS)):
         if attempts >= provider_call_budget and native_candidate is None:
             break
         if escalation_pending:
@@ -4290,6 +4277,7 @@ def drive_stage(
                 break
             attempts += 1  # a call IS attempted even when it raises below
             current_attempt_number = attempts
+            ctx["attempt"] = current_attempt_number
             try:
                 facts = call_stage_provider(
                     active_client,
@@ -4333,6 +4321,7 @@ def drive_stage(
                     "tool_calls": tool_calls_ct,
                     "provider_ok": provider_ok,
                     "schema_ok": schema_ok,
+                    **(last_design_failure if stage == "architecture" else {}),
                 }
                 _observe_attempt(
                     attempt_observer,
@@ -4353,6 +4342,8 @@ def drive_stage(
                     call_mode="clean_slate" if was_clean_slate else "normal",
                     outcome=kind,
                     error_facts={k: v for k, v in failure.items() if k != "failure_kind"},
+                    diagnostic_codes=_diagnostic_codes(last_design_failure.get("diagnostic")),
+                    commit_result=last_design_failure.get("commit"),
                     fallback_reason=("provider_rate_limited" if provider_fallback_active else None),
                 )
                 fallback_profile = getattr(
@@ -4480,10 +4471,10 @@ def drive_stage(
             messages = _lean_retry(None, _REASONING_LOOP_RETRY_MSG)
             continue
 
-        outcome = decode_stage_response(prepared, facts, pre_audit=pre_audit)
+        outcome = decode_stage_response(prepared, facts)
         emit_candidate_decoded(
             outcome,
-            provider_attempt=attempts,
+            provider_attempt=current_attempt_number,
             serialization_recovery=False,
             clean_slate=was_clean_slate,
         )
@@ -4509,7 +4500,7 @@ def drive_stage(
                 active_client,
                 run_id=run_id,
                 stage=stage,
-                attempt=attempts,
+                attempt=current_attempt_number,
                 call_mode="clean_slate" if was_clean_slate else "normal",
                 outcome="question",
                 facts=facts,
@@ -4519,7 +4510,7 @@ def drive_stage(
                 attempt_observer,
                 client=active_client,
                 stage=stage,
-                provider_attempt=attempts,
+                provider_attempt=current_attempt_number,
                 call_mode="clean_slate" if was_clean_slate else "normal",
                 outcome=kind or "invalid_schema",
                 facts=facts,
@@ -4539,6 +4530,8 @@ def drive_stage(
                 "collection_limit": collection_limit,
                 "audit_findings": outcome.payload.get("audit_findings") or [],
             }
+            if stage == "architecture" and kind == "contract_rejected":
+                last_design_failure = {"diagnostic": last.get("diagnostic")}
             rejection_codes = _diagnostic_codes(last.get("diagnostic"))
             defect_codes.extend(rejection_codes)
             if rejection_codes and kind == "contract_rejected":
@@ -4547,11 +4540,12 @@ def drive_stage(
                 active_client,
                 run_id=run_id,
                 stage=stage,
-                attempt=attempts,
+                attempt=current_attempt_number,
                 call_mode="clean_slate" if was_clean_slate else "normal",
                 outcome=kind,
                 facts=facts,
                 schema_error=_redacted_schema_error(schema_error_detail),
+                diagnostic_codes=rejection_codes,
             )
             if progress:
                 progress(
@@ -4573,6 +4567,20 @@ def drive_stage(
                         "model": _client_model(active_client),
                     }
                 )
+            if stage == "architecture" and kind not in {"invalid_json", "truncated_json"} and not (
+                kind == "collection_limit" and (collection_limit or {}).get("limit_scope") == "syntax"
+            ):
+                if attempts >= provider_call_budget:
+                    break
+                messages = _lean_retry(
+                    raw,
+                    _stage_recovery_message(
+                        kind, raw or "", _collection_bounds_sentence(policy.collection_bounds),
+                        schema_error=schema_error_detail, diagnostic=last.get("diagnostic"),
+                        collection_limit=collection_limit, audit_notes=last.get("audit_findings"),
+                    ),
+                )
+                continue
             if was_clean_slate:
                 # O3: like the commit path, a rejected clean-slate is terminal
                 # only when the rejection identity is unchanged. A different
@@ -4652,7 +4660,7 @@ def drive_stage(
             serialization_calls += 1
             attempts += 1  # the serialization completion is a provider call too
             current_attempt_number = attempts
-            sctx = {**ctx, "serialization": True, "call_mode": "serialization"}
+            sctx = {**ctx, "attempt": current_attempt_number, "serialization": True, "call_mode": "serialization"}
             smessages = list(call_messages)
             bounds_sentence = _collection_bounds_sentence(policy.collection_bounds)
             retry_message = _stage_recovery_message(
@@ -4713,6 +4721,7 @@ def drive_stage(
                     "rounds": rounds,
                     "tool_calls": tool_calls_ct,
                     "provider_ok": provider_ok,
+                    **(last_design_failure if stage == "architecture" else {}),
                     "schema_ok": schema_ok,
                 }
                 _observe_attempt(
@@ -4734,14 +4743,16 @@ def drive_stage(
                     call_mode="serialization",
                     outcome=skind,
                     error_facts={k: v for k, v in failure.items() if k != "failure_kind"},
+                    diagnostic_codes=_diagnostic_codes(last_design_failure.get("diagnostic")),
+                    commit_result=last_design_failure.get("commit"),
                 )
                 break
             sraw = sfacts.raw
             scollection_limit = sfacts.collection_limit
-            serialization_outcome = decode_stage_response(prepared, sfacts, pre_audit=pre_audit)
+            serialization_outcome = decode_stage_response(prepared, sfacts)
             emit_candidate_decoded(
                 serialization_outcome,
-                provider_attempt=attempts,
+                provider_attempt=current_attempt_number,
                 serialization_recovery=True,
                 clean_slate=was_clean_slate,
             )
@@ -4759,7 +4770,7 @@ def drive_stage(
                     active_client,
                     run_id=run_id,
                     stage=stage,
-                    attempt=attempts,
+                    attempt=current_attempt_number,
                     call_mode="serialization",
                     outcome=(
                         "question"
@@ -4768,12 +4779,13 @@ def drive_stage(
                     ),
                     facts=sfacts,
                     schema_error=_redacted_schema_error(schema_error_detail),
+                    diagnostic_codes=_diagnostic_codes(serialization_outcome.payload.get("diagnostic")),
                 )
                 _observe_attempt(
                     attempt_observer,
                     client=active_client,
                     stage=stage,
-                    provider_attempt=attempts,
+                    provider_attempt=current_attempt_number,
                     call_mode="serialization",
                     outcome=(
                         "question"
@@ -4806,6 +4818,20 @@ def drive_stage(
                     "schema_error": schema_error_detail,
                     "diagnostic": serialization_outcome.payload.get("diagnostic"),
                 }
+                if stage == "architecture":
+                    if skind == "contract_rejected":
+                        last_design_failure = {"diagnostic": last.get("diagnostic")}
+                    if attempts >= provider_call_budget:
+                        break
+                    messages = _lean_retry(
+                        sraw,
+                        _stage_recovery_message(
+                            skind, sraw or "", _collection_bounds_sentence(policy.collection_bounds),
+                            schema_error=schema_error_detail, diagnostic=last.get("diagnostic"),
+                            collection_limit=scollection_limit,
+                        ),
+                    )
+                    continue
                 if attempts >= provider_call_budget or clean_slate_spent:
                     break
                 clean_slate_spent = True
@@ -4850,6 +4876,7 @@ def drive_stage(
             raw = sraw
             current_facts = sfacts
             current_call_mode = "serialization"
+            outcome = serialization_outcome
 
         # A clarifying-question payload has no slot this turn. The persisted
         # policy decides whether an ordinary question parks or receives the
@@ -4919,6 +4946,18 @@ def drive_stage(
         diagnostics = diagnose_stage(
             stage, brief=brief, upstream_state=semantic_state, candidate=obj
         )
+        if auxiliary_budget_exhausted:
+            _record_attempt_facts(
+                active_client, run_id=run_id, stage=stage, attempt=current_attempt_number,
+                call_mode=current_call_mode, outcome="candidate", facts=current_facts,
+                diagnostic_codes=[d.code for d in diagnostics],
+            )
+            last = {
+                "failure_kind": "provider_call_budget_exhausted",
+                "error": _FAILURE_KIND_ERROR["provider_call_budget_exhausted"],
+                "diagnostics": [d.model_dump(exclude_none=True) for d in diagnostics],
+            }
+            break
         provider_diagnostic_codes = [diagnostic.code for diagnostic in diagnostics]
         defect_codes.extend(provider_diagnostic_codes)
         if progress:
@@ -4941,11 +4980,23 @@ def drive_stage(
                     upstream_state=semantic_state,
                     candidate=obj,
                 )
-            # The rulebook, asked of Jev before the compiler refuses the draft: a finding lands in
-            # the same correction round as the deterministic ones instead of costing the stage a
-            # contract refusal. Fail-soft by construction — an unavailable auditor contributes
-            # nothing and never blocks the draft.
-            audit_findings = _audit_architecture_draft(active_client, obj, run_id=run_id)
+            # Construction has accepted this answer; review the original parsed draft.
+            audit_findings = _audit_architecture_draft(
+                active_client, outcome.payload["parsed"], run_id=run_id,
+                reserve_call=reserve_architecture_decision,
+            )
+            if auxiliary_budget_exhausted:
+                _record_attempt_facts(
+                    active_client, run_id=run_id, stage=stage, attempt=current_attempt_number,
+                    call_mode=current_call_mode, outcome="candidate", facts=current_facts,
+                    diagnostic_codes=[d.code for d in diagnostics],
+                )
+                last = {
+                    "failure_kind": "provider_call_budget_exhausted",
+                    "error": _FAILURE_KIND_ERROR["provider_call_budget_exhausted"],
+                }
+                last["diagnostics"] = [d.model_dump(exclude_none=True) for d in diagnostics]
+                break
             if audit_findings:
                 diagnostics = [*diagnostics, *audit_findings]
                 provider_diagnostic_codes = [
@@ -5055,6 +5106,19 @@ def drive_stage(
                     )
                 return parked
         repair_source_raw = raw
+        original_attempt_number = current_attempt_number
+        original_attempt_recorded = False
+        if (severe and semantic_mode in {"repair", "enforce"}
+                and semantic_repair_rounds < _MAX_SEMANTIC_REPAIR_ROUNDS
+                and attempts < provider_call_budget):
+            _record_attempt_facts(
+                active_client, run_id=run_id, stage=stage,
+                attempt=current_attempt_number, call_mode=current_call_mode,
+                outcome="candidate", facts=current_facts,
+                diagnostic_codes=[d.code for d in diagnostics],
+            )
+            original_attempt_recorded = True
+        repair_rejected = False
         while (
             severe
             and semantic_mode in {"repair", "enforce"}
@@ -5064,8 +5128,10 @@ def drive_stage(
             semantic_repair_attempted = True
             semantic_repair_rounds += 1
             attempts += 1
+            repair_attempt_number = attempts
             repair_message = _semantic_repair_message(
-                stage, severe, auto_default_questions=auto_default_questions
+                stage, diagnostics if stage == "architecture" else severe,
+                auto_default_questions=auto_default_questions
             )
             repair_messages = _lean_retry(repair_source_raw, repair_message)
             try:
@@ -5081,13 +5147,12 @@ def drive_stage(
                         **(meta_ctx or {}),
                         "stage": stage,
                         "attempt": attempts,
+                        "call_mode": "semantic_repair",
                         "semantic_repair": True,
                     },
                 )
                 total_cost += repair_facts.cost_usd
-                repair_outcome = decode_stage_response(
-                    prepared, repair_facts, pre_audit=pre_audit
-                )
+                repair_outcome = decode_stage_response(prepared, repair_facts)
                 if repair_outcome.kind == "candidate":
                     repaired = _normalize_candidate_for_diagnostics(
                         stage,
@@ -5110,29 +5175,45 @@ def drive_stage(
                     repaired_diagnostics = diagnose_stage(
                         stage, brief=brief, upstream_state=semantic_state, candidate=repaired
                     )
+                    if auxiliary_budget_exhausted:
+                        _record_attempt_facts(
+                            active_client, run_id=run_id, stage=stage, attempt=repair_attempt_number,
+                            call_mode="semantic_repair", outcome="candidate", facts=repair_facts,
+                            diagnostic_codes=[d.code for d in repaired_diagnostics],
+                        )
+                        diagnostics = repaired_diagnostics
+                        break
                     if stage == "architecture":
                         # The audit judges the draft that would be adopted, not only the first
                         # one: a correction is exactly where a rule can be broken again.
                         repaired_diagnostics = [
                             *repaired_diagnostics,
-                            *_audit_architecture_draft(active_client, repaired, run_id=run_id),
+                            *_audit_architecture_draft(
+                                active_client, repair_outcome.payload["parsed"], run_id=run_id,
+                                reserve_call=reserve_architecture_decision,
+                            ),
                         ]
+                    if auxiliary_budget_exhausted:
+                        _record_attempt_facts(
+                            active_client, run_id=run_id, stage=stage, attempt=repair_attempt_number,
+                            call_mode="semantic_repair", outcome="candidate", facts=repair_facts,
+                            diagnostic_codes=[d.code for d in repaired_diagnostics],
+                        )
+                        diagnostics = repaired_diagnostics
+                        break
                     repaired_severe = [
                         d
                         for d in repaired_diagnostics
                         if d.severity in {"repair_required", "fab_gate"}
                     ]
-                    _record_attempt_facts(
-                        active_client,
-                        run_id=run_id,
-                        stage=stage,
-                        attempt=attempts,
-                        call_mode="semantic_repair",
-                        outcome="candidate",
-                        facts=repair_facts,
-                        diagnostic_codes=[d.code for d in repaired_diagnostics],
-                    )
-                    if _semantic_defect_score(repaired_severe) >= _semantic_defect_score(severe):
+                    if (stage != "architecture"
+                            and _semantic_defect_score(repaired_severe) >= _semantic_defect_score(severe)):
+                        _record_attempt_facts(
+                            active_client, run_id=run_id, stage=stage,
+                            attempt=repair_attempt_number, call_mode="semantic_repair",
+                            outcome="candidate", facts=repair_facts,
+                            diagnostic_codes=[d.code for d in repaired_diagnostics],
+                        )
                         break
                     obj = repaired
                     diagnostics = repaired_diagnostics
@@ -5140,12 +5221,16 @@ def drive_stage(
                     semantic_repair_adopted = True
                     adopted_repair_facts = repair_facts
                     repair_source_raw = repair_facts.raw
+                    if stage == "architecture":
+                        raw = repair_facts.raw
+                        provider_diagnostic_codes = [d.code for d in repaired_diagnostics]
+                        defect_codes.extend(provider_diagnostic_codes)
                     # The adopted candidate is THIS call's, not the first attempt's. The
                     # review row and the candidate_review event below read the current_*
                     # context, and leaving it stale attributed the reviewed candidate to the
                     # superseded call (debug walkthrough 2026-09-24, seed 37: attempts=2 but
                     # candidate_review attempt=1 and a review row carrying call 1's facts).
-                    current_attempt_number = attempts
+                    current_attempt_number = repair_attempt_number
                     current_facts = repair_facts
                     current_call_mode = "semantic_repair"
                     continue
@@ -5162,6 +5247,10 @@ def drive_stage(
                         instruction=instruction,
                         auto_default_questions=auto_default_questions,
                     ):
+                        _record_attempt_facts(
+                            active_client, run_id=run_id, stage=stage, attempt=repair_attempt_number,
+                            call_mode="semantic_repair", outcome="question", facts=repair_facts,
+                        )
                         if not review_before_commit:
                             attach_questions(state_path, stage, qs)
                         if progress:
@@ -5187,11 +5276,33 @@ def drive_stage(
                     active_client,
                     run_id=run_id,
                     stage=stage,
-                    attempt=attempts,
+                    attempt=repair_attempt_number,
                     call_mode="semantic_repair",
                     outcome=repair_kind,
                     facts=repair_facts,
+                    schema_error=_redacted_schema_error(repair_outcome.payload.get("schema_error")),
+                    diagnostic_codes=_diagnostic_codes(repair_outcome.payload.get("diagnostic")),
                 )
+                if stage == "architecture" and repair_outcome.kind == "recoverable_failure":
+                    last = {
+                        "failure_kind": repair_kind,
+                        "error": _FAILURE_KIND_ERROR.get(repair_kind, repair_kind),
+                        "schema_error": repair_outcome.payload.get("schema_error"),
+                        "diagnostic": repair_outcome.payload.get("diagnostic"),
+                        "collection_limit": repair_outcome.payload.get("collection_limit"),
+                    }
+                    last_design_failure = {"diagnostic": last["diagnostic"]}
+                    if attempts < provider_call_budget:
+                        messages = _lean_retry(
+                            repair_facts.raw,
+                            _stage_recovery_message(
+                                repair_kind, repair_facts.raw or "",
+                                _collection_bounds_sentence(policy.collection_bounds),
+                                schema_error=last["schema_error"], diagnostic=last["diagnostic"],
+                                collection_limit=last["collection_limit"],
+                            ),
+                        )
+                    repair_rejected = True
                 break
             except (*_TRANSPORT_FAILURE_EXC, *_PROVIDER_FAILURE_EXC) as exc:
                 failure = classify_provider_exception(exc)
@@ -5202,22 +5313,43 @@ def drive_stage(
                     attempt=attempts,
                     call_mode="semantic_repair",
                     outcome=failure["failure_kind"],
+                    diagnostic_codes=[d.code for d in diagnostics],
                     error_facts={k: v for k, v in failure.items() if k != "failure_kind"},
                 )
+                if stage == "architecture":
+                    last = {
+                        **failure,
+                        "error": _FAILURE_KIND_ERROR[failure["failure_kind"]],
+                        "diagnostics": [d.model_dump(exclude_none=True) for d in diagnostics],
+                        "provider_ok": provider_ok,
+                        "schema_ok": schema_ok,
+                    }
+                    transport_terminal = True
                 break
+
+        if auxiliary_budget_exhausted:
+            last = {
+                "failure_kind": "provider_call_budget_exhausted",
+                "error": _FAILURE_KIND_ERROR["provider_call_budget_exhausted"],
+            }
+            last["diagnostics"] = [d.model_dump(exclude_none=True) for d in diagnostics]
+            break
+        if transport_terminal:
+            break
+        if repair_rejected:
+            if attempts < provider_call_budget:
+                continue
+            break
 
         diagnostic_rows = [d.model_dump(exclude_none=True) for d in diagnostics]
         if review_before_commit:
-            _record_attempt_facts(
-                active_client,
-                run_id=run_id,
-                stage=stage,
-                attempt=current_attempt_number,
-                call_mode=current_call_mode,
-                outcome="candidate_review",
-                facts=current_facts,
-                diagnostic_codes=provider_diagnostic_codes,
-            )
+            if not original_attempt_recorded or current_attempt_number != original_attempt_number:
+                _record_attempt_facts(
+                    active_client, run_id=run_id, stage=stage,
+                    attempt=current_attempt_number, call_mode=current_call_mode,
+                    outcome="candidate_review", facts=current_facts,
+                    diagnostic_codes=provider_diagnostic_codes,
+                )
             fab_safe = not any(d.severity == "fab_gate" for d in diagnostics)
             wall_s = round(time.monotonic() - t0, 3)
             cpu_s = round(_child_cpu_s() - cpu0, 3)
@@ -5256,7 +5388,8 @@ def drive_stage(
             }
         ok, out, obj = commit_candidate(prepared, obj, state_path, brief, workspace)
         if (
-            not ok
+            stage != "architecture"
+            and not ok
             and out.get("failure_kind") != "commit_process_failed"
             and semantic_repair_adopted
         ):
@@ -5269,18 +5402,14 @@ def drive_stage(
             diagnostic_rows = [d.model_dump(exclude_none=True) for d in diagnostics]
             ok, out, obj = commit_candidate(prepared, obj, state_path, brief, workspace)
         if not ok and out.get("failure_kind") == "commit_process_failed":
-            _record_attempt_facts(
-                active_client,
-                run_id=run_id,
-                stage=stage,
-                attempt=current_attempt_number,
-                call_mode=current_call_mode,
-                outcome="commit_process_failed",
-                facts=current_facts,
-                commit_result=out,
-                candidate_retained=True,
-                fallback_reason=("provider_rate_limited" if provider_fallback_active else None),
-            )
+            if not original_attempt_recorded or current_attempt_number != original_attempt_number:
+                _record_attempt_facts(
+                    active_client, run_id=run_id, stage=stage,
+                    attempt=current_attempt_number, call_mode=current_call_mode,
+                    outcome="commit_process_failed", facts=current_facts,
+                    commit_result=out, candidate_retained=True,
+                    fallback_reason=("provider_rate_limited" if provider_fallback_active else None),
+                )
             last = {
                 "failure_kind": "commit_process_failed",
                 "error": (out.get("errors") or ["stage-commit process failed"])[0],
@@ -5290,19 +5419,15 @@ def drive_stage(
                 "diagnostics": diagnostic_rows,
             }
             break
-        _record_attempt_facts(
-            active_client,
-            run_id=run_id,
-            stage=stage,
-            attempt=current_attempt_number,
-            call_mode=current_call_mode,
-            outcome="candidate" if ok else "commit_rejected",
-            facts=current_facts,
-            diagnostic_codes=provider_diagnostic_codes,
-            commit_result=out if not ok else None,
-            candidate_retained=True,
-            fallback_reason=("provider_rate_limited" if provider_fallback_active else None),
-        )
+        if not original_attempt_recorded or current_attempt_number != original_attempt_number:
+            _record_attempt_facts(
+                active_client, run_id=run_id, stage=stage,
+                attempt=current_attempt_number, call_mode=current_call_mode,
+                outcome="candidate" if ok else "commit_rejected", facts=current_facts,
+                diagnostic_codes=provider_diagnostic_codes, commit_result=out if not ok else None,
+                candidate_retained=True,
+                fallback_reason=("provider_rate_limited" if provider_fallback_active else None),
+            )
         if ok:
             _observe_attempt(
                 attempt_observer,
@@ -5358,6 +5483,8 @@ def drive_stage(
             "repair_adopted": semantic_repair_adopted,
             "diagnostics": diagnostic_rows + _commit_rejection_diagnostics(out),
         }
+        if stage == "architecture":
+            last_design_failure = {"commit": out, "diagnostics": last["diagnostics"]}
         if native_attempt:
             break
         if progress:
@@ -5395,6 +5522,16 @@ def drive_stage(
             escalated=escalation_done,
             provider_fallback=provider_fallback_active,
         )
+        if stage == "architecture":
+            clean_slate_next = False
+            if attempts >= provider_call_budget:
+                break
+            messages = _lean_retry(
+                raw,
+                _retry_feedback(out, stage=stage, valid_refs=None)
+                + _audit_notes_sentence(diagnostic_rows),
+            )
+            continue
         if terminal:
             break
         prior_rejection_signature = signature

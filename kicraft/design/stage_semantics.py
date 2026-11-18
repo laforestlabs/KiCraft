@@ -4382,7 +4382,7 @@ def _architecture(upstream: dict, candidate: dict, brief: str = "") -> list[Stag
     unsupported_esp32_audio = bool(
         re.search(r"\bdac\b", candidate_text, re.I)
         or (
-            re.search(r"\banalog audio\b|\banalog (?:audio )?signal\b", candidate_text, re.I)
+            re.search(r"\banalog audio\b", candidate_text, re.I)
             and not re.search(r"\b(?:pwm|i2s)\b", candidate_text, re.I)
         )
     )

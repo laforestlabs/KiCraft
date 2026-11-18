@@ -381,14 +381,14 @@ def requests_from_requirement(
             if name == capability or name.startswith(f"{capability}_")
         )
     for interface, capability in (("pwm", "pwm"), ("adc", "adc")):
-        if interface not in interfaces:
+        if interface == "pwm" and interface not in interfaces:
             continue
         matching = sorted(
             (name, net)
             for name, net in requirement.ports.items()
             if name == interface or name.startswith(f"{interface}_")
         )
-        if not matching:
+        if not matching and interface in interfaces:
             raise _interface_port_error(
                 requirement, interface, [interface, f"{interface}_<id>"]
             )
@@ -535,7 +535,7 @@ def allocate_requirement_pins(
                 or not (
                     request.capability == capability
                     or (
-                        capability == "touch"
+                        capability in {"touch", "adc"}
                         and (
                             request.capability == "input"
                             or (request.capability == "gpio" and request.id.startswith("explicit_"))
@@ -545,7 +545,7 @@ def allocate_requirement_pins(
                 or any(
                     prior.net == net
                     and prior.capability != capability
-                    and not (capability == "touch" and prior.capability in {"input", "gpio"})
+                    and not (capability in {"touch", "adc"} and prior.capability in {"input", "gpio"})
                     for prior in [*(existing or []), *fixed_allocations]
                 )
             ):

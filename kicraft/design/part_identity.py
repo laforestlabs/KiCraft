@@ -2680,6 +2680,15 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
                 "pins": ("AIN0", "AIN1", "AIN2", "AIN3"),
                 "reference_pin": "VDD",
                 "ground_pin": "GND",
+                # Recommended operating domain is GND..VDD; unlike the
+                # absolute-maximum margins below, it is suitable for design.
+                "recommended_min_above_ground_v": 0.0,
+                "recommended_max_above_reference_v": 0.0,
+                # A reviewed TEMT6000 acquisition uses single-ended AIN0
+                # with the ±4.096 V FSR. Wait at least 50 µs after stable
+                # supply before I2C; FSR does not enlarge the pin domain.
+                # This makes no precision, settling-rate, calibration, or
+                # independent-power guarantee.
                 "above_reference_margin_v": 0.3,
                 "below_ground_margin_v": 0.3,
             },

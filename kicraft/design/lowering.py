@@ -191,6 +191,10 @@ class RegisteredLowerer:
     #: TRS jack) publishes it here, so the compiler answers it with the design's ground
     #: instead of asking a draft to restate a fact the reviewed part already holds.
     reference_port_keys: tuple[str, ...] = ()
+    #: Contacts that consume a supply rail; multiple contacts need explicit bindings.
+    supply_port_keys: tuple[str, ...] = ()
+    # Protocols implemented by the complete reviewed construction, not by its family label.
+    external_interface_protocols: tuple[str, ...] = ()
     # The reviewed ordering code the lowerer realizes. A build that refuses every other code
     # (including none) publishes it here, so the refusal can name the part the draft must state.
     required_exact_part: str | None = None
@@ -227,6 +231,12 @@ def register_lowerer(lowerer: RegisteredLowerer) -> None:
 
 def registered_lowerers() -> tuple[RegisteredLowerer, ...]:
     return tuple(_REGISTRY[key] for key in sorted(_REGISTRY))
+
+
+def lowerer_supports_external_interface(family: str, protocol: str) -> bool:
+    """Whether a registered family publishes this reviewed interface contract."""
+    lowerer_id = _FAMILIES.get(family)
+    return bool(lowerer_id and protocol in _REGISTRY[lowerer_id].external_interface_protocols)
 
 
 def lowerer_family_for_class(family: str, parameters: object) -> str | None:
@@ -313,6 +323,16 @@ def lowerer_summaries() -> list[dict]:
                 else {}
             ),
             **(
+                {"supply_port_keys": list(lowerer.supply_port_keys)}
+                if lowerer.supply_port_keys
+                else {}
+            ),
+            **(
+                {"external_interface_protocols": list(lowerer.external_interface_protocols)}
+                if lowerer.external_interface_protocols
+                else {}
+            ),
+            **(
                 {"required_exact_part": lowerer.required_exact_part}
                 if lowerer.required_exact_part
                 else {}
@@ -330,6 +350,15 @@ def lowerer_summaries() -> list[dict]:
         }
         for lowerer in registered_lowerers()
     ]
+
+
+def lowerer_canonical_port_name(lowerer: RegisteredLowerer, name: str) -> str:
+    """Resolve published spellings to their physical contact before direct lookup."""
+    normalized = str(name).lower()
+    for canonical, spellings in lowerer.port_aliases:
+        if normalized in {str(key).lower() for key in (canonical, *spellings)}:
+            return canonical
+    return normalized
 
 
 def lowerer_port_direction(
@@ -437,6 +466,27 @@ def lowerer_contract_diagnostic(
                 return None
         except ValueError as exc:
             failure = str(exc)
+    required_ports = lowerer.required_port_keys
+    if lowerer_id == "reviewed-jst-xh-connector@1":
+        if requirement.exact_part:
+            record = reviewed_part(requirement.exact_part)
+            count = len(record.contacts) if record is not None and record.family == "jst-xh-connector" else 0
+        else:
+            from kicraft.design.part_identity import reviewed_parts_for_feature
+
+            count = min(
+                (len(record.contacts) for record in reviewed_parts_for_feature("jst-xh-connector")
+                 if record.family == "jst-xh-connector"),
+                default=0,
+            )
+        required_ports = (*required_ports, *(f"pin{index}" for index in range(1, count + 1)))
+    elif lowerer_id == "analog-conditioner@1":
+        channels = requirement.parameters.get("channel_count", 2)
+        if type(channels) in (int, float) and channels in (2, 4, 8):
+            required_ports = (
+                *required_ports,
+                *(f"analog_out_{index}" for index in range(1, int(channels) + 1)),
+            )
     evidence = [
         "ports=" + ",".join(name for name, _direction in lowerer.port_directions),
         *(
@@ -446,8 +496,8 @@ def lowerer_contract_diagnostic(
         "requirement_ports=" + ",".join(sorted(requirement.ports)),
         "parameters=" + ",".join(lowerer.parameter_keys),
     ]
-    if lowerer.required_port_keys:
-        evidence.insert(0, "required_ports=" + ",".join(lowerer.required_port_keys))
+    if required_ports:
+        evidence.insert(0, "required_ports=" + ",".join(required_ports))
     if lowerer.parameter_choices:
         evidence.append(
             "parameter_choices="
@@ -471,19 +521,19 @@ def lowerer_contract_diagnostic(
         if any(str(spelling).lower() in bound for spelling in (*spellings, canonical)):
             bound.add(str(canonical).lower())
     missing_required = sorted(
-        key for key in lowerer.required_port_keys if str(key).lower() not in bound
+        key for key in required_ports if str(key).lower() not in bound
     )
     unpublished_parameters = sorted(set(requirement.parameters) - set(lowerer.parameter_keys))
     if not requirement.ports and (
-        lowerer.required_port_keys or lowerer.port_directions or lowerer.port_patterns
+        required_ports or lowerer.port_directions or lowerer.port_patterns
     ):
         # The lowerer owns this family, so a model-authored fallback is refused; the
         # requirement has simply declared no contacts. Name the exact ports its build
         # code wants (published as required_port_keys) instead of the generic
         # "cannot realize this port/parameter combination" a model cannot act on.
         wanted = (
-            "bind every contact — " + ", ".join(lowerer.required_port_keys) + " —"
-            if lowerer.required_port_keys
+            "bind every contact — " + ", ".join(required_ports) + " —"
+            if required_ports
             else "bind every contact using its published port contract (see evidence)"
         )
         message = (
@@ -523,8 +573,10 @@ def lowerer_contract_diagnostic(
         message = (
             f"known lowerer {lowerer_id} needs every published contact bound, but "
             f"{missing_required} {'is' if len(missing_required) == 1 else 'are'} unbound; its "
-            f"required ports are {', '.join(lowerer.required_port_keys)}"
+            f"required ports are {', '.join(required_ports)}"
         )
+        if lowerer_id == "reviewed-jst-xh-connector@1" and not requirement.exact_part:
+            message += "; these are minimum contacts: preserve any larger requested width and bind every contact"
     elif parameter_diagnostics:
         # Name the offending key, the value the draft gave it, and the accepted values, so the
         # refusal is repairable without reading the lowerer's source.
@@ -1096,8 +1148,9 @@ _REVIEWED_JACK_FAMILIES = ("barrel-jack", "barrel-jack-connector", "dc-barrel-ja
 
 #: Draft-side spellings of the jack's two wires. The reviewed record owns the *contact numbers*
 #: (`tip`/`sleeve`), not the polarity: which net is the positive one is the draft's statement.
-_JACK_POSITIVE_PORTS = ("positive", "vbus", "vin", "input", "input_12v", "power", "v+")
+_JACK_POSITIVE_PORTS = ("positive", "tip", "center", "centre", "vbus", "vin", "input", "input_12v", "power", "v+")
 _JACK_RETURN_PORTS = ("gnd", "negative", "sleeve", "ret", "return", "v-")
+_JACK_PORT_ALIASES = (("positive", _JACK_POSITIVE_PORTS), ("gnd", _JACK_RETURN_PORTS))
 
 
 def _reviewed_connector(requirement: CircuitRequirement) -> LoweringArtifact | None:
@@ -1110,17 +1163,41 @@ def _reviewed_connector(requirement: CircuitRequirement) -> LoweringArtifact | N
     the record publishes one: it is closed to the tip only while no plug is inserted, which is not
     a net any design statement asks for.
     """
-    record = reviewed_part(str(requirement.exact_part or "").strip())
-    if record is None or not record.symbol or not record.footprint:
+    requirement = requirement.model_copy(
+        update={"exact_part": requirement.exact_part or
+                _REGISTRY[_FAMILIES[requirement.family]].reviewed_exact_part}
+    )
+    record = reviewed_part(str(requirement.exact_part).strip())
+    if (
+        record is None
+        or not record.symbol
+        or not record.footprint
+        or not set(record.physical_features or ()) & set(_REVIEWED_JACK_FAMILIES)
+    ):
         return None
     pins_by_function = {str(k): str(v) for k, v in dict(record.port_pins or {}).items()}
     tip = pins_by_function.get("tip")
     sleeve = pins_by_function.get("sleeve")
     if not tip or not sleeve:
         return None
-    ports = {str(key).lower(): net for key, net in requirement.ports.items()}
-    positive = next((ports[key] for key in _JACK_POSITIVE_PORTS if key in ports), None)
-    reference = next((ports[key] for key in _JACK_RETURN_PORTS if key in ports), None)
+    ports: dict[str, str] = {}
+    sources: dict[str, tuple[str, str]] = {}
+    for name, net in requirement.ports.items():
+        normalized = str(name).lower()
+        canonical = next(
+            (key for key, aliases in _JACK_PORT_ALIASES if normalized in aliases),
+            normalized,
+        )
+        if canonical in ports and ports[canonical] != net:
+            previous_name, previous_net = sources[canonical]
+            raise ValueError(
+                f"requirement {requirement.id}: contact {canonical!r} has conflicting "
+                f"bindings {previous_name}={previous_net!r} and {name}={net!r}"
+            )
+        ports[canonical] = net
+        sources[canonical] = (str(name), net)
+    positive = ports.get("positive")
+    reference = ports.get("gnd")
     if positive is None or reference is None or len(ports) != 2:
         return None
     if not positive or not reference:
@@ -4234,6 +4311,10 @@ for _lowerer in (
             (name, "input" if name in _JACK_POSITIVE_PORTS else "bidirectional")
             for name in (*_JACK_POSITIVE_PORTS, *_JACK_RETURN_PORTS)
         ),
+        required_port_keys=("positive", "gnd"),
+        port_aliases=_JACK_PORT_ALIASES,
+        reference_port_keys=("gnd",),
+        reviewed_exact_part="DC005",
     ),
     RegisteredLowerer(
         "trim-potentiometer@1",

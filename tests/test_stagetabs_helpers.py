@@ -209,7 +209,7 @@ async def test_stage_tabs_render_execution_provenance():
                 {
                     "kind": "recipe_selected",
                     "stage": "bom",
-                    "recipe": "rp2040-minimal@3",
+                    "recipe": "rp2040-minimal@4",
                     "instance": "controller",
                     "sheets": {"mcu": "MCU", "io": "IO"},
                     "parameters": {"native_usb": True, "programming": "native_usb"},
@@ -250,7 +250,7 @@ async def test_stage_tabs_render_execution_provenance():
             )
 
         await u.should_see("Circuit recipe")
-        await u.should_see("rp2040-minimal@3")
+        await u.should_see("rp2040-minimal@4")
         await u.should_see("Deterministic")
         await u.should_see("LLM")
         await u.should_see("invalid_work_unit")

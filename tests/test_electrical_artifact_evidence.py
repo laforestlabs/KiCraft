@@ -260,7 +260,7 @@ def test_rp2040_swd_observer_requires_delivered_recovery_and_core_graph():
 
     expansion = expand_recipe(
         RecipeSelection(
-            recipe="rp2040-minimal@3",
+            recipe="rp2040-minimal@4",
             instance="rp",
             sheets={"mcu": "MCU", "io": "IO"},
             parameters={"native_usb": False, "programming": "swd"},

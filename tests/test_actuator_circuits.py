@@ -70,6 +70,81 @@ def test_relay_outputs_use_real_coils_flyback_driver_and_contact_terminals():
     } == set(coils.values())
     assert not any(group.role == "load_terminal" for group in artifact.groups)
 
+def test_relay_and_uln_publish_their_physical_supply_contact():
+    from kicraft.design.lowering import lowerer_summaries, registered_lowerers
+
+    for lowerer_id in ("relay-output@2", "uln2003-actuator@1"):
+        lowerer = next(row for row in registered_lowerers() if row.lowerer_id == lowerer_id)
+        summary = next(row for row in lowerer_summaries() if row["lowerer"] == lowerer_id)
+        assert lowerer.supply_port_keys == ("vmotor",)
+        assert summary["supply_port_keys"] == ["vmotor"]
+
+
+def test_relay_supply_reaches_coils_and_driver_without_touching_contacts():
+    ports = {"vmotor": "+5V_PROTECTED", "gnd": "GND"}
+    for number in (1, 2):
+        ports.update({
+            f"control_{number}": f"CTRL{number}",
+            f"relay_{number}_common": f"R{number}_COM",
+            f"relay_{number}_normally_open": f"R{number}_NO",
+            f"relay_{number}_normally_closed": f"R{number}_NC",
+        })
+    artifact = _uln2003(_requirement("relay-output", ports, channels=2), relay=True)
+    assert artifact is not None
+    assert {pin.net for pin in artifact.pins if pin.role == "relay" and pin.pin == "1"} == {"+5V_PROTECTED"}
+    assert {pin.net for pin in artifact.pins if pin.role == "driver" and pin.pin == "9"} == {"+5V_PROTECTED"}
+    assert {
+        (pin.index, pin.pin): pin.net for pin in artifact.pins
+        if pin.role == "relay_contact_terminal"
+    } == {
+        (number - 1, str(contact)): ports[f"relay_{number}_{name}"]
+        for number in (1, 2)
+        for contact, name in ((1, "common"), (2, "normally_open"), (3, "normally_closed"))
+    }
+
+
+def test_relay_missing_nc_gets_distinct_internal_wiring_and_explicit_nc_is_preserved():
+    from kicraft.design.lowering import lower_requirement
+
+    ports = {"vmotor": "+5V_PROTECTED", "gnd": "GND"}
+    for number in (1, 2, 3):
+        ports.update({
+            f"control_{number}": f"CTRL{number}",
+            f"relay_{number}_common": f"R{number}_COM",
+            f"relay_{number}_normally_open": f"R{number}_NO",
+        })
+    ports["relay_2_normally_closed"] = "EXPLICIT_NC"
+    requirement = _requirement("relay-output", ports, channels=3)
+    artifact = lower_requirement(requirement)
+    for number, expected in (
+        (1, "__KICRAFT_RELAY__actuator__NC_1"),
+        (2, "EXPLICIT_NC"),
+        (3, "__KICRAFT_RELAY__actuator__NC_3"),
+    ):
+        pins = {
+            (pin.role, pin.pin): pin.net
+            for pin in artifact.pins if pin.index == number - 1
+            and (pin.role, pin.pin) in {("relay", "3"), ("relay_contact_terminal", "3")}
+        }
+        assert pins == {("relay", "3"): expected, ("relay_contact_terminal", "3"): expected}
+    assert "relay_1_normally_closed" not in requirement.ports
+
+
+def test_relay_missing_nc_rejects_internal_net_collision():
+    from kicraft.design.lowering import lower_requirement
+
+    ports = {"vmotor": "+5V_PROTECTED", "gnd": "GND"}
+    for number in (1, 2):
+        ports.update({
+            f"control_{number}": f"CTRL{number}",
+            f"relay_{number}_common": f"R{number}_COM",
+            f"relay_{number}_normally_open": f"R{number}_NO",
+        })
+    ports["relay_2_common"] = "__KICRAFT_RELAY__actuator__NC_1"
+    with pytest.raises(ValueError):
+        lower_requirement(_requirement("relay-output", ports, channels=2))
+
+
 def test_relay_voltage_selects_coils_and_correctly_oriented_tvs():
     ports = {"vmotor": "VMOTOR", "gnd": "GND"}
     for number in (1, 2):
@@ -125,6 +200,7 @@ def test_tvs_qualification_requires_exact_supplier_and_polarity(identity, lcsc, 
 ])
 def test_relay_tvs_source_survives_fab_export(tmp_path, voltage, identity, lcsc):
     import csv
+    from kicraft.design.models import BomPart
     from kicraft.design.part_identity import reviewed_part
     from kicraft.design.synthesis.fab_export import _write_bom_csv
 
@@ -140,7 +216,14 @@ def test_relay_tvs_source_survives_fab_export(tmp_path, voltage, identity, lcsc)
     record = reviewed_part(identity)
     assert (group.mpn, group.symbol, group.footprint) == (identity, record.symbol, record.footprint)
     path = tmp_path / "bom.csv"
-    _write_bom_csv(path, [{**group.model_dump(), "ref": "D1"}])
+    part = BomPart.model_validate({
+        "ref": "D1", "sheet": "MAIN", "value": group.value,
+        "symbol": group.symbol, "footprint": group.footprint,
+        "mpn": group.mpn, "datasheet": group.datasheet,
+        "sourcing_note": group.sourcing_note,
+    })
+    assert part.lcsc == record.lcsc == lcsc
+    _write_bom_csv(path, [part.model_dump()])
     with path.open(newline="") as stream:
         row = next(csv.DictReader(stream))
     assert (row["mpn"], row["lcsc"]) == (identity, lcsc)
@@ -625,6 +708,148 @@ def test_final_bom_realizes_composite_relay_count_before_wiring_stage():
         Architecture.model_validate(architecture), BOM.model_validate(payload)
     )
     assert result.ok, result.offenders
+
+
+def test_relay_interface_metadata_is_specific_to_reviewed_lowerer():
+    from kicraft.design.lowering import lowerer_summaries, lowerer_supports_external_interface
+
+    summaries = lowerer_summaries()
+    published = [s for s in summaries if "relay-contact-output" in
+                 s.get("external_interface_protocols", [])]
+    assert [s["lowerer"] for s in published] == ["relay-output@2"]
+    assert lowerer_supports_external_interface("relay-output", "relay-contact-output")
+    assert not lowerer_supports_external_interface("uln2003", "relay-contact-output")
+    assert not lowerer_supports_external_interface("relay-output", "other")
+
+@pytest.mark.parametrize("route_contacts", [False, True])
+def test_relay_external_interface_is_normalized_constructed_and_physically_wired(route_contacts):
+    from kicraft.design.architecture_intent import complete_architecture_payload, derive_architecture
+    from kicraft.design.models import BOM
+    from kicraft.design.synthesis.validation import check_requirement_physical_realization
+    from kicraft.server.stage_work_units import probe_architecture_construction
+
+    contacts = ("common", "normally_open", "normally_closed")
+    signals = [
+        {"name": f"CTRL{n}", "from": f"input.pin{n + 2}",
+         "to": f"relay_bank.control_{n}"} for n in (1, 2)
+    ]
+    if route_contacts:
+        signals.extend(
+            {"name": f"R{n}_{contact}", "from": f"relay_bank.relay_{n}_{contact}",
+             "to": f"input.pin{pin}"}
+            for pin, (n, contact) in enumerate(
+                ((n, contact) for n in (1, 2) for contact in contacts), 5
+            )
+        )
+    intent = {
+        "topologies": {"POWER": "5 V input header"}, "comms_protocols": [],
+        "mcu_present": False,
+        "power": {"rails": {"+5V": {"voltage": 5.0, "from": "input.pin1"}}},
+        "sheets": [
+            {"name": "INPUT", "stem": "INPUT", "role": "connector", "function": "Input"},
+            {"name": "PART", "stem": "PART", "role": "driver", "function": "Relay bank"},
+        ],
+        "requirements": [
+            {"id": "input", "sheet": "INPUT", "role": "connector", "family": "pin-header",
+             "parameters": {"rows": 1, "gender": "male"},
+             "ties": {"pin1": "+5V", "pin2": "GND"}, "functional_blocks": ["POWER_IN"]},
+            {"id": "relay_bank", "sheet": "PART", "role": "driver", "family": "relay-output",
+             "parameters": {"channel_count": 2, "motor_voltage_v": 5.0},
+             "supply": "+5V", "functional_blocks": ["RELAYS"], "obligation_ids": ["load"]},
+        ],
+        "signals": signals, "assumptions": [],
+        "obligations": [{"kind": "external_interface", "original_obligation_id": "load",
+                         "protocol": "relay-contact-output"}],
+    }
+    architecture = derive_architecture(complete_architecture_payload(intent))
+    relay = next(req for req in architecture.requirements if req.id == "relay_bank")
+    assert any(ob.kind == "external_interface" and ob.protocol == "relay-contact-output"
+               for ob in relay.obligations)
+    constructed = probe_architecture_construction({"architecture": architecture.model_dump(mode="json")})
+    assert constructed is not None
+    bom = BOM.model_validate(constructed)
+    result = check_requirement_physical_realization(architecture, bom)
+    assert result.ok, result.offenders
+    terminals = [p for p in bom.parts if p.lowering_role == "relay_contact_terminal"]
+    assert len(terminals) == 2
+    contact_nets = set()
+    for terminal in terminals:
+        n = terminal.lowering_index + 1
+        nets = {
+            endpoint.pin: connection.net_name for connection in bom.connections
+            for endpoint in connection.endpoints if endpoint.ref == terminal.ref
+        }
+        if route_contacts:
+            assert nets == {"1": f"R{n}_common", "2": f"R{n}_normally_open",
+                            "3": f"R{n}_normally_closed"}
+        else:
+            owned_relay = next(p for p in bom.parts
+                               if p.lowering_role == "relay" and p.lowering_index == terminal.lowering_index)
+            relay_nets = {
+                endpoint.pin: connection.net_name for connection in bom.connections
+                for endpoint in connection.endpoints if endpoint.ref == owned_relay.ref
+            }
+            assert nets == {"1": relay_nets["5"], "2": relay_nets["2"], "3": relay_nets["3"]}
+            assert not set(nets.values()) & {"+5V", "GND", "CTRL1", "CTRL2"}
+        contact_nets.update(nets.values())
+    assert len(contact_nets) == 6
+
+
+@pytest.mark.parametrize("corruption", [
+    "terminal_common", "terminal_no", "terminal_nc", "relay_contact",
+    "control", "coil", "driver_supply", "missing_terminal", "wrong_identity",
+    "wrong_owner", "missing_nc", "connected_nc", "wrong_protocol",
+])
+def test_relay_external_interface_rejects_damaged_actual_construction(corruption):
+    from kicraft.design.models import Architecture, BOM, ExternalInterfaceObligation
+    from kicraft.design.synthesis.validation import check_requirement_physical_realization
+
+    payload, constructed, _ = _compiled_relay_case()
+    architecture = Architecture.model_validate(payload)
+    requirement = architecture.requirements[0]
+    requirement.obligations.append(ExternalInterfaceObligation.model_validate({
+        "kind": "external_interface", "original_obligation_id": "load",
+        "protocol": "relay-contact-output",
+    }))
+    bom = BOM.model_validate(constructed)
+    terminal = next(p for p in bom.parts if p.lowering_role == "relay_contact_terminal")
+    relay = next(p for p in bom.parts if p.lowering_role == "relay")
+    driver = next(p for p in bom.parts if p.lowering_role == "driver")
+    endpoints = {
+        "terminal_common": (terminal.ref, "1"), "terminal_no": (terminal.ref, "2"),
+        "terminal_nc": (terminal.ref, "3"), "relay_contact": (relay.ref, "5"),
+        "control": (driver.ref, "1"), "coil": (relay.ref, "4"),
+        "driver_supply": (driver.ref, "9"),
+    }
+    if corruption in endpoints:
+        for connection in bom.connections:
+            connection.endpoints = [ep for ep in connection.endpoints
+                                    if (ep.ref, ep.pin) != endpoints[corruption]]
+    elif corruption == "missing_terminal":
+        bom.parts = [part for part in bom.parts if part.ref != terminal.ref]
+    elif corruption == "wrong_identity":
+        relay.mpn = "SRD-12VDC-SL-C"
+    elif corruption == "wrong_owner":
+        relay.lowering_requirement_id = "other"
+    elif corruption == "missing_nc":
+        bom.no_connect_pins = bom.no_connect_pins[1:]
+    elif corruption == "connected_nc":
+        nc = bom.no_connect_pins[0]
+        bom.connections[0].endpoints.append(nc)
+    else:
+        requirement.obligations[0].protocol = "unsupported"
+    result = check_requirement_physical_realization(architecture, bom)
+    assert any("E_EXTERNAL_INTERFACE" in offender for offender in result.offenders)
+
+
+def test_relay_contact_aliasing_is_not_an_independent_output():
+    architecture, _, _ = _compiled_relay_case()
+    requirement = CircuitRequirement.model_validate(architecture["requirements"][0])
+    ports = dict(requirement.ports)
+    ports["relay_1_normally_closed"] = ports["relay_1_normally_open"]
+    with pytest.raises(ValueError):
+        from kicraft.design.lowering import lower_requirement
+        lower_requirement(requirement.model_copy(update={"ports": ports}))
 
 
 @pytest.mark.parametrize("rail", ["VMOTOR", "3V3", "GND"])

@@ -71,6 +71,9 @@ Slot shape:
     family that publishes no supply port — a status LED draws its current from its `drive` signal —
     simply has no pin on that rail, and saying so is not an error. Omit `supply` only for a part
     that genuinely draws nothing from a declared rail.
+    A published `supply_port_keys` contact is authoritative: relay/ULN2003 `vmotor` is the
+    coil/driver supply, independent of control and relay contact nets. If several supply contacts
+    are published, use explicit `supply_bindings`; never guess they share one rail.
   - `programming`: how a programmable part is flashed — `native_usb`, `usb_uart_bridge`, `swd`,
     `updi`, `bootsel`, `none`. See *Programming*.
   - `interfaces`: the recipe's interface names you use (`i2c_controller`, `spi_controller`,
@@ -79,8 +82,16 @@ Slot shape:
     `can_tx`/`can_rx`, `pwm_*`, `adc_*`, `parallel_<i>`) requests its interface, an interface you
     name with no such port bound is not a request, and `parallel_output` takes its count from the
     `parallel_<i>` ports you bind. You do not have to get the list exactly right; the ports decide.
+    Prefer neutral `input_<id>`/`adc_<id>` and `output_<id>` application ports for unconstrained
+    GPIOs. Reviewed analog peers require physical ADC capability; a signal name proves nothing.
+    Explicit `gpioN` is a physical-pad constraint and is never silently reassigned.
   - `functional_blocks`: the exact committed Functional Spec block names this part implements.
-    Every block needs an owner; several requirements may implement one block.
+    Every functional block needs an owner, except a block whose obligations exclusively measure
+    board outline dimensions or layer count: board geometry/stack-up realizes those facts.
+    Do not invent a connector or other component just to own a board measurement.
+    Every real requirement, including a supporting regulator, needs nonempty membership.
+    If there is no separate regulator block, name the existing power or powered-device block
+    it serves; do not invent a new Functional Spec block.
   - `obligation_ids`: the committed intent/functional-spec obligations this part implements, named
     by their `original_obligation_id` values. Name each committed obligation on the requirement
     that implements it — several requirements may name the same id when your design implements one
@@ -152,20 +163,36 @@ same edge), otherwise a one-row pin header on its own sheet, carrying your signa
 ground, then the rails you listed in `rails`. So `LED_DATA` → `edge:LED_STRING` with
 `"rails": ["+5V"]` gives a three-pin output: data, ground, 5 V.
 
-An owned `external_interface` obligation additionally requires a reviewed construction whose
+An owned `external_interface` obligation additionally requires a reviewed recipe or lowerer whose
 `external_interface_protocols` contains the retained protocol. Select its published `family`
 and, when choosing that construction explicitly, `exact_part`. A sheet title, topology prose,
 protocol label or generic edge header is not an implementation. Connect the construction's
 application inputs with `signals` and power it with `supply`/`power.rails`; port bindings remain
 compiler-derived. Do not add a second connector when the construction already owns it.
 
+Fixed-output converters must match the actual input/output rails and load current. An output
+parameter cannot turn a fixed 12 V circuit into 3.3 V; select a compatible reviewed construction
+without changing an explicitly requested identity or rail.
+
+For generic light acquisition, when direct MCU ADC acquisition is not explicitly required, the
+existing TEMT6000X01 readout at 3.3 V can feed ADS1115IDGSR `io0` (AIN0, physical pin 4), with
+allocated MCU I2C SDA/SCL, common 3.3 V/GND, `address_strap=gnd`, unused `io1`–`io3` grounded and
+unused `interrupt` unbound. The ADC owns its 100 nF bypass; add `i2c-pullups` configured for
+3.3 V, 400 kHz and 50 pF (4.7 kΩ). Record single-ended AIN0, ±4.096 V full scale and at least
+approximately 50 µs after stable supply before I2C. Neither the 10 kΩ/1 nF sensor network nor
+this composition guarantees precision, settling rate, calibration or independently powered
+operation: reject quantitative requirements beyond its reviewed contract. A 3.3 V direct
+TEMT6000 output still exceeds the reviewed ESP32-S3 ADC's 2.9 V input limit.
+
 **Design obligations that remain yours** (each has a check behind it):
 - **One sheet per IC domain.** Each distinct non-trivial IC gets its own sheet — the MCU, every
   separate sensor, a display, each standalone regulator — even when they share a bus; the bus is
   exactly what a signal is for. Do not split one integrated IC across sheets (a PD sink+charger,
   a PMIC), and keep an array sheet to the array members plus their per-member companions.
-- **Every block owned.** Every Functional Spec block needs explicit `functional_blocks` ownership
+- **Functional blocks owned.** Functional Spec blocks need explicit `functional_blocks` ownership
   by a requirement on a sheet; a sheet name or an assumption is not implementation evidence.
+  Blocks exclusively measuring board outline dimensions or layer count are realized by board
+  geometry/stack-up, not by an empty header. Keep their source obligations and board measurements.
 - **Rail-source completeness.** Every declared non-input rail names the port that generates it. An
   ESP32-S3 design declares a 3.3 V rail and a 5 V-to-3.3 V regulator sized for at least 1 A: write
   the rail as `+3V3` (or `3.3V`) and state the converter's current rating beside it in `topologies`

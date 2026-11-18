@@ -236,9 +236,9 @@ def test_standard_form_factor_block_states_every_role_and_pin_map():
     the template key. The block is deterministic reference data, rendered from the intent.
     """
     from kicraft.form_factors import get_template
-    from kicraft.server.stage_runtime import _standard_form_factor_block
+    from kicraft.design.stage_reference import standard_form_factor_block
 
-    block = _standard_form_factor_block(
+    block = standard_form_factor_block(
         {"form_factor": {"shape": "rect", "standard": "arduino_uno_shield"}}
     )
     assert block is not None
@@ -255,6 +255,6 @@ def test_standard_form_factor_block_states_every_role_and_pin_map():
     assert "functional_blocks" in block
 
     # No standard in play: the prompt for every other design is unchanged.
-    assert _standard_form_factor_block({"form_factor": {"shape": "circle"}}) is None
-    assert _standard_form_factor_block({}) is None
-    assert _standard_form_factor_block({"form_factor": {"standard": "not_a_template"}}) is None
+    assert standard_form_factor_block({"form_factor": {"shape": "circle"}}) is None
+    assert standard_form_factor_block({}) is None
+    assert standard_form_factor_block({"form_factor": {"standard": "not_a_template"}}) is None

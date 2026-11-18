@@ -40,7 +40,7 @@ def drive_chain(
     attempt_observer=None,
     auto_default_questions: bool | None = None,
 ):
-    ws = Path(workspace)
+    ws = Path(workspace).resolve()
     (ws / ".kicraft").mkdir(parents=True, exist_ok=True)
     state_path = ws / ".kicraft" / "state.json"
     if client is None:

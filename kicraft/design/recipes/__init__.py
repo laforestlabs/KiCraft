@@ -25,7 +25,7 @@ from .esp32_s3_mini_1_minimal import (
     ESP32_S3_MINI_1_MINIMAL,
     expand_esp32_s3_mini_1,
 )
-from .rp2040_minimal_v2 import RP2040_MINIMAL_V3, expand_rp2040_minimal
+from .rp2040_minimal_v2 import RP2040_MINIMAL_V4, expand_rp2040_minimal
 from .wave_a_mcus import WAVE_A_MCU_RECIPES, expand_wave_a_mcu
 from .wave_b_power import (
     USB_C_USB2_DEVICE,
@@ -53,7 +53,7 @@ from .power_entry import TPS26631_PD_INRUSH_POWER_PATH
 
 
 
-register_recipe(RP2040_MINIMAL_V3, expand_rp2040_minimal)
+register_recipe(RP2040_MINIMAL_V4, expand_rp2040_minimal)
 register_recipe(ESP32_S3_MINI_1_MINIMAL, expand_esp32_s3_mini_1)
 for definition in WAVE_A_MCU_RECIPES:
     register_recipe(definition, expand_wave_a_mcu)

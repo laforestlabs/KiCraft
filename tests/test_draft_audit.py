@@ -112,7 +112,7 @@ def test_driver_runs_the_audit_and_folds_its_findings_into_the_round(tmp_path, m
         code="audit_part_over_rating",
         severity="repair_required",
         message="the driver runs above its part rating",
-        evidence=["confidence=0.90"],
+        evidence=["confidence=0.90", "full evidence " + "x" * 180],
     )
 
     def fake_audit(candidate, **kwargs):
@@ -165,6 +165,9 @@ def test_driver_runs_the_audit_and_folds_its_findings_into_the_round(tmp_path, m
     )
 
     assert any(f["code"] == "audit_part_over_rating" for f in result["diagnostics"])
+    correction = client.calls[1]["messages"]
+    assert any(m["role"] == "assistant" and json.loads(m["content"]) == draft for m in correction)
+    assert "full evidence " + "x" * 180 in correction[-1]["content"]
 
 
 def test_part_alternatives_are_offered_only_when_the_catalogue_has_them():
@@ -178,70 +181,66 @@ def test_part_alternatives_are_offered_only_when_the_catalogue_has_them():
     assert part_alternatives("dual-dc-motor-driver", "DRV8833PWPR") == ()
 
 
-def test_a_draft_the_compiler_refuses_is_still_audited(tmp_path, monkeypatch):
-    """The audit sees the parsed draft *before* the derivation, so a refusal cannot hide it.
-
-    The derivation runs inside decode, so an audit placed after it never saw the drafts that
-    actually fail (measured on the seed-37 walkthrough). Here the compiler refuses the draft's
-    rail reference, and the audit still runs and still reaches the correction message.
-    """
+def test_construction_refusal_is_not_audited_and_replacement_is(tmp_path, monkeypatch):
+    import copy
     import json
 
     from kicraft.server import stage_runtime
     from kicraft.server.config import Settings
 
-    finding = stage_runtime.models.StageDiagnostic(
-        code="audit_identity_unresolved",
-        severity="repair_required",
-        message="Requirement 'mcu' does not name a curated family",
-        evidence=["set the requirement's family or exact_part to 'esp32-c3-mini-1-module'"],
-    )
-    seen: list[dict] = []
+    controls = ("enable_n", "ms1", "ms2", "ms3", "reset_n", "sleep_n", "step", "dir")
+    coils = ("coil_1a", "coil_1b", "coil_2a", "coil_2b")
+    bad = {
+        "power": {"rails": {"+3V3": {"voltage": 3.3, "from": None},
+                             "VMOTOR": {"voltage": 12.0, "from": None}}},
+        "sheets": [{"name": "MAIN", "stem": "MAIN", "role": "analog_block",
+                    "function": "Stepper driver and interfaces"}],
+        "requirements": [
+            {"id": "driver", "sheet": "MAIN", "role": "driver",
+             "family": "a4988-driver-socket", "ties": {"vdd": "+3V3", "gnd": "GND"},
+             "functional_blocks": []},
+            {"id": "controls", "sheet": "MAIN", "role": "connector", "family": "pin-header",
+             "parameters": {"rows": 1, "gender": "male"}, "functional_blocks": []},
+            {"id": "motor", "sheet": "MAIN", "role": "connector", "family": "pin-header",
+             "parameters": {"rows": 1, "gender": "male"}, "functional_blocks": []},
+        ],
+        "signals": [
+            *[{"name": port.upper(), "from": f"controls.pin{index}", "to": f"driver.{port}"}
+              for index, port in enumerate(controls, 1)],
+            *[{"name": port.upper(), "from": f"driver.{port}", "to": f"motor.pin{index}"}
+              for index, port in enumerate(coils, 1)],
+        ],
+    }
+    good = copy.deepcopy(bad)
+    good["requirements"][0]["ties"]["vmotor"] = "VMOTOR"
+    seen = []
 
-    def fake_pre_audit(parsed):
-        seen.append(parsed)
-        return [finding]
+    def audit(candidate, **kwargs):
+        assert kwargs["reserve_call"]()
+        seen.append(copy.deepcopy(candidate))
+        return []
 
-    monkeypatch.setattr(stage_runtime, "_pre_audit_hook", lambda client, **kwargs: fake_pre_audit)
+    monkeypatch.setattr("kicraft.server.draft_audit.audit_architecture", audit)
 
-    class _Client:
+    class Client:
         def __init__(self):
-            self.replies = [refused_draft] * 4
+            self.replies = [bad, good]
             self.calls = []
-            self.s = Settings(api_key="test")
+            self.s = Settings(api_key="test", stage_semantics="observe")
 
         def chat(self, messages=None, **kwargs):
             self.calls.append({"messages": messages, **kwargs})
-            return {
-                "text": json.dumps(self.replies.pop(0)),
-                "reasoning": "",
-                "finish_reason": "stop",
-                "cost_usd": 0.0,
-            }
+            return {"text": json.dumps(self.replies.pop(0)), "reasoning": "",
+                    "finish_reason": "stop", "cost_usd": 0.0}
 
-    refused_draft = {
-        "power": {"rails": {"VBUS": {"voltage": 5.0, "from": "ghost.vbus"}}},
-        "sheets": [{"name": "MAIN", "stem": "MAIN", "role": "mcu", "function": "the board"}],
-        "requirements": [
-            {
-                "id": "mcu",
-                "sheet": "MAIN",
-                "role": "mcu_core",
-                "family": "generic-header",
-                "parameters": {"rows": 1, "gender": "male"},
-                "functional_blocks": [],
-            }
-        ],
-        "signals": [{"name": "GPIO", "from": "mcu.pin1", "to": "edge:IO"}],
-    }
-    client = _Client()
-
+    client = Client()
     result = stage_runtime.drive_stage(
-        client, "architecture", "a header breakout", tmp_path / ".kicraft/state.json", tmp_path
+        client, "architecture", "a stepper driver", tmp_path / ".kicraft/state.json",
+        tmp_path, review_before_commit=True,
     )
-
-    assert seen, "the audit never saw the parsed draft"
-    assert result["failure_kind"] == "contract_rejected"
-    correction = client.calls[1]["messages"][-1]["content"]
-    assert "audit_identity_unresolved" in correction
-    assert "A Jev audit of this same draft" in correction
+    assert result.get("needs_review")
+    assert result["attempts"] == 3
+    assert seen == [good]
+    correction = client.calls[1]["messages"]
+    assert any(m["role"] == "assistant" and json.loads(m["content"]) == bad for m in correction)
+    assert "vmotor" in correction[-1]["content"].lower()

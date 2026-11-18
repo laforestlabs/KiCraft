@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 import hashlib
 import json
 from collections import defaultdict
@@ -253,6 +254,11 @@ def run_campaign(corpus_path: Path, output_dir: Path, *, client=None) -> dict:
 
 
 def main(argv: list[str] | None = None) -> int:
+    effective_argv = list(sys.argv[1:] if argv is None else argv)
+    if effective_argv and effective_argv[0] == "surprise-me":
+        from kicraft.eval.surprise_campaign import main as surprise_main
+
+        return surprise_main(effective_argv[1:])
     parser = argparse.ArgumentParser(description="Run the frozen per-stage reliability campaign")
     parser.add_argument(
         "--corpus",

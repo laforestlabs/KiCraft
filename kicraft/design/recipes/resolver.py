@@ -137,6 +137,103 @@ def _power_output_current_diagnostics(
     return diagnostics
 
 
+def _converter_compatibility_diagnostics(
+    definition: RecipeDefinition, requirement: CircuitRequirement,
+    architecture: Architecture, recipes: tuple[RegisteredRecipe, ...],
+) -> list[ResolutionDiagnostic]:
+    """Report incompatible selected converters without substituting another identity."""
+    if requirement.role != "regulator":
+        return []
+    port_names = {port.name for port in definition.ports}
+    if not {"input", "output", "gnd"} <= port_names or not any(
+        part.role in {"regulator", "converter", "controller"} for part in definition.parts
+    ):
+        return []
+    input_v = architecture.rail_voltages.get(requirement.ports.get("input", ""))
+    output_v = architecture.rail_voltages.get(requirement.ports.get("output", ""))
+    if input_v is None:
+        input_v = requirement.parameters.get("input_voltage")
+    if output_v is None:
+        output_v = requirement.parameters.get("output_voltage")
+    demands = []
+    for row in requirement.obligations:
+        if row.kind != "quantitative" or row.relation == "maximum":
+            continue
+        quantity = re.sub(r"[_-]+", " ", row.quantity.casefold())
+        if not re.search(r"\b(?:output|load)\s+current\b|\bsupply\s+current\s+capacity\b", quantity):
+            continue
+        if re.search(r"\b(?:inputs?|sources?|inductors?|switch(?:es)?|channels?|per|each)\b", quantity):
+            continue
+        scale = {"a": 1.0, "ma": 0.001}.get(row.unit.strip().lower())
+        value = row.maximum if row.relation == "range" else row.value
+        if scale is not None and value is not None:
+            demands.append(value * scale)
+    demand = max(demands, default=None)
+
+    def facts(candidate: RecipeDefinition) -> tuple[object, object, object]:
+        port = next((p for p in candidate.ports if p.name == "input"), None)
+        voltage = candidate.parameter_defaults.get("output_voltage")
+        requested = (
+            requirement.parameters.get("output_voltage")
+            if candidate.recipe == definition.recipe else output_v
+        )
+        allowed = candidate.allowed_parameters.get("output_voltage")
+        if (
+            requested is not None and allowed is not None and requested in allowed
+        ):
+            voltage = requested
+        return (
+            port.supply_voltage_range_v if port else None,
+            voltage,
+            candidate.rated_output_current_a,
+        )
+
+    envelope, actual_output, rating = facts(definition)
+    unverified = []
+    if type(input_v) in (int, float) and envelope is None:
+        unverified.append("input operating envelope is not reviewed")
+    if type(output_v) in (int, float) and type(actual_output) not in (int, float):
+        unverified.append("output voltage is not reviewed")
+    if demand is not None and rating is None:
+        unverified.append("output current rating is not reviewed")
+    reasons = []
+    if type(input_v) in (int, float) and envelope is not None and not envelope[0] <= input_v <= envelope[1]:
+        reasons.append(f"input {input_v:g} V outside {envelope!r} V")
+    if type(output_v) in (int, float) and type(actual_output) in (int, float) and abs(output_v - actual_output) > 0.05:
+        reasons.append(f"requested output {output_v:g} V, recipe output {actual_output:g} V")
+    if demand is not None and rating is not None and demand > rating:
+        reasons.append(f"requested current {demand:g} A exceeds {rating:g} A")
+    if not reasons and not unverified:
+        return []
+    candidates = []
+    if type(input_v) in (int, float) and type(output_v) in (int, float):
+        for registered in recipes:
+            candidate = registered.definition
+            candidate_ports = {port.name: port for port in candidate.ports}
+            required_ports = {
+                port.name: port.direction for port in definition.ports
+                if port.name in requirement.ports
+            }
+            limits, voltage, current = facts(candidate)
+            if (
+                candidate.recipe != definition.recipe and candidate.maturity == "production"
+                and all(
+                    name in candidate_ports and candidate_ports[name].direction == direction
+                    for name, direction in required_ports.items()
+                )
+                and limits is not None and limits[0] <= input_v <= limits[1]
+                and type(voltage) in (int, float) and abs(voltage - output_v) <= 0.05
+                and current is not None and (demand is None or current >= demand)
+            ):
+                candidates.append(candidate.recipe)
+    return [ResolutionDiagnostic(
+        code="incompatible_converter" if reasons else "unverified_converter_compatibility",
+        requirement_id=requirement.id, recipe=definition.recipe, sheet=requirement.sheet,
+        message="Selected converter cannot establish the stated operating contract; preserve the requested identity and repair the architecture.",
+        evidence=[*reasons, *unverified, *(f"qualified_candidate={name}" for name in sorted(candidates))],
+    )]
+
+
 def _exact_selectors(recipe: RegisteredRecipe) -> set[str]:
     definition = recipe.definition
     return {
@@ -1235,6 +1332,15 @@ def _rp2040_mode_diagnostics(
     ]
 
 
+def _connected_between_sheets(
+    architecture: Architecture, net: str, left: str, right: str,
+) -> bool:
+    return left == right or any(
+        row.name == net and {left, right} <= {endpoint.sheet for endpoint in row.endpoints}
+        for row in architecture.inter_sheet_nets
+    )
+
+
 def _complete_typed_mcu_interfaces(
     requirement: CircuitRequirement,
     architecture: Architecture,
@@ -1285,6 +1391,45 @@ def _complete_typed_mcu_interfaces(
     # on another net, or a sheet/net label alone, proves no direct MCU sensor.
     for net in sorted(direct_pad_nets.intersection(requirement.ports.values())):
         required_capabilities[net] = "touch"
+    analog_nets: set[str] = set()
+    for peer in architecture.requirements:
+        if peer.id == requirement.id:
+            continue
+        lowerer = next(
+            (row for row in registered_lowerers() if peer.family in row.families),
+            None,
+        )
+        analog = (
+            bool(set(peer.interfaces) & {"adc", "analog", "analog_output"})
+            or (lowerer is not None and "consumer_input_max_v" in lowerer.parameter_keys)
+        )
+        exact = _recipe_for_exact(peer.exact_part, recipes)
+        if exact is not None and exact.definition.recipe == "ah49entr-g1-analog-hall@1":
+            analog = True
+        if peer.declared_interface is not None:
+            analog_nets.update(
+                peer.ports[row.key] for row in peer.declared_interface.ports
+                if row.key in peer.ports and row.direction == "output"
+                and re.search(r"\banalog(?:ue)?\b", row.function, re.I)
+                and _connected_between_sheets(
+                    architecture, peer.ports[row.key], requirement.sheet, peer.sheet
+                )
+            )
+        if analog:
+            analog_nets.update(
+                net for port, net in peer.ports.items()
+                if _connected_between_sheets(architecture, net, requirement.sheet, peer.sheet)
+                and (
+                    (lowerer is not None and lowerer_port_direction(lowerer, port) == "output")
+                    or (peer.declared_interface is not None and any(
+                        row.key == port and row.direction == "output"
+                        for row in peer.declared_interface.ports
+                    ))
+                    or (peer.role == "sensor" and port == "out")
+                )
+            )
+    for net in sorted(analog_nets.intersection(requirement.ports.values())):
+        required_capabilities[net] = "adc"
     if len(peers) != 1 or not {"tx", "rx"} <= peers[0].ports.keys():
         return requirement, required_capabilities
     ports = dict(requirement.ports)
@@ -1406,6 +1551,85 @@ def _unowned_endpoint_diagnostics(
             ],
         )
     ]
+
+
+def _temt_ads_performance_diagnostics(
+    result: ResolutionResult,
+    definitions: dict[str, RecipeDefinition],
+    architecture: Architecture,
+) -> None:
+    """Keep the reviewed TEMT6000/ADS1115 circuit within its evidence."""
+    unverified_quantity = re.compile(
+        r"\b(?:accuracy|accurate|precision|error|calibration|calibrated|"
+        r"sampling|sample|response|settling|bandwidth|"
+        r"independent[ _-]power|unpowered|illuminance|lux)\b",
+        re.IGNORECASE,
+    )
+    requirements = {row.id: row for row in result.requirements}
+    for selection in result.selections:
+        definition = definitions[selection.recipe]
+        if definition.exact_part != "ADS1115IDGSR":
+            continue
+        ain0 = next((
+            selection.port_bindings[pin.net]
+            for pin in definition.pins
+            if pin.role == "device" and pin.pin == "4" and pin.net in selection.port_bindings
+        ), None)
+        if ain0 is None:
+            continue
+        owners = [requirements[key] for key in selection.requirement_ids if key in requirements]
+        for sensor in result.requirements:
+            if _identity(sensor.exact_part or "") != "temt6000x01":
+                continue
+            if sensor.ports.get("analog_out") != ain0 or not any(
+                _connected_between_sheets(architecture, ain0, sensor.sheet, owner.sheet)
+                for owner in owners
+            ):
+                continue
+            related = [sensor, *owners]
+            for row in result.requirements:
+                if row in related:
+                    continue
+                if any(
+                    net in row.ports.values()
+                    and _connected_between_sheets(architecture, net, owner.sheet, row.sheet)
+                    for owner in owners
+                    for port, net in owner.ports.items()
+                    if port in {"sda", "scl", "io0"}
+                ):
+                    related.append(row)
+            unsupported = []
+            for row in related:
+                for obligation in row.obligations:
+                    if obligation.kind == "quantitative" and unverified_quantity.search(
+                        obligation.quantity.replace("_", " ")
+                    ):
+                        unsupported.append(obligation.original_obligation_id)
+                    elif obligation.kind == "external_analog_source" and (
+                        obligation.minimum_sample_rate_hz is not None
+                        or obligation.maximum_error_v is not None
+                        or obligation.may_drive_unpowered is True
+                        or obligation.source_impedance_ohm is not None
+                        or obligation.minimum_v is not None
+                        or obligation.maximum_v is not None
+                    ):
+                        unsupported.append(obligation.original_obligation_id)
+            if unsupported:
+                result.blocking.append(ResolutionDiagnostic(
+                    code="temt_ads_performance_unverified",
+                    requirement_id=sensor.id, sheet=sensor.sheet, recipe=selection.recipe,
+                    message=(
+                        "The reviewed TEMT6000 to ADS1115 acquisition does not establish "
+                        "precision, calibration, sample or settling rate, or independent "
+                        "power guarantees; preserve the requirement and select a qualified path."
+                    ),
+                    evidence=sorted(set(unsupported)),
+                ))
+            result.assumptions.append(
+                f"{sensor.id} to {selection.instance}: single-ended AIN0, ±4.096 V full-scale; "
+                "wait at least 50 µs after stable supply before I²C. No precision, settling-rate, "
+                "calibration, or independent-power guarantee."
+            )
 
 
 def _external_adc_contracts(
@@ -1612,10 +1836,44 @@ def _external_adc_contracts(
 
 
 
+def _reviewed_adc_contacts(
+    selection: RecipeSelection, definition: RecipeDefinition,
+) -> tuple[set[str], str | None, str | None]:
+    """Resolve reviewed ADC contacts through the selected device's recipe pins."""
+    record = reviewed_part(definition.exact_part or "")
+    contract = record.support_network.get("analog_input") if record else None
+    if not isinstance(contract, dict):
+        return set(), None, None
+    part_pins = {str(key).casefold(): str(value) for key, value in record.port_pins.items()}
+
+    def contact(name: object) -> str | None:
+        key = str(name).casefold()
+        return part_pins.get("ground" if key == "gnd" else key)
+
+    roles = {
+        part.role for part in definition.parts
+        if part.mpn and _identity(part.mpn) == _identity(definition.exact_part)
+    }
+    nets_by_pin = {
+        pin.pin: selection.port_bindings[pin.net]
+        for pin in definition.pins
+        if pin.role in roles and pin.net in selection.port_bindings
+    }
+    signals = {
+        nets_by_pin[number] for name in contract.get("pins", ())
+        if (number := contact(name)) in nets_by_pin
+    }
+    return (
+        signals,
+        nets_by_pin.get(contact(contract.get("reference_pin"))),
+        nets_by_pin.get(contact(contract.get("ground_pin"))),
+    )
+
+
 def _bind_analog_adc_limits(
     result: ResolutionResult,
     definitions: dict[str, RecipeDefinition],
-    rail_voltages: dict[str, float],
+    architecture: Architecture,
 ) -> None:
     """Constrain a bound analog producer by its actual reviewed ADC consumers."""
     producers = {
@@ -1626,32 +1884,57 @@ def _bind_analog_adc_limits(
     }
     if not any(row.family in producers for row in result.requirements):
         return
-    limits: dict[str, float] = {}
-    unknown: set[str] = set()
+    consumers: list[tuple[str, tuple[str, ...], float | None, str | None, str | None]] = []
     for selection in result.selections:
         adc_nets = {
             row.net for row in selection.pin_allocations if row.capability == "adc"
         }
-        adc_nets.update(
-            net for port, net in selection.port_bindings.items()
-            if port == "adc" or port.startswith("adc_")
-        )
+        definition = definitions[selection.recipe]
+        physical_nets, reference, ground = _reviewed_adc_contacts(selection, definition)
+        adc_nets.update(physical_nets)
         if not adc_nets:
             continue
-        definition = definitions[selection.recipe]
-        maximum = definition.parameter_defaults.get("consumer_input_max_v")
+        if physical_nets:
+            record = reviewed_part(definition.exact_part or "")
+            contract = record.support_network["analog_input"]
+            reference_v = _bound_rail_voltage(architecture, reference)
+            ground_v = _bound_rail_voltage(architecture, ground)
+            if ground_v is None and ground and re.fullmatch(r"(?:gnd|ground|0v)", ground, re.I):
+                ground_v = 0.0
+            margin = contract.get("recommended_max_above_reference_v")
+            minimum = contract.get("recommended_min_above_ground_v")
+            maximum = (
+                reference_v + margin
+                if type(reference_v) in (int, float) and type(margin) in (int, float)
+                and type(minimum) in (int, float) and minimum <= 0.0
+                and ground_v == 0.0 else None
+            )
+        else:
+            reference = selection.port_bindings.get("vdd")
+            ground = selection.port_bindings.get("gnd")
+            maximum = definition.parameter_defaults.get("consumer_input_max_v")
+            stated = selection.parameters.get("consumer_input_max_v")
+            if type(maximum) in (int, float) and type(stated) in (int, float):
+                maximum = min(maximum, stated)
         if (
             type(maximum) not in (int, float)
             or not math.isfinite(maximum)
             or maximum <= 0
         ):
-            unknown.update(adc_nets)
-            continue
-        supply = rail_voltages.get(selection.port_bindings.get("vdd", ""))
-        if supply is not None:
-            maximum = min(maximum, supply)
-        for net in adc_nets:
-            limits[net] = min(limits.get(net, maximum), maximum)
+            maximum = None
+        else:
+            supply = _bound_rail_voltage(architecture, selection.port_bindings.get("vdd"))
+            if supply is not None:
+                maximum = min(maximum, supply)
+        consumers.extend(
+            (
+                net,
+                tuple(row.sheet for row in result.requirements
+                      if row.id in selection.requirement_ids and net in row.ports.values()),
+                maximum, reference, ground,
+            )
+            for net in adc_nets
+        )
     for index, requirement in enumerate(result.requirements):
         lowerer = producers.get(requirement.family)
         if lowerer is None:
@@ -1660,19 +1943,41 @@ def _bind_analog_adc_limits(
             net for port, net in requirement.ports.items()
             if lowerer_port_direction(lowerer, port) == "output"
         }
-        if outputs & unknown:
+        attached = [
+            (net, maximum, reference, ground)
+            for net, sheets, maximum, reference, ground in consumers
+            if net in outputs and any(
+                _connected_between_sheets(architecture, net, requirement.sheet, sheet)
+                for sheet in sheets
+            )
+        ]
+        unknown = {net for net, maximum, _reference, _ground in attached if maximum is None}
+        if unknown:
             result.blocking.append(ResolutionDiagnostic(
                 code="unverified_adc_input_range",
                 requirement_id=requirement.id,
                 sheet=requirement.sheet,
                 message="An attached ADC has no reviewed analog input range.",
-                evidence=sorted(outputs & unknown),
+                evidence=sorted(unknown),
             ))
             continue
-        bound = outputs & limits.keys()
+        incompatible_domains = {
+            net for net, _maximum, reference, ground in attached
+            if not reference or not ground or requirement.ports.get("vminus") != ground
+        }
+        if incompatible_domains:
+            result.blocking.append(ResolutionDiagnostic(
+                code="unqualified_analog_consumer_domain",
+                requirement_id=requirement.id, sheet=requirement.sheet,
+                message="Analog producer and ADC must share a reference ground.",
+                evidence=sorted(incompatible_domains),
+            ))
+            continue
+        bound = {net for net, _maximum, _reference, _ground in attached}
         if not bound:
             continue
-        maximum = min(limits[net] for net in bound)
+        adc_maximum = min(value for _net, value, _reference, _ground in attached if value is not None)
+        maximum = adc_maximum
         parameters = dict(requirement.parameters)
         if "consumer_input_max_v" in parameters:
             try:
@@ -1693,19 +1998,34 @@ def _bind_analog_adc_limits(
         result.requirements[index] = updated
         diagnostic = lowerer_contract_diagnostic(updated)
         if diagnostic is not None:
+            message = diagnostic.message
+            if (lowerer.lowerer_id == "temt6000-readout@1"
+                    and parameters.get("analog_rail_v") == 3.3 and adc_maximum < 3.3):
+                message += (
+                    f" The 3.3 V light output cannot connect directly to this ADC "
+                    f"(maximum {adc_maximum:g} V). Changing consumer_input_max_v does not lower "
+                    "the physical voltage. If direct MCU ADC acquisition is not explicitly "
+                    "required, the reviewed ads1115-i2c-adc@1 at 3.3 V is an offered alternative: "
+                    "route the sensor only to its io0 analog input and read it from the MCU "
+                    "over I2C, preserving its power, reference, pull-ups and firmware constraints. "
+                    "Do not also leave the sensor tied to the MCU ADC, silently change an "
+                    "explicit direct-ADC requirement, or claim unreviewed accuracy/sample rates."
+                )
             result.blocking.append(ResolutionDiagnostic(
                 code="unsupported_lowerer_contract",
                 requirement_id=requirement.id,
                 sheet=requirement.sheet,
-                message=diagnostic.message,
+                message=message,
                 evidence=[
                     *diagnostic.evidence,
-                    f"attached ADC maximum={maximum:g} V; nets={sorted(bound)!r}",
+                    f"attached ADC maximum={adc_maximum:g} V; nets={sorted(bound)!r}",
+                    f"actual_adc_input_max_v={adc_maximum:g}",
+                    f"effective_input_limit_v={maximum:g}",
                 ],
             ))
         result.assumptions.append(
-            f"{requirement.id}: analog output constrained to the attached ADC's "
-            f"reviewed maximum {maximum:g} V; explicit gain/range requirements retained (derived)"
+            f"{requirement.id}: analog output constrained to the tightest reviewed/authored "
+            f"input limit {maximum:g} V; explicit gain/range requirements retained (derived)"
         )
 
 
@@ -1775,20 +2095,35 @@ def _protected_motor_sources(
     return replacements, diagnostics
 
 
-def _analog_hall_requirement(requirement: CircuitRequirement, architecture: Architecture) -> bool:
-    """Generic Hall defaults require a positive analog contract, never a switch guess."""
+def _analog_hall_requirement(
+    requirement: CircuitRequirement, architecture: Architecture,
+    result: ResolutionResult, definitions: dict[str, RecipeDefinition],
+) -> bool:
+    """Require typed analog intent or a selected, physically bound ADC contact."""
     interfaces = set(requirement.interfaces)
     if interfaces & {"digital", "digital_output", "gpio", "pulse", "hall-switch"}:
         return False
     if interfaces & {"adc", "analog", "analog_output"}:
         return True
     output = requirement.ports.get("out")
-    return bool(output and any(
-        peer.role == "mcu_core" and any(
-            name.startswith("adc") and net == output for name, net in peer.ports.items()
+    if not output:
+        return False
+    for selection in result.selections:
+        physical_nets, _reference, _ground = _reviewed_adc_contacts(
+            selection, definitions[selection.recipe]
         )
-        for peer in architecture.requirements
-    ))
+        if output not in physical_nets and not any(
+            allocation.net == output and allocation.capability == "adc"
+            for allocation in selection.pin_allocations
+        ):
+            continue
+        if any(
+            peer.id in selection.requirement_ids and output in peer.ports.values()
+            and _connected_between_sheets(architecture, output, requirement.sheet, peer.sheet)
+            for peer in result.requirements
+        ):
+            return True
+    return False
 
 
 def _hall_supply_diagnostics(
@@ -1804,16 +2139,8 @@ def _hall_supply_diagnostics(
     invalid = supply != 3.3 or ground != 0.0
     invalid |= bool(set(requirement.interfaces) & {"digital", "digital_output", "gpio", "pulse", "hall-switch"})
     invalid |= len({bindings.get(name) for name in ("vdd", "gnd", "out")}) != 3
-    for peer in architecture.requirements:
-        if peer.role != "mcu_core":
-            continue
-        consumers = [name for name, net in peer.ports.items() if net == bindings.get("out")]
-        if consumers and (
-            not all(name.startswith("adc") for name in consumers)
-            or peer.ports.get("vdd") != bindings.get("vdd")
-            or peer.ports.get("gnd") != bindings.get("gnd")
-        ):
-            invalid = True
+    # Consumer function and domains are checked against physical selections
+    # after all pin allocations, not against logical MCU port spelling.
     if not invalid:
         return []
     return [ResolutionDiagnostic(
@@ -1828,6 +2155,95 @@ def _hall_supply_diagnostics(
         evidence=[f"{name}={net}" for name, net in sorted(bindings.items())],
     )]
 
+
+
+def _hall_adc_diagnostics(
+    result: ResolutionResult, definitions: dict[str, RecipeDefinition], architecture: Architecture,
+) -> None:
+    """Validate Hall consumers against their selected physical ADC contacts."""
+    requirements = {row.id: row for row in result.requirements}
+    for hall in result.selections:
+        if hall.recipe != "ah49entr-g1-analog-hall@1":
+            continue
+        out = hall.port_bindings.get("out")
+        for peer in result.selections:
+            if peer is hall:
+                continue
+            if out is None or not any(
+                _connected_between_sheets(architecture, out, left.sheet, right.sheet)
+                for left in result.requirements
+                if left.id in hall.requirement_ids and out in left.ports.values()
+                for right in result.requirements
+                if right.id in peer.requirement_ids and out in right.ports.values()
+            ):
+                continue
+            definition = definitions[peer.recipe]
+            owners = [requirements[key] for key in peer.requirement_ids if key in requirements]
+            mcu_bound = any(row.role == "mcu_core" and out in row.ports.values() for row in owners)
+            physical_nets, reference, ground = _reviewed_adc_contacts(peer, definition)
+            ads_bound = out in physical_nets
+            if not mcu_bound and not ads_bound:
+                continue
+            adc = ads_bound or any(
+                row.net == out and row.capability == "adc" for row in peer.pin_allocations
+            )
+            same_domain = (
+                (reference if ads_bound else peer.port_bindings.get("vdd")) == hall.port_bindings.get("vdd")
+                and (ground if ads_bound else peer.port_bindings.get("gnd")) == hall.port_bindings.get("gnd")
+            )
+            if not adc or not same_domain:
+                result.blocking.append(ResolutionDiagnostic(
+                    code="unqualified_hall_analog_domain",
+                    requirement_id=hall.requirement_ids[0],
+                    recipe=hall.recipe,
+                    message=(
+                        "The Hall output requires a physically allocated ADC input "
+                        "in the same supply and reference domain."
+                    ),
+                    evidence=[f"consumer={peer.instance}", f"net={out}",
+                              f"adc={adc}", f"same_domain={same_domain}"],
+                ))
+                continue
+            # The reviewed Hall contract specifies a ratiometric output but
+            # does not establish a tighter magnetic-field-independent ceiling.
+            # Conservatively require the consumer to tolerate the supply rail.
+            supply_v = _bound_rail_voltage(architecture, hall.port_bindings.get("vdd"))
+            if ads_bound:
+                record = reviewed_part(definition.exact_part or "")
+                contract = record.support_network.get("analog_input", {}) if record else {}
+                reference_v = _bound_rail_voltage(architecture, reference)
+                margin = contract.get("recommended_max_above_reference_v")
+                minimum = contract.get("recommended_min_above_ground_v")
+                maximum = (
+                    reference_v + margin
+                    if type(reference_v) in (int, float)
+                    and type(margin) in (int, float)
+                    and type(minimum) in (int, float) and minimum <= 0
+                    else None
+                )
+            else:
+                maximum = definition.parameter_defaults.get("consumer_input_max_v")
+                stated = peer.parameters.get("consumer_input_max_v")
+                if type(maximum) in (int, float) and type(stated) in (int, float):
+                    maximum = min(maximum, stated)
+            if (
+                type(supply_v) not in (int, float)
+                or type(maximum) not in (int, float)
+                or not math.isfinite(maximum)
+                or maximum < supply_v
+            ):
+                result.blocking.append(ResolutionDiagnostic(
+                    code="unqualified_hall_analog_domain",
+                    requirement_id=hall.requirement_ids[0],
+                    recipe=hall.recipe,
+                    message=(
+                        "The Hall output's conservative supply-rail bound exceeds or lacks "
+                        "the attached ADC's reviewed operating limit."
+                    ),
+                    evidence=[f"consumer={peer.instance}", f"net={out}",
+                              f"hall_output_max_v={supply_v!r}",
+                              f"adc_input_max_v={maximum!r}"],
+                ))
 
 def resolve_architecture_recipes(
     architecture: Architecture | dict,
@@ -1907,6 +2323,10 @@ def resolve_architecture_recipes(
     }
     lowered = {}
     for requirement in requirements:
+        if _recipe_for_exact(requirement.exact_part, recipes) is not None:
+            # An explicit reviewed construction is checked below as that
+            # construction, not as a second builder sharing its family name.
+            continue
         diagnostic = lowerer_contract_diagnostic(requirement)
         if diagnostic is None:
             if requirement.family in primitive_families:
@@ -2042,7 +2462,10 @@ def resolve_architecture_recipes(
         architecture_model, requirements, recipes
     )
     result.blocking.extend(motor_diagnostics)
-    for requirement in sorted(requirements, key=lambda item: item.id):
+    definitions = {recipe.definition.recipe: recipe.definition for recipe in recipes}
+    for requirement in sorted(
+        requirements, key=lambda item: (_identity(item.family) == "halleffect", item.id)
+    ):
         requirement = motor_sources.get(requirement.id, requirement)
         requirement, required_reset_controls = _complete_reset_control_peers(
             requirement, architecture_model, recipes
@@ -2067,7 +2490,7 @@ def resolve_architecture_recipes(
         if (
             _identity(requirement.family) == "halleffect"
             and not requirement.exact_part
-            and not _analog_hall_requirement(requirement, architecture_model)
+            and not _analog_hall_requirement(requirement, architecture_model, result, definitions)
         ):
             family_matches = []
         sheet = next(
@@ -2278,7 +2701,7 @@ def resolve_architecture_recipes(
         # retain their programming method and exact selected silicon.
         uart_variants = _ROM_UART_VARIANTS
         existing_selection = existing_by_requirement.get(requirement.id)
-        if existing_selection is not None and existing_selection.recipe == "rp2040-minimal@3":
+        if existing_selection is not None and existing_selection.recipe == "rp2040-minimal@4":
             if definition.recipe != existing_selection.recipe:
                 result.blocking.append(ResolutionDiagnostic(
                     code="conflicting_saved_recipe_selection",
@@ -2424,6 +2847,9 @@ def resolve_architecture_recipes(
                 )
             )
             continue
+        result.blocking.extend(_converter_compatibility_diagnostics(
+            definition, requirement, architecture_model, recipes
+        ))
         current_diagnostics = _power_output_current_diagnostics(definition, requirement)
         if current_diagnostics:
             result.blocking.extend(current_diagnostics)
@@ -2488,6 +2914,21 @@ def resolve_architecture_recipes(
                 )
                 continue
             parameters["native_usb"] = True
+        if definition.recipe == "rp2040-minimal@4":
+            from .rp2040_minimal_v2 import effective_rp2040_definition
+
+            try:
+                definition = effective_rp2040_definition(
+                    definition, {**definition.parameter_defaults, **requirement.parameters},
+                    requirement.ports,
+                )
+            except ValueError as exc:
+                result.blocking.append(ResolutionDiagnostic(
+                    code="conflicting_recipe_parameter",
+                    requirement_id=requirement.id, recipe=definition.recipe,
+                    sheet=requirement.sheet, message=str(exc),
+                ))
+                continue
         if requirement.role == "mcu_core" and definition.allocatable_pins:
             available_gpios = {
                 pin.gpio
@@ -2663,7 +3104,7 @@ def resolve_architecture_recipes(
                 required_capabilities={
                     net: capability
                     for net, capability in required_capabilities.items()
-                    if capability == "touch"
+                    if capability in {"touch", "adc"}
                 },
                 required_reset_controls=required_reset_controls,
             )
@@ -2701,7 +3142,7 @@ def resolve_architecture_recipes(
         )
         sheet_map = {role: requirement.sheet for role in definition.required_sheet_roles}
         selection_requirement_ids = [requirement.id]
-        if existing is not None and existing.recipe == "rp2040-minimal@3":
+        if existing is not None and existing.recipe == "rp2040-minimal@4":
             sheet_map = dict(existing.sheets)
             if requirement.role == "mcu_core":
                 selection_requirement_ids.extend(
@@ -2767,7 +3208,7 @@ def resolve_architecture_recipes(
     rp2040_pairs = {
         (row.port_bindings["usb_dm"], row.port_bindings["usb_dp"])
         for row in result.selections
-        if row.recipe == "rp2040-minimal@3"
+        if row.recipe == "rp2040-minimal@4"
         and row.parameters.get("native_usb") is True
         and {"usb_dm", "usb_dp"} <= row.port_bindings.keys()
     }
@@ -2903,7 +3344,9 @@ def resolve_architecture_recipes(
     result.selections.sort(key=lambda selection: (selection.recipe, selection.instance))
     resolved_requirements = {row.id: row for row in result.requirements}
     result.requirements = [resolved_requirements.get(row.id, row) for row in requirements]
-    _bind_analog_adc_limits(result, definitions, architecture_model.rail_voltages)
+    _hall_adc_diagnostics(result, definitions, architecture_model)
+    _bind_analog_adc_limits(result, definitions, architecture_model)
+    _temt_ads_performance_diagnostics(result, definitions, architecture_model)
     _external_adc_contracts(
         result, definitions, architecture_model.external_adc_contracts, architecture_model.power_nets,
     )

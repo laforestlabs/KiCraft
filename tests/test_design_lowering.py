@@ -578,8 +578,8 @@ def test_committed_carrier_class_controls_generic_header_lowering(
             "component_class": component_class,
         }],
     }
-    complete_architecture_payload(payload)
-    row = payload["requirements"][0]
+    completed = complete_architecture_payload(payload)
+    row = completed["requirements"][0]
     requirement = CircuitRequirement(
         id=row["id"], sheet=row["sheet"], role=row["role"],
         family=row["family"], parameters=row["parameters"], exact_part=row["exact_part"],
@@ -2307,6 +2307,48 @@ def test_dc_jack_accepts_the_spellings_drafts_use_for_its_two_wires():
         }, ports
 
 
+def test_generic_dc_jack_uses_reviewed_identity_and_coalesces_contact_aliases():
+    from kicraft.design.lowering import lowerer_summaries, registered_lowerers, lowerer_canonical_port_name
+
+    requirement = _requirement(
+        "barrel-jack",
+        ports={"tip": "VIN", "positive": "VIN", "sleeve": "GND", "gnd": "GND"},
+    )
+    artifact = lower_requirement(requirement)
+    assert artifact.groups[0].mpn == "DC005"
+    assert {pin.pin: pin.net for pin in artifact.pins} == {"1": "VIN", "3": "GND"}
+    assert {pin.pin for pin in artifact.no_connects} == {"2"}
+    summary = next(row for row in lowerer_summaries() if row["lowerer"] == "reviewed-connector@1")
+    assert summary["reviewed_exact_part"] == "DC005"
+    lowerer = next(row for row in registered_lowerers() if row.lowerer_id == "reviewed-connector@1")
+    assert lowerer_canonical_port_name(lowerer, "TIP") == "positive"
+    assert lowerer_canonical_port_name(lowerer, "sleeve") == "gnd"
+
+
+@pytest.mark.parametrize(
+    "ports,first,second",
+    [
+        ({"tip": "VIN", "positive": "OTHER", "gnd": "GND"}, "tip='VIN'", "positive='OTHER'"),
+        ({"positive": "VIN", "gnd": "GND", "sleeve": "RETURN"}, "gnd='GND'", "sleeve='RETURN'"),
+    ],
+)
+def test_dc_jack_rejects_conflicting_contact_aliases(ports, first, second):
+    requirement = _requirement("barrel-jack", ports=ports)
+    with pytest.raises(ValueError) as exc:
+        lower_requirement(requirement)
+    assert first in str(exc.value) and second in str(exc.value)
+    diagnostic = lowerer_contract_diagnostic(requirement)
+    assert diagnostic is not None
+    assert first in diagnostic.message and second in diagnostic.message
+
+
+def test_dc_jack_rejects_unknown_or_incompatible_exact_identity():
+    requirement = _requirement("barrel-jack", ports={"positive": "VIN", "gnd": "GND"})
+    for identity in ("UNKNOWN-JACK", "TMP102AIDRLR"):
+        with pytest.raises(ValueError):
+            lower_requirement(requirement.model_copy(update={"exact_part": identity}))
+
+
 def test_an_unrealizable_exact_part_names_the_part_in_the_diagnostic():
     """The build's own refusal is what the draft can act on; the generic sentence alone is not.
 
@@ -3046,3 +3088,28 @@ def test_rgb_indicator_internal_nodes_are_unique_per_requirement():
     assert internal(first)
     assert internal(second)
     assert not internal(first) & internal(second)
+
+
+@pytest.mark.parametrize(
+    ("exact_part", "ports", "missing"),
+    [
+        (None, {"pin1": "SIGNAL"}, {"pin2"}),
+        ("B4B-XH-A(LF)(SN)", {"pin1": "A", "pin2": "B", "pin3": "+5V"}, {"pin4"}),
+    ],
+)
+def test_jst_repair_identifies_missing_real_contacts_without_changing_part(exact_part, ports, missing):
+    from kicraft.design.lowering import lowerer_contract_diagnostic
+
+    request = _requirement("jst-xh-connector", ports=ports).model_copy(
+        update={"exact_part": exact_part}
+    )
+    diagnostic = lowerer_contract_diagnostic(request)
+    required = next(value.removeprefix("required_ports=") for value in diagnostic.evidence
+                    if value.startswith("required_ports="))
+    assert set(required.split(",")) - ports.keys() == missing
+    repaired = request.model_copy(update={"ports": {**ports, **{pin: "GND" for pin in missing}}})
+    artifact = lower_requirement(repaired)
+    assert artifact.groups[0].mpn == (exact_part or "B2B-XH-A(LF)(SN)")
+    assert {(pin.pin, pin.net) for pin in artifact.pins} == {
+        (name.removeprefix("pin"), net) for name, net in repaired.ports.items()
+    }

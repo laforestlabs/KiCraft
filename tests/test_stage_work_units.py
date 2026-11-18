@@ -724,7 +724,7 @@ def test_recipe_part_role_does_not_own_an_unselected_requirement():
     ]
     state["architecture"]["recipe_selections"] = [
         {
-            "recipe": "rp2040-minimal@3",
+            "recipe": "rp2040-minimal@4",
             "instance": "mcu",
             "sheets": {"mcu": "A", "io": "A"},
             "requirement_ids": ["mcu"],

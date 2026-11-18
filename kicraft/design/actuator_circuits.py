@@ -90,8 +90,36 @@ def _uln2003(requirement: CircuitRequirement, *, relay: bool) -> LoweringArtifac
         return None
     if requirement.exact_part and str(requirement.exact_part).casefold() not in {"uln2003adr", "uln2003a"}:
         return None
-    ports = _required_ports(requirement, _uln_ports(channels, relay))
+    expected = _uln_ports(channels, relay)
+    optional_contacts = (
+        {f"relay_{i}_{contact}" for i in range(1, channels + 1)
+         for contact in ("common", "normally_open", "normally_closed")}
+        if relay else set()
+    )
+    stated = set(requirement.ports)
+    if not expected - optional_contacts <= stated or stated - expected:
+        return None
+    ports = _required_ports(requirement, stated)
+    if ports is not None and relay:
+        internal_contacts = {
+            f"relay_{i}_{contact}": f"__KICRAFT_RELAY__{requirement.id}__{label}_{i}"
+            for i in range(1, channels + 1)
+            for contact, label in (("common", "COM"), ("normally_open", "NO"), ("normally_closed", "NC"))
+            if f"relay_{i}_{contact}" not in ports
+        }
+        if set(internal_contacts.values()) & set(ports.values()):
+            return None
+        ports.update(internal_contacts)
     if ports is None or not _different(ports["vmotor"], ports["gnd"]):
+        return None
+    if relay and any(
+        not _different(
+            ports[f"relay_{i}_common"],
+            ports[f"relay_{i}_normally_open"],
+            ports[f"relay_{i}_normally_closed"],
+        )
+        for i in range(1, channels + 1)
+    ):
         return None
     if relay:
         # On-board coils are this circuit's internal load, not an external
@@ -297,12 +325,15 @@ ULN2003_ACTUATOR_LOWERER = RegisteredLowerer(
     "uln2003-actuator@1", frozenset({"uln2003-actuator", "uln2003", "darlington-array", "darlington_array"}), lambda requirement: _uln2003(requirement, relay=False),
     parameter_keys=("channel_count", "channels", "motor_voltage_v", "load_current_a"), port_keys=("vmotor, gnd; control_<n>; load_<n>_positive/load_<n>_negative",), required_port_keys=("vmotor", "gnd"),
     parameter_choices=(("channel_count", (2, 4, 8)), ("channels", (2, 4, 8)), ("motor_voltage_v", (5.0,)), ("load_current_a", (0.10,))), port_directions=(("vmotor", "input"), ("gnd", "bidirectional")), port_patterns=((r"control_[1-8]", "input"), (r"load_[1-8]_positive", "output"), (r"load_[1-8]_negative", "output")), reviewed_exact_part="ULN2003ADR",
+    supply_port_keys=("vmotor",),
 )
 RELAY_OUTPUT_LOWERER = RegisteredLowerer(
     "relay-output@2", frozenset({"relay-output", "relay_output", "relay-board", "relay_board"}), lambda requirement: _uln2003(requirement, relay=True),
     parameter_keys=("channel_count", "channels", "motor_voltage_v", "load_current_a"), port_keys=("vmotor, gnd; control_<n>; relay_<n>_common/normally_open/normally_closed",), required_port_keys=("vmotor", "gnd"),
     parameter_choices=(("channel_count", (2, 3, 4)), ("channels", (2, 3, 4)), ("motor_voltage_v", (5.0, 24.0)), ("load_current_a", (0.10,))), port_directions=(("vmotor", "input"), ("gnd", "bidirectional")), port_patterns=((r"control_[1-4]", "input"), (r"relay_[1-4]_(?:common|normally_open|normally_closed)", "output")), reviewed_exact_part="ULN2003ADR",
-    parameter_constraints=("On-board relay coil supply and distinct driver-to-coil nodes are compiler-owned; do not declare load_<n> ports or extra coil connectors. Bind only the explicitly selected 5 V or 24 V supply, return, independent control inputs and isolated C/NO/NC contact interfaces. The 24 V option requires 20-26 V at the circuit and product-specific transient, temperature, load and thermal review.",),
+    supply_port_keys=("vmotor",),
+    external_interface_protocols=("relay-contact-output",),
+    parameter_constraints=("On-board relay coils, distinct driver-to-coil nodes and the C/NO/NC screw terminals are compiler-owned; do not declare load_<n> ports or extra coil/contact connectors. Bind the explicitly selected 5 V or 24 V supply, return and independent control inputs. Omitted contact ports receive distinct internal conductors between the relay and its owned terminal; bind a C/NO/NC port only to connect an actual additional onboard peer, preserving contact isolation. The 24 V option requires 20-26 V at the circuit and product-specific transient, temperature, load and thermal review.",),
 )
 TB6612_LOWERER = RegisteredLowerer(
     "tb6612fng-dual-h-bridge@1", frozenset({"tb6612fng", "tb6612", "dual-dc-motor-driver-tb6612"}), _tb6612,

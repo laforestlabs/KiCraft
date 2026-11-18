@@ -293,3 +293,21 @@ def test_isolated_conditioner_rejects_cross_channel_output_alias():
         lower_requirement(requirement.model_copy(update={
             "ports": ports, "parameters": {**requirement.parameters, "power_cycle_isolation": True},
         }))
+
+
+def test_conditioner_repair_identifies_unconnected_channel_and_preserves_physical_output():
+    from kicraft.design.lowering import lowerer_contract_diagnostic
+
+    complete = _requirement("humidity", 2, "TLV9062IDR")
+    incomplete = complete.model_copy(update={
+        "ports": {name: net for name, net in complete.ports.items()
+                  if name not in {"analog_out_2", "conditioned_2"}}
+    })
+    diagnostic = lowerer_contract_diagnostic(incomplete)
+    required = next(value.removeprefix("required_ports=") for value in diagnostic.evidence
+                    if value.startswith("required_ports="))
+    assert set(required.split(",")) - incomplete.ports.keys() == {"analog_out_2"}
+    artifact = lower_requirement(complete)
+    assert next(group for group in artifact.groups if group.role == "amplifier").mpn == "TLV9062IDR"
+    assert {(pin.index, pin.pin, pin.net) for pin in artifact.pins if pin.role == "amplifier"
+            and pin.pin in {"1", "7"}} == {(0, "1", "OUT1"), (0, "7", "OUT2")}

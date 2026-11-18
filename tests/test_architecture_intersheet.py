@@ -698,3 +698,101 @@ def test_direction_words_are_valid_net_names_when_explicitly_bound():
         ],
     )
     assert check_fs_connections_mapped(fs, arch).ok
+
+
+def _measurement_case():
+    obligations = [
+        {"kind": "quantitative", "original_obligation_id": "width",
+         "quantity": "board width", "unit": "mm", "relation": "maximum", "value": 100},
+        {"kind": "quantitative", "original_obligation_id": "height",
+         "quantity": "board height", "unit": "mm", "relation": "maximum", "value": 100},
+        {"kind": "quantitative", "original_obligation_id": "layers",
+         "quantity": "copper layers", "unit": "layers", "relation": "equal", "value": 4},
+        {"kind": "physical", "original_obligation_id": "usb",
+         "component_class": "usb-c-connector"},
+        {"kind": "physical", "original_obligation_id": "terminal",
+         "component_class": "screw-terminal"},
+        {"kind": "quantity", "original_obligation_id": "terminal_count",
+         "subject": "screw-terminal", "minimum": 2},
+    ]
+    fs = {"blocks": [{"name": "BOARD_OUTLINE", "obligation_ids": ["width", "height", "layers"]}],
+          "connections": []}
+    payload = {
+        "sheets": [{"name": "OUTLINE", "stem": "OUTLINE", "role": "other",
+                    "function": "board dimensions"}],
+        "requirements": [{"id": "outline", "sheet": "OUTLINE", "role": "connector",
+                          "family": "pin-header", "parameters": {"rows": 1, "gender": "female"},
+                          "functional_blocks": ["BOARD_OUTLINE"]}],
+        "signals": [], "power": {"rails": {}}, "obligations": obligations,
+    }
+    return payload, {"obligations": obligations}, fs
+
+
+def test_board_measurement_placeholder_pruning_preserves_obligations():
+    from copy import deepcopy
+
+    from kicraft.design.board_measurements import prune_board_measurement_requirements
+
+    payload, intent, fs = _measurement_case()
+    obligations = deepcopy(payload["obligations"])
+    prune_board_measurement_requirements(payload, intent=intent, functional_spec=fs)
+    assert payload["requirements"] == []
+    assert payload["sheets"] == []
+    assert payload["obligations"] == obligations
+    prune_board_measurement_requirements(payload, intent=intent, functional_spec=fs)
+    assert payload["requirements"] == []
+
+
+def test_board_measurement_pruning_retains_physical_or_ambiguous_candidates():
+    from copy import deepcopy
+
+    from kicraft.design.board_measurements import prune_board_measurement_requirements
+
+    for change in (
+        lambda p, i, f: p["requirements"][0].update(exact_part="some-part"),
+        lambda p, i, f: p["requirements"][0].update(supply="+3V3"),
+        lambda p, i, f: p["requirements"][0].update(interfaces=["i2c"]),
+        lambda p, i, f: p["requirements"][0].update(programming="swd"),
+        lambda p, i, f: p["signals"].append({"from": "outline.pin1", "to": "mcu.gpio1"}),
+        lambda p, i, f: p["power"]["rails"].update(VIN={"from": "outline.pin1"}),
+        lambda p, i, f: i["obligations"].append(
+            {"kind": "physical", "original_obligation_id": "header", "component_class": "pin-header"}
+        ),
+        lambda p, i, f: f["blocks"][0]["obligation_ids"].append("missing"),
+        lambda p, i, f: f["blocks"][0]["obligation_ids"].append("usb"),
+        lambda p, i, f: f["connections"].append({"from_block": "BOARD_OUTLINE", "to_block": "MCU"}),
+        lambda p, i, f: p["requirements"].append(deepcopy(p["requirements"][0])),
+    ):
+        payload, intent, fs = _measurement_case()
+        change(payload, intent, fs)
+        before = deepcopy(payload)
+        prune_board_measurement_requirements(payload, intent=intent, functional_spec=fs)
+        assert payload == before
+
+
+def test_board_measurement_pruning_keeps_replicated_sheet():
+    from kicraft.design.board_measurements import prune_board_measurement_requirements
+
+    payload, intent, fs = _measurement_case()
+    payload["sheets"][0].update(replication_group="copy", replication_instance=1)
+    prune_board_measurement_requirements(payload, intent=intent, functional_spec=fs)
+    assert not payload["requirements"]
+    assert len(payload["sheets"]) == 1
+
+
+def test_board_measurement_block_requires_unique_resolved_board_facts():
+    from kicraft.design.models import board_measurement_block
+
+    payload, _, fs = _measurement_case()
+    block = fs["blocks"][0]
+    rows = payload["obligations"]
+    assert board_measurement_block(block, rows)
+    assert not board_measurement_block({"obligation_ids": []}, rows)
+    assert not board_measurement_block({"obligation_ids": ["width", "width"]}, rows)
+    assert not board_measurement_block({"obligation_ids": ["missing"]}, rows)
+    assert not board_measurement_block(block, [*rows, rows[0]])
+    for quantity, unit in (("component count", "count"), ("connector pitch", "mm"),
+                           ("mounting holes", "count"), ("board voltage", "V")):
+        row = {"kind": "quantitative", "original_obligation_id": "other",
+               "quantity": quantity, "unit": unit}
+        assert not board_measurement_block({"obligation_ids": ["other"]}, [row])

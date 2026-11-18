@@ -146,7 +146,7 @@ def usb_routing_contracts(architecture: Architecture, bom: BOM):
         if len(rules) != 1 or set(rules[0].parameters) != keys:
             raise ValueError(f"{selection.instance}: missing reviewed USB routing targets")
         return rules[0].parameters
-    mcu_pins["rp2040-minimal@3"] = ("46", "47")
+    mcu_pins["rp2040-minimal@4"] = ("46", "47")
     actual = {}
     for connection in bom.connections:
         for ep in connection.endpoints:

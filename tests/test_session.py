@@ -177,7 +177,8 @@ def test_legacy_compiler_only_graph_needs_committed_wiring_status():
 
 
 @pytest.mark.parametrize("recipe", [
-    "rp2040-minimal@1", "rp2040-minimal@2", "drv8833-dual-motor@1", "drv8833-dual-motor@2", "drv8833-dual-motor@3",
+    "rp2040-minimal@1", "rp2040-minimal@2", "rp2040-minimal@3",
+    "drv8833-dual-motor@1", "drv8833-dual-motor@2", "drv8833-dual-motor@3",
     "esp32-c3-mini-1-minimal@1", "esp32-c3-mini-1-h4x-minimal@1",
     "tps54331-adjustable@1", "tps54331-12v-1a@1",
 ])
@@ -192,9 +193,12 @@ def test_legacy_recipe_bom_requires_regeneration(recipe, ownership):
         "intent": {}, "functional_spec": {}, "architecture": {}, "bom": bom,
         "wiring_complete": True, "stage_status": {"bom": {"ok": True}, "wiring": {"ok": True}},
     }
-    assert remaining_stages(state) == ["bom", "wiring"]
+    needs_architecture = recipe.startswith("rp2040-minimal@")
+    assert remaining_stages(state) == (
+        ["architecture", "bom", "wiring"] if needs_architecture else ["bom", "wiring"]
+    )
     statuses = derive_stage_statuses(state, sheets_exist=True, pcb_ready=True, zip_ok=True)
-    assert statuses["architecture"] == "done"
+    assert statuses["architecture"] == ("pending" if needs_architecture else "done")
     assert statuses["bom"] == statuses["wiring"] == statuses["fab"] == "pending"
 
 
@@ -214,7 +218,7 @@ def test_resume_discards_legacy_derived_state_before_driver(tmp_path, monkeypatc
         "stage_status": {"architecture": {"ok": True}, "bom": {"ok": True}, "wiring": {"ok": True}},
     }
     _write_state(tmp_path, original)
-    expected = ["architecture", "bom", "wiring"] if ambiguous else ["bom", "wiring"]
+    expected = ["architecture", "bom", "wiring"]
     assert remaining_stages(original) == expected
     seen = []
 
@@ -230,7 +234,7 @@ def test_resume_discards_legacy_derived_state_before_driver(tmp_path, monkeypatc
     assert saved["functional_spec"] == original["functional_spec"]
     assert saved["bom"] is None
     assert saved["wiring_complete"] is False
-    assert saved["architecture"] == (None if ambiguous else original["architecture"])
+    assert saved["architecture"] is None
 
 
 
@@ -320,8 +324,13 @@ class _FakeClient:
         }
 
 
-def test_run_session_defaults_direct_question_without_parking(tmp_path):
+@pytest.mark.parametrize("relative", [False, True])
+def test_run_session_defaults_direct_question_without_parking(tmp_path, monkeypatch, relative):
     brief = "a USB-powered LED"
+    workspace = tmp_path / "board"
+    if relative:
+        monkeypatch.chdir(tmp_path)
+        workspace = Path("board")
     question = json.dumps(
         {
             "questions": [
@@ -346,10 +355,10 @@ def test_run_session_defaults_direct_question_without_parking(tmp_path):
     )
     client = _FakeClient([question, intent_slot])
 
-    result = run_session(tmp_path, brief, ["intent"], client=client)
+    result = run_session(workspace, brief, ["intent"], client=client)
 
     assert result["status"] == "ok"
-    state = read_state(tmp_path)
+    state = read_state(workspace)
     assert state["intent"]["goal"] == brief
     assert state["open_questions"] == []
     assert state["stage_status"]["intent"]["ok"] is True

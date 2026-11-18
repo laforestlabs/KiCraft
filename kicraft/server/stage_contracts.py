@@ -545,8 +545,9 @@ def _strict_provider_schema(node):
     *every* property in ``required``. Pydantic omits fields that carry defaults,
     so the raw ``model_json_schema()`` is rejected verbatim (live 2026-09-12:
     HTTP 400 ``invalid_json_schema`` on the first luna intent call). Free-form
-    map objects (``dict[str, int]``) must instead stay open and MUST NOT be
-    required -- OpenAI rejects them in ``required`` ("Extra required key").
+    maps stay open here so the prompt/property guard retain their real keys.
+    They cannot be represented by OpenAI strict output; the architecture client
+    uses JSON-object transport for that shape and keeps local schema validation.
 
     Root-level ``anyOf``/``oneOf``/``allOf`` are forbidden by OpenAI; the
     interactive contracts already express the slot/questions alternation as one
@@ -619,10 +620,12 @@ def _slot_response_schema(stage: str) -> dict:
         schema = ArchitectureIntent.model_json_schema()
         properties = schema["properties"]
         properties["requirements"]["minItems"] = 1
-        schema["required"] = [*schema.get("required", []), "requirements"]
+        if "requirements" not in schema.setdefault("required", []):
+            schema["required"].append("requirements")
         requirement = schema["$defs"]["IntentRequirement"]
         requirement["properties"]["functional_blocks"]["minItems"] = 1
-        requirement["required"] = [*requirement.get("required", []), "functional_blocks"]
+        if "functional_blocks" not in requirement.setdefault("required", []):
+            requirement["required"].append("functional_blocks")
         return schema
     return SLOT_MODEL[stage].model_json_schema()
 
@@ -1611,7 +1614,9 @@ def _aggregate_intent_diagnostic(exc) -> dict:
     }
 
 
-def _derive_intent_payload(payload: dict, functional_spec: object | None = None) -> dict:
+def _derive_intent_payload(
+    payload: dict, functional_spec: object | None = None, intent: object | None = None,
+) -> dict:
     """Intent slot -> canonical slot; every refusal is carried as one diagnostic.
 
     ``functional_spec`` is the committed spec slot, when there is one. A board
@@ -1629,7 +1634,9 @@ def _derive_intent_payload(payload: dict, functional_spec: object | None = None)
 
     try:
         return derive_architecture(
-            complete_architecture_payload(complete_usb_socket_rail(payload)), functional_spec
+            complete_architecture_payload(
+                complete_usb_socket_rail(payload), intent=intent, functional_spec=functional_spec,
+            ), functional_spec
         ).model_dump(exclude_none=True)
     except ArchitectureIntentError as exc:
         raise StageSchemaError(
@@ -1836,7 +1843,10 @@ def _normalize_stage_response(
                 # Deterministically construct safe support ownership before the
                 # retention gate asks whether every source obligation has an owner.
                 from kicraft.design.architecture_intent import complete_architecture_payload
-                payload = complete_architecture_payload(payload)
+                payload = complete_architecture_payload(
+                    payload, intent=prompt_state.get("intent"),
+                    functional_spec=prompt_state.get("functional_spec"),
+                )
         elif stage == "functional_spec":
             # The spec's own `obligations` are the committed intent set, written here rather than
             # copied by the model; only the block→obligation ownership is the draft's.
@@ -1859,7 +1869,9 @@ def _normalize_stage_response(
                 # The answer states the design; the canonical shape (net names, port
                 # bindings, endpoints, connector exposure) is derived from it here.
                 try:
-                    payload = _derive_intent_payload(payload, prompt_state.get("functional_spec"))
+                    payload = _derive_intent_payload(
+                        payload, prompt_state.get("functional_spec"), prompt_state.get("intent"),
+                    )
                 except Exception as exc:
                     refusal = _ownership_refusal(exc, payload, prompt_state)
                     if refusal is None:
@@ -1896,8 +1908,10 @@ def _normalize_stage_response(
                     if len(evidence) == 1
                     else {
                         "code": "multiple_recipe_contracts",
+                        "severity": "repair_required",
                         "message": str(exc),
-                        "evidence": evidence,
+                        "evidence": [f"{row.code}: {row.message}" for row in exc.diagnostics],
+                        "findings": evidence,
                     }
                 )
                 raise StageSchemaError(str(exc), diagnostic=diagnostic) from exc

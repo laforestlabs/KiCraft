@@ -505,6 +505,14 @@ ADS1115_I2C_ADC = _i2c_device(
     address_strap_parameter="address_strap",
     interrupt_pin="2",
 )
+ADS1115_I2C_ADC = ADS1115_I2C_ADC.model_copy(update={
+    # TI ADS1115 datasheet §10.1: unused analog inputs may be tied to GND.
+    "ports": tuple(
+        port.model_copy(update={"allow_ground": True})
+        if port.name in {"io1", "io2", "io3"} else port
+        for port in ADS1115_I2C_ADC.ports
+    ),
+})
 
 # HUB75 (16-pin IDC) logic channels, in connector-pin order. Ground is pins 4, 8
 # and 16: pin 12 is the D address line (used by 1/32-scan panels), NOT a ground —

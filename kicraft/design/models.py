@@ -709,6 +709,33 @@ def is_board_level_quantitative_obligation(obligation: object) -> bool:
     return unit in _BOARD_STACKUP_UNITS and bool(_BOARD_STACKUP_TERMS & quantity_terms)
 
 
+def board_measurement_block(block: object, obligations: object) -> bool:
+    """Require every block obligation to resolve uniquely to a board measurement."""
+    ids = _obligation_field(block, "obligation_ids")
+    if not isinstance(ids, (list, tuple)) or not ids:
+        return False
+    if any(not isinstance(identifier, str) or not identifier.strip() for identifier in ids):
+        return False
+    if len(ids) != len(set(ids)):
+        return False
+    rows = list(obligations or ())
+    for identifier in ids:
+        matches = [
+            row for row in rows
+            if _obligation_field(row, "original_obligation_id") == identifier
+        ]
+        if len(matches) != 1 or not is_board_level_quantitative_obligation(matches[0]):
+            return False
+        terms = set(re.findall(
+            r"[a-z0-9]+",
+            str(_obligation_field(matches[0], "quantity") or "").casefold(),
+        ))
+        if terms & {"component", "components", "connector", "connectors", "header",
+                    "headers", "pad", "pads", "hole", "holes", "mounting", "field"}:
+            return False
+    return True
+
+
 def is_board_stackup_obligation(obligation: object) -> bool:
     """Distinguish a board's copper stack from its geometric measurements."""
     unit = str(_obligation_field(obligation, "unit") or "").casefold().strip()

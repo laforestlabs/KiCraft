@@ -4,8 +4,9 @@ _LEGACY_RECIPE_REPLACEMENTS = {
     "hub75-sn74hct245-interface@1": "hub75-sn74hct245-interface@2",
     "usb-c-pd-receptacle@1": "usb-c-pd-receptacle@2",
     "ch224k-pd-trigger@1": "ch224k-pd-trigger@2",
-    "rp2040-minimal@1": "rp2040-minimal@3",
-    "rp2040-minimal@2": "rp2040-minimal@3",
+    "rp2040-minimal@1": "rp2040-minimal@4",
+    "rp2040-minimal@2": "rp2040-minimal@4",
+    "rp2040-minimal@3": "rp2040-minimal@4",
     "drv8833-dual-motor@1": "drv8833-dual-motor@6",
     "drv8833-dual-motor@2": "drv8833-dual-motor@6",
     "drv8833-dual-motor@3": "drv8833-dual-motor@6",
@@ -39,4 +40,6 @@ def is_legacy_recipe_id(value: object) -> bool:
 
 def legacy_recipe_requires_new_architecture(value: object) -> bool:
     """Identify obsolete graphs whose replacement needs a new external control."""
-    return value == "hub75-sn74hct245-interface@1"
+    return value == "hub75-sn74hct245-interface@1" or value in {
+        "rp2040-minimal@1", "rp2040-minimal@2", "rp2040-minimal@3",
+    }

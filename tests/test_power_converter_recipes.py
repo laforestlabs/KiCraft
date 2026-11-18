@@ -553,3 +553,204 @@ def test_exact_converter_family_keeps_the_reviewed_output_current_limit():
     result = resolve_architecture_recipes(_exact_converter_family(load=0.501))
     assert any(d.code == "recipe_output_current_exceeded" for d in result.blocking)
     assert result.selections == []
+
+
+def _ap63203_contract(*, vin=5.0, vout=3.3, load=0.8):
+    requirement = {
+        "id": "reg", "sheet": "POWER", "role": "regulator",
+        "family": "ap63203-3v3", "exact_part": "AP63203WU-7",
+        "ports": {"input": "VIN", "output": "VOUT", "gnd": "GND"},
+        "parameters": {"output_voltage": 3.3},
+    }
+    if load is not None:
+        requirement["obligations"] = [{
+            "kind": "quantitative", "original_obligation_id": "load",
+            "quantity": "output current", "relation": "minimum", "value": load, "unit": "A",
+        }]
+    return {
+        "sheets": [{"name": "POWER", "stem": "POWER", "function": "power"}],
+        "power_nets": ["VIN", "VOUT", "GND"], "inter_sheet_nets": [],
+        "rail_voltages": {"VIN": vin, "VOUT": vout}, "requirements": [requirement],
+    }
+
+
+def test_converter_diagnostic_uses_bound_rails_and_reports_only_qualified_alternatives():
+    architecture = _ap63203_contract(vout=5.0)
+    result = resolve_architecture_recipes(architecture)
+    diagnostic = next(d for d in result.blocking if d.code == "incompatible_converter")
+    assert diagnostic.requirement_id == "reg"
+    assert diagnostic.recipe == "ap63203-3v3@1"
+    assert any("requested output 5" in evidence for evidence in diagnostic.evidence)
+    assert "qualified_candidate=ap63205-5v@2" in diagnostic.evidence
+    assert "qualified_candidate=ap63203-3v3@1" not in diagnostic.evidence
+    assert all(row.recipe != "ap63205-5v@2" for row in result.selections)
+    assert architecture["requirements"][0]["exact_part"] == "AP63203WU-7"
+
+
+def test_converter_alternatives_without_load_still_have_reviewed_current_ratings():
+    result = resolve_architecture_recipes(_ap63203_contract(vout=5.0, load=None))
+    diagnostic = next(d for d in result.blocking if d.code == "incompatible_converter")
+    candidates = [value.split("=", 1)[1] for value in diagnostic.evidence
+                  if value.startswith("qualified_candidate=")]
+    assert candidates
+    assert all(get_recipe(candidate).rated_output_current_a is not None for candidate in candidates)
+
+
+@pytest.mark.parametrize(("vin", "incompatible"), [(3.79, True), (3.8, False), (32.0, False), (32.01, True)])
+def test_converter_input_rail_respects_reviewed_voltage_envelope(vin, incompatible):
+    result = resolve_architecture_recipes(_ap63203_contract(vin=vin))
+    assert any(d.code == "incompatible_converter" for d in result.blocking) is incompatible
+
+
+@pytest.mark.parametrize(
+    ("recipe", "vin", "expected"),
+    [
+        ("tlv62569-3v3@3", 5.0, True),
+        ("tlv62569-3v3@3", 5.6, False),
+        ("me6211-3v3@2", 5.0, True),
+        ("me6211-3v3@2", 6.1, False),
+        ("mcp1700-3v3@2", 5.0, True),
+        ("mcp1700-3v3@2", 6.1, False),
+        ("ams1117-3v3@2", 5.0, True),
+        ("ams1117-3v3@2", 6.0, False),
+        ("ylptec-k7803m-1000r3@1", 24.0, True),
+        ("ylptec-k7803m-1000r3@1", 30.0, False),
+        ("k7803m-3v3-reverse-blocked@1", 12.0, True),
+        ("k7803m-3v3-reverse-blocked@1", 30.0, False),
+        ("lm2577t-adj-12v-boost@1", 5.0, True),
+        ("lm2577t-adj-12v-boost@1", 6.0, False),
+        ("lm2577t-adj-2s-12v-boost@1", 7.4, True),
+        ("lm2577t-adj-2s-12v-boost@1", 9.0, False),
+        ("tps54331-adjustable@2", 24.0, True),
+        ("tps54331-adjustable@2", 28.1, False),
+        ("tps54331-12v-1a@2", 18.0, True),
+        ("tps54331-12v-1a@2", 12.0, False),
+        ("tps61088-2s-12v-1a@1", 7.4, True),
+        ("tps61088-2s-12v-1a@1", 9.0, False),
+        ("tps61088-host5-12v-1a@1", 5.0, True),
+        ("tps61088-host5-12v-1a@1", 6.0, False),
+    ],
+)
+def test_reviewed_converter_envelopes_qualify_only_bounded_inputs(recipe, vin, expected):
+    from kicraft.design.models import Architecture, CircuitRequirement
+    from kicraft.design.recipes.registry import registered_recipes
+    from kicraft.design.recipes.resolver import _converter_compatibility_diagnostics
+
+    definition = get_recipe(recipe)
+    requirement = CircuitRequirement(
+        id="reg", sheet="POWER", role="regulator", family=definition.family,
+        ports={"input": "VIN", "output": "VOUT", "gnd": "GND"},
+    )
+    architecture = Architecture.model_validate({
+        "sheets": [{"name": "POWER", "stem": "POWER", "function": "power"}],
+        "power_nets": ["VIN", "VOUT", "GND"], "inter_sheet_nets": [],
+        "rail_voltages": {"VIN": vin, "VOUT": definition.parameter_defaults["output_voltage"]},
+        "requirements": [requirement],
+    })
+    diagnostics = _converter_compatibility_diagnostics(
+        definition, requirement, architecture, registered_recipes(),
+    )
+    assert bool(diagnostics) is not expected
+    if diagnostics:
+        assert diagnostics[0].code == "incompatible_converter"
+        assert any("input " in item for item in diagnostics[0].evidence)
+
+
+def test_converter_missing_input_envelope_remains_unverified():
+    from kicraft.design.models import Architecture, CircuitRequirement
+    from kicraft.design.recipes.resolver import _converter_compatibility_diagnostics
+
+    definition = get_recipe("tlv62569-3v3@3")
+    definition = definition.model_copy(update={"ports": tuple(
+        port.model_copy(update={"supply_voltage_range_v": None})
+        if port.name == "input" else port for port in definition.ports
+    )})
+    requirement = CircuitRequirement(
+        id="reg", sheet="POWER", role="regulator", family=definition.family,
+        ports={"input": "VIN", "output": "VOUT", "gnd": "GND"},
+    )
+    architecture = Architecture.model_validate({
+        "sheets": [{"name": "POWER", "stem": "POWER", "function": "power"}],
+        "power_nets": ["VIN", "VOUT", "GND"], "inter_sheet_nets": [],
+        "rail_voltages": {"VIN": 5.0, "VOUT": 3.3}, "requirements": [requirement],
+    })
+    diagnostics = _converter_compatibility_diagnostics(definition, requirement, architecture, ())
+    assert diagnostics[0].code == "unverified_converter_compatibility"
+    assert "input operating envelope is not reviewed" in diagnostics[0].evidence
+
+
+@pytest.mark.parametrize(
+    ("quantity", "blocked"),
+    [
+        ("ambient light measurement accuracy", True),
+        ("ADC sample rate", True),
+        ("sensor response time", True),
+        ("sensor independent power", True),
+        ("board width", False),
+    ],
+)
+def test_temt_ads_composition_does_not_promise_unreviewed_performance(quantity, blocked):
+    from kicraft.design.models import Architecture, CircuitRequirement
+    from kicraft.design.recipes.resolver import ResolutionResult, _temt_ads_performance_diagnostics
+
+    sensor = CircuitRequirement.model_validate({
+        "id": "light", "sheet": "SENSING", "role": "sensor",
+        "family": "ambient-light-phototransistor", "exact_part": "TEMT6000X01",
+        "ports": {"vplus": "3V3", "vminus": "GND", "analog_out": "LIGHT"},
+        "obligations": [{
+            "kind": "quantitative", "original_obligation_id": "measurement",
+            "quantity": quantity, "relation": "minimum", "value": 1, "unit": "Hz",
+        }],
+    })
+    adc = CircuitRequirement.model_validate({
+        "id": "adc", "sheet": "SENSING", "role": "sensor",
+        "family": "ads1115-i2c-adc",
+        "ports": {"vdd": "3V3", "gnd": "GND", "io0": "LIGHT"},
+    })
+    selection = RecipeSelection(
+        recipe="ads1115-i2c-adc@1", instance="adc", sheets={"interface": "SENSING"},
+        requirement_ids=["adc"], port_bindings=adc.ports,
+    )
+    architecture = Architecture.model_validate({
+        "sheets": [{"name": "SENSING", "stem": "SENSING", "function": "light"}],
+        "requirements": [sensor, adc], "power_nets": ["3V3", "GND"], "inter_sheet_nets": [],
+    })
+    result = ResolutionResult(requirements=[sensor, adc], selections=[selection])
+    _temt_ads_performance_diagnostics(
+        result, {"ads1115-i2c-adc@1": get_recipe("ads1115-i2c-adc@1")}, architecture,
+    )
+    assert any(row.code == "temt_ads_performance_unverified" for row in result.blocking) is blocked
+
+
+@pytest.mark.parametrize("field", ["minimum_sample_rate_hz", "maximum_error_v", "may_drive_unpowered"])
+def test_temt_ads_rejects_external_source_demands_beyond_the_reviewed_composition(field):
+    from kicraft.design.models import Architecture
+    from kicraft.design.recipes.resolver import ResolutionResult, _temt_ads_performance_diagnostics
+
+    architecture = Architecture.model_validate({
+        "sheets": [{"name": "SENSING", "stem": "SENSING", "function": "light"}],
+        "power_nets": ["3V3", "GND"], "inter_sheet_nets": [],
+        "requirements": [
+            {"id": "light", "sheet": "SENSING", "role": "sensor",
+             "family": "ambient-light-phototransistor", "exact_part": "TEMT6000X01",
+             "ports": {"vplus": "3V3", "vminus": "GND", "analog_out": "LIGHT"}},
+            {"id": "adc", "sheet": "SENSING", "role": "sensor",
+             "family": "ads1115-i2c-adc",
+             "ports": {"vdd": "3V3", "gnd": "GND", "io0": "LIGHT"}},
+            {"id": "source", "sheet": "SENSING", "role": "connector",
+             "family": "pin-header", "ports": {"pin1": "LIGHT"},
+             "obligations": [{"kind": "external_analog_source",
+                              "original_obligation_id": "source-limit",
+                              field: True if field == "may_drive_unpowered" else 1.0}]},
+        ],
+    })
+    adc = architecture.requirements[1]
+    result = ResolutionResult(requirements=architecture.requirements, selections=[
+        RecipeSelection(recipe="ads1115-i2c-adc@1", instance="adc",
+                        sheets={"interface": "SENSING"}, requirement_ids=["adc"],
+                        port_bindings=adc.ports),
+    ])
+    _temt_ads_performance_diagnostics(
+        result, {"ads1115-i2c-adc@1": get_recipe("ads1115-i2c-adc@1")}, architecture,
+    )
+    assert any(row.code == "temt_ads_performance_unverified" for row in result.blocking)

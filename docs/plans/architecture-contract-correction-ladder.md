@@ -12,6 +12,182 @@ stays `stock`.** The headline results are the corrections to §1 (the baseline i
 whatever the leading defect class is, so per-class fixes remove work without changing the outcome).
 Spend: ≈$5.3 of the $10 ceiling. Full record: **§8**.
 
+## 2026-11-18: deterministic architecture contracts
+
+This correction is not another retry arm. Lowerers publish real supply contacts (`vmotor` for
+relay/ULN2003), and barrel aliases resolve to the reviewed jack's two physical contacts; its switch
+stays an owned no-connect. Board outline/layer measurements retain their source facts without
+requiring an empty header.
+
+The active RP2040 construction is `rp2040-minimal@4`: GPIO26–29 have physical ADC capability,
+GPIO26 reaches pad 38 and its exposed castellation, and neutral application inputs are allocated
+from connected producer requirements. Saved @1/@2/@3 graphs require architecture regeneration;
+their old BOMs are never relabelled. USB termination, programming and pad ownership remain checked.
+
+Converter compatibility uses the selected construction's reviewed operating envelope and effective
+output/current, not a rail label. The TEMT6000 → ADS1115 → ESP32 composition retains common reference,
+bypass, pull-ups and powered acquisition checks; it does not qualify precision or independent-power
+operation. A direct 3.3 V light output into a 2.9 V MCU ADC remains invalid.
+
+Architecture has four provider calls total, including enabled auxiliary decisions and repairs,
+with at most one genuine JSON-format recovery. Parseable circuit failures retain the complete
+answer and structured constraints for a same-schema replacement. Permanent provider rejections
+retain only safe categories, status/request ID and the last design evidence.
+
+OpenAI architecture requests use JSON-object transport for open rail/parameter maps; the canonical
+schema remains in the prompt, streaming guard and local circuit gates. OpenAI's strict subset
+[requires closed objects and all fields required](https://developers.openai.com/api/docs/guides/structured-outputs),
+which cannot express those maps. Closed-schema stages keep their existing transport. This is a
+preflight capability choice, not a retry after HTTP 400; receipts record the actual wire format.
+
+The separate `stage_reliability surprise-me` CLI freezes IID trials and source/model/settings
+identity before calls, accounts for preparation and in-flight exposure inside the same $10 ceiling,
+and preserves failed/missing trials in the denominator. A 99%/95% claim requires 300/300 complete
+paths; deterministic regressions alone do not establish that result. Execution evidence:
+`logs/self_eval/architecture-near-zero-20261118/`. **Release gate failed; the 99% target is unmet.**
+
+Deterministic verification: the focused integration invocation passed 2,189 tests; the later relay
+terminal change passed 471 targeted tests, and the transport/runtime regression invocation passed
+460. These invocations overlap and are not a summed test count.
+The final prompt-instruction checks passed another 68 targeted tests.
+
+Fresh final-source headless results on unchanged briefs: Hall 3/3, USB distribution 1/3,
+relay 1/3. One committed run of each original brief also committed BOM and wiring. The fourth
+light/ADS1115 brief selected that acquisition path but failed the JST contact contract; no
+real-provider success is claimed for it. Failed attempts remain in the campaign evidence.
+
+Full runtime prompt sizes, including the frozen core-default snapshot (bytes, not tokens):
+
+| Saved upstream project | Before | Final |
+| --- | ---: | ---: |
+| 1169 | 193,143 | 177,414 |
+| 1170 | 376,018 | 326,393 |
+| 1171 | 203,580 | 181,914 |
+| 1172 | 241,954 | 218,612 |
+
+Per-section measurements and selectable recipe identities are in `prompt-runtime-before.json`
+and `prompt-runtime-final.json` under the evidence directory; the intended RP2040 @3 → @4
+cutover is not a removed construction choice.
+
+Canonical coordinated cutovers passed web HTTP readiness and new build-worker readiness;
+`production-final-cutover.log` records the final source. The accounting correction passed 13
+targeted tests and requires explicit clean semantics on all three stages: a committed stage with
+unresolved repair diagnostics, or missing semantic evidence, is not a release pass.
+
+Live browser smoke used exactly five new test-account projects, with verbatim frozen composer,
+database and `brief.txt` text, and automatic question handling enabled:
+
+| Seed / family | Board | Architecture | BOM / wiring | Later result |
+| --- | --- | --- | --- | --- |
+| 82 / sensors | KC-UVFQAQ | committed | committed; wiring warning | Place/Route and Fab failed |
+| 83 / power | KC-CYNGM7 | committed | committed | Place/Route and Fab failed |
+| 84 / actuator | KC-6PACZT | failed | not reached | unqualified relay interface protocol |
+| 86 / controller | KC-SCZM29 | failed | not reached | forbidden legacy `inter_sheet_nets` property |
+| 94 / analog | KC-CHSPS8 | failed | not reached | two nets bound to one trimmer contact |
+
+The Hall wiring warning is `wiring_bootsel_unreachable`; the power functional spec retained
+`functional_spec_nonfunctional_block` warnings. Paid `review`/`silk_plan` build-tail receipts have
+no stage-attempt counterparts; architecture-stage receipts do match. These later telemetry gaps
+are not hidden as architecture failures or as clean full-product passes. Browser evidence is in
+`campaign-06`; `campaign-07` changes only release accounting, not product execution code, and
+carries all prior settled spend and unresolved exposure forward.
+
+The accepted Hall graph synthesized 70 parts / 189 wired pins with ERC 0. Actual USB ownership
+includes ESD, series termination and RP2040 pads 46/47; its ADC reaches pad 38. The real build tail
+stopped before layout because required silk facts for SW2/J2/J3 were unverified. `artifacts` reports
+no placed, routed or promoted leaf. This is not evidence of routing or fabrication readiness.
+
+### Frozen release verdict (`campaign-07`)
+
+**$35 continuation completed:** all 300 original tests ran. Architecture committed in 85 of
+299 attempts; 54 of 300 passed every required check. The first 76 results stayed unchanged.
+The user approved $35 for the whole session, not $35 of additional spending. Original files
+were preserved as `budget-10-*`; `budget-amendment-35.json` records the change.
+The figures below retain the earlier $10 pause; `completed-300-results.json` has the full result.
+
+The oversized spending holds were then corrected without changing any test result. For each
+ended run, its known recorded charges and saved outstanding-call limits replace the blanket
+$0.60 hold. No unconfirmed bill was marked paid. The session has $4.462517688 recorded, with
+at most $0.69877136 additional charges unconfirmed: maximum $5.161289048 so far.
+`ended-run-hold-reconciliation.json` and `hold-reconciliation-summary.json` retain the calculation;
+`completed-300-before-hold-fix-*` retains the original accounting.
+
+The next code revision passed 936 focused tests. Basic construction checks now precede paid
+review, the latest answer's error is retained when review money/calls run out, and surviving
+answers are reviewed once in their original form. Provider response IDs are retained when
+headers omit IDs, ended tests use bounded outstanding charges, and an approved socket design
+is not checked as a different builder's manufacturer part. `campaign-08` tests this revision
+separately; none of the old failures is rerun or counted as a success in `campaign-07`.
+
+Further construction-error diagnostics name missing connector contacts and analog channels;
+they do not invent wiring or relax acceptance. Those paths passed 490 focused tests. Voltage
+errors distinguish the attached ADC's actual rating from a tighter authored limit, and offer
+the existing 3.3 V ADS1115 acquisition path only when the brief permits an external ADC.
+The MCU must then read I2C, not remain directly tied to the overvoltage sensor output. The
+voltage/acquisition checks passed 63 tests, including the unsafe direct ESP32-S3 ADC rejection
+and the physically connected, powered ADS1115 alternative.
+
+A subsequent live light-sensor answer exposed an unrelated false positive: the audio-output
+rule interpreted “route the analog signal to the external ADC” as an ESP32-S3 audio output.
+The rule now requires an actual DAC/analog-audio claim instead of any mention of an analog
+signal. All 241 semantic tests passed; regressions retain rejection of both a claimed S3 DAC
+and analog-audio generation without PWM/I2S. Electrical input-voltage checks are unchanged.
+The final frozen revision is `campaign-11`; development runs in `campaign-08` through
+`campaign-10` remain separate, with all spending carried forward and no old result rewritten.
+
+#### Original $10 pause (historical)
+
+All 300 IID briefs remain in the denominator. The runner started 76 and paused the other 224
+before dispatch because the next $0.60 reservation would exceed the shared $10 ceiling.
+Architecture committed in 21/76 attempted cases; only 11/300 predeclared paths had clean semantics,
+retained obligations and complete evidence. There were 3 first-author-call successes and 8 repaired
+successes. No zero-failure confidence bound is claimed. Frozen source/profile identity matched both
+before and after execution; no failed trial was rerun.
+
+| Terminal outcome | Trials |
+| --- | ---: |
+| Clean complete path | 11 |
+| Contract rejected | 43 |
+| Commit rejected | 9 |
+| Semantic rejected after commit | 10 |
+| Provider-call budget exhausted | 3 |
+| Unstarted at budget pause | 224 |
+
+| Generator family | Planned | Started | Architecture commits | Clean paths |
+| --- | ---: | ---: | ---: | ---: |
+| actuator | 57 | 12 | 3 | 2 |
+| analog | 43 | 10 | 0 | 0 |
+| controller | 60 | 16 | 6 | 3 |
+| display_led | 46 | 13 | 3 | 2 |
+| power | 49 | 15 | 8 | 4 |
+| sensors | 45 | 10 | 1 | 0 |
+
+Nonexclusive terminal contract findings include unsupported lowerer contracts (34 failed trials),
+missing enable-jumper targets (8), conflicting physical-port bindings (6), unknown interface ports
+(5), unbound required ports (4), unqualified external interfaces (3) and lost source ownership (3).
+The full taxonomy and observed commit-gate IDs are retained in `campaign-07/release-details.json`.
+These are remaining failures, not evidence that the deterministic fixes achieved the target.
+
+Across 76 started trials, latency p50/p95 was 45.235/63.345 seconds; provider attempts per started
+three-stage trial were 6/9 at p50/p95. Architecture never exceeded four actual provider calls;
+61 trials used all four. Recorded initial architecture prompt sizes were 188,640/328,150 bytes
+at p50/p95, before repair-message growth.
+
+Actual full-trial cost is receipted for 69/76 starts: p50/p95 $0.012911055/$0.019644795.
+The other seven have unresolved charges and are excluded from those full-cost quantiles;
+the CLI's raw cost quantiles describe recorded receipts, including partial receipts, instead.
+Known trial receipts total $1.04601853. Including all preparation/carryover, the campaign ledger
+holds $1.277546443 settled plus $8.40 unresolved reservations, total exposure $9.677546443.
+No cap was increased and no estimate was settled as actual spend.
+
+The seven unreceipted trials have no recorded request IDs. OpenRouter's
+[receipt lookup requires a generation ID](https://openrouter.ai/docs/api-reference/get-a-generation);
+no unsupported timestamp-based attribution or reservation release was attempted.
+The 224 unstarted cases remain unverified, and the observed failures already block the release claim.
+Final machine-readable evidence: `campaign-07/final-summary.json`, `report.json`, `ledger.json`,
+`release-details.json` and the unchanged manifest/workspaces.
+
+
 **Subject:** the pipeline behaviours that make a brief die at `architecture` even when every
 individual blocking diagnostic is actionable, the contract text already forbids the defect, and
 the model demonstrably fixes what it is told about.
@@ -33,6 +209,74 @@ A/B methodology), `recipe-and-deterministic-lowering-expansion-2026-09-09.md` (c
 deterministically instead of asking), `deepseek-v4-flash-json-budget-fix.md`.
 
 ---
+
+### Final-revision preparation and website proof (`campaign-11`)
+
+The original briefs were unchanged. Hall and relay passed all three architecture runs each;
+power passed two of three. The first accepted run of each also committed BOM and wiring.
+The separate light brief failed because the answer omitted `vdd` on its I2C pull-ups; it
+was not repaired by inventing a power connection. Thus preparation is 8/10 clean paths,
+not a release result and not a replacement for the predeclared 300-test denominator.
+
+All five frozen website briefs were submitted through the real composer with automatic
+question defaults enabled. Four committed architecture, BOM and wiring; none completed the
+product. Screenshots and observed tabs are saved as `browser-*-terminal-ui.{png,json}`.
+
+| Seed | Board | Architecture | Later result |
+| --- | --- | --- | --- |
+| 82 | KC-ASUDEW / 1181 | Committed, clean | Wiring warning; build stopped before layout |
+| 83 | KC-BT22KF / 1182 | Committed, clean | Build stopped before layout |
+| 84 | KC-JNVHXG / 1183 | Committed, clean | BOM warning; build stopped before layout |
+| 86 | KC-JYH8KT / 1184 | Committed, clean | Build stopped before layout |
+| 94 | KC-GVN7UQ / 1185 | Rejected | Conflicting analog-output net bindings |
+
+All four accepted graphs synthesized schematics and seed PCBs with clean ERC. Their actual
+build logs then refused layout because switch/connector functions needed by the physical
+silk contract could not be verified. This is not a successful routing or fabrication proof.
+Every architecture receipt matched a saved attempt. The power run still has an unconfirmed
+bill with a saved $0.0055823 call ceiling; its charge is held, not treated as confirmed.
+
+### Final frozen 300-test verdict (`campaign-11`)
+
+All 300 predeclared trials finished; 299 reached architecture. The source, settings, models,
+registry and core-default identity matched the frozen manifest after execution. No trial
+exceeded four actual architecture provider calls. `final-summary.json` records the identity
+check, counts and per-family results; `report.json` retains every failed trial.
+
+| Frozen run | Planned / finished | Architecture committed | Every required check passed |
+| --- | ---: | ---: | ---: |
+| Before the review/accounting corrections (`campaign-07`) | 300 / 300 | 85 | 54 |
+| Final revision (`campaign-11`) | 300 / 300 | 105 | 69 |
+
+**The release gate failed. The near-zero-failure goal was not achieved.** There are 231
+unsuccessful paths, including all 43 analog-family cases. No zero-failure confidence bound
+or fabrication-readiness claim is justified. Of the 69 clean paths, 26 accepted the first
+architecture answer and 43 needed a later answer.
+
+| Final failure category | Trials |
+| --- | ---: |
+| Contract rejected | 166 |
+| Commit rejected | 13 |
+| Missing attempt evidence | 8 |
+| Semantic rejected | 28 |
+| Architecture provider-call limit exhausted | 14 |
+| Invalid schema | 2 |
+
+| Generator family | Planned | Architecture committed | Clean paths |
+| --- | ---: | ---: | ---: |
+| actuator | 57 | 17 | 14 |
+| analog | 43 | 0 | 0 |
+| controller | 60 | 29 | 18 |
+| display_led | 46 | 14 | 6 |
+| power | 49 | 23 | 18 |
+| sensors | 45 | 22 | 13 |
+
+The complete session ledger has $8.525551554 settled and $1.659516594 reserved, for a maximum
+accounted exposure of **$10.185068148 against the approved $35 total**. Reserved amounts
+include known partial charges and bounded missing bills; they are not all additional fees
+or settled spending. Preparation, website tests and all earlier revisions are included.
+The final 300 trials account for at most $4.377876796 of that total. Fully receipted trial
+costs have median $0.013758975 and p95 $0.020214276; median duration is 54.325 s and p95 80.486 s.
 
 ## 1. Corrected framing: what the failures are *not*
 

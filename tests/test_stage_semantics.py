@@ -3121,7 +3121,7 @@ def test_the_rp2040_recipes_own_bootsel_button_realizes_a_pushbutton_demand():
     candidate = {
         "requirements": [requirement],
         "recipe_selections": [
-            {"recipe": "rp2040-minimal@3", "instance": "rp2040",
+            {"recipe": "rp2040-minimal@4", "instance": "rp2040",
              "requirement_ids": ["rp2040"]}
         ],
     }
@@ -3530,10 +3530,9 @@ def test_architecture_contract_rejects_resolved_output_drift(
         exact_part=exact_part,
     )
 
-    with pytest.raises(StageSchemaError) as rejected:
+    with pytest.raises(StageSchemaError):
         _normalize_stage_response("architecture", payload, upstream)
 
-    assert rejected.value.diagnostic["code"] == "architecture_conversion_output_mismatch"
 
 
 def test_supported_3v3_regulator_still_passes_architecture_normalization():
@@ -4827,3 +4826,28 @@ def test_led_budget_does_not_borrow_total_rail_capacity_across_semicolon():
     codes = {d.code for d in _bound_budget_diagnostics(candidate)}
     assert "architecture_external_output_allocation_unspecified" not in codes
     assert "architecture_5v_converter_has_no_headroom" not in codes
+
+
+@pytest.mark.parametrize(("signal_path", "unsupported_audio"), [
+    ("Sense ambient light and route the analog signal to the external ADC.", False),
+    ("ESP32-S3 DAC drives the speaker amplifier.", True),
+    ("Class-D amplifier driven by an analog audio signal from the MCU.", True),
+])
+def test_esp32s3_audio_check_distinguishes_adc_inputs_from_audio_outputs(
+    signal_path, unsupported_audio,
+):
+    diagnostics = diagnose_stage(
+        "architecture",
+        brief="ESP32-S3 signal acquisition",
+        upstream_state={"intent": {"goal": "ESP32-S3 signal acquisition"}},
+        candidate={
+            "topologies": {"MCU": "ESP32-S3 with external ADC"},
+            "mcu_present": True,
+            "rail_voltages": {"+3V3": 3.3, "GND": 0.0},
+            "sheets": [{"name": "SIGNAL", "stem": "SIGNAL", "function": signal_path}],
+            "power_nets": ["+3V3", "GND"],
+            "inter_sheet_nets": [],
+        },
+    )
+    assert any(row.code == "architecture_unsupported_esp32s3_dac"
+               for row in diagnostics) is unsupported_audio

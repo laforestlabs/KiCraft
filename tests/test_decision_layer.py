@@ -174,6 +174,23 @@ def test_malformed_numeric_decisions_are_never_applied(key, row):
     assert parse_answers({"answers": {key: row}}, _questions()) == []
 
 
+@pytest.mark.parametrize("headers,expected", [
+    ({}, "gen-decision"),
+    ({"x-request-id": "req-decision"}, "req-decision"),
+])
+def test_decision_response_id_is_recorded(monkeypatch, tmp_path, headers, expected):
+    from kicraft.cli.web_cost_report import load_stage_attempts
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    response = _FakeResponse({**_NOUL_PAYLOAD, "id": "gen-decision"})
+    response.headers = headers
+    settings = Settings(api_key="test", ledger_path=tmp_path / "ledger.db")
+    decide({}, _questions()[:1], session=_FakeSession(response), guard=SpendGuard(settings),
+           run_id="decision-run", stage="architecture")
+    attempts = load_stage_attempts(settings.ledger_path)
+    assert attempts[0]["request_id"] == expected
+
+
 def test_decide_posts_the_documented_body_once(monkeypatch, tmp_path):
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     monkeypatch.setenv("KICRAFT_JEV_BASE_URL", "https://openrouter.test")
@@ -209,6 +226,16 @@ def test_decide_posts_the_documented_body_once(monkeypatch, tmp_path):
     assert billed == [payload["usage"]]
     assert guard.spent_for_run("p7-run") == pytest.approx(1e-6)
     assert guard.status()["reserved_exposure_usd"] == 0
+    from kicraft.cli.web_cost_report import load_rows, load_stage_attempts
+    spend = load_rows(tmp_path / "ledger.db")
+    attempts = load_stage_attempts(tmp_path / "ledger.db")
+    receipt = next(row for row in spend if row["meta"].get("phase") == "decision")
+    row, = attempts
+    assert (row["stage"], row["attempt"], row["call_mode"], row["model"]) == (
+        receipt["stage"], receipt["meta"]["attempt"], receipt["meta"]["call_mode"], receipt["model"]
+    )
+    assert row["cost_usd"] == pytest.approx(receipt["cost_usd"])
+    assert row["http_status"] == 200
     assert guard.status()["uncertain_exposure_usd"] == 0
 
 
@@ -280,3 +307,93 @@ def test_answer_confident_threshold():
     answer = Answer(key="k", kind="noul", value=True, confidence=0.5, probability=0.75)
     assert not answer.is_confident(0.75)
     assert answer.is_confident(0.5)
+
+
+@pytest.mark.parametrize("stage", ["intent", "functional_spec"])
+def test_reconciliation_dispatch_records_each_real_decision(monkeypatch, tmp_path, stage):
+    from types import SimpleNamespace
+    from kicraft.cli.web_cost_report import load_rows, load_stage_attempts
+    from kicraft.server import decision_layer, stage_runtime
+
+    monkeypatch.setattr(decision_layer, "_api_key", lambda: "k")
+    response = _FakeResponse({
+        "answers": {"urgent": {"type": "noul", "noul": 0.95}},
+        "usage": {"input_tokens": 10, "output_tokens": 0, "cost": 1e-6},
+    })
+    response.headers = {"x-request-id": "req-decision"}
+    session = _FakeSession(response)
+    monkeypatch.setattr(decision_layer.requests, "post", session.post)
+    guard = SpendGuard(Settings(api_key="k", ledger_path=tmp_path / "ledger.db"))
+    client = SimpleNamespace(
+        guard=guard,
+        s=SimpleNamespace(enable_name_reconciliation=True, draft_audit_model=decision_layer.DEFAULT_MODEL),
+    )
+    count = iter((1, 2))
+    decider = stage_runtime._name_reconciliation_decider(
+        client, stage=stage, run_id="run", reserve_call=lambda mode: next(count),
+    )
+    assert decider({"draft": 1}, _questions()[:1])["urgent"].value is True
+    assert decider({"draft": 2}, _questions()[:1])["urgent"].value is True
+    rows = load_stage_attempts(tmp_path / "ledger.db")
+    receipts = [r for r in load_rows(tmp_path / "ledger.db") if r["meta"].get("phase") == "decision"]
+    assert len(session.calls) == len(rows) == len(receipts) == 2
+    assert [(r["attempt"], r["call_mode"], r["model"], r["request_id"]) for r in rows] == [
+        (1, "name_reconciliation", decision_layer.DEFAULT_MODEL, "req-decision"),
+        (2, "name_reconciliation", decision_layer.DEFAULT_MODEL, "req-decision"),
+    ]
+    assert [(r["stage"], r["meta"]["attempt"], r["meta"]["call_mode"], r["model"]) for r in receipts] == [
+        (r["stage"], r["attempt"], r["call_mode"], r["model"]) for r in rows
+    ]
+
+
+def test_rejected_or_unavailable_decisions_never_store_body_or_phantom_attempt(monkeypatch, tmp_path):
+    from kicraft.cli.web_cost_report import load_stage_attempts
+    monkeypatch.setattr("kicraft.server.decision_layer._api_key", lambda: "k")
+    guard = SpendGuard(Settings(api_key="k", ledger_path=tmp_path / "ledger.db"))
+    session = _FakeSession(_FakeResponse({"error": {"message": "secret request body"}}, 400))
+    with pytest.raises(DecisionUnavailable) as error:
+        decide({}, _questions()[:1], guard=guard, stage="intent", run_id="run",
+               reserve_call=lambda: 4, call_mode="name_reconciliation", session=session)
+    assert "secret" not in str(error.value)
+    rows = load_stage_attempts(tmp_path / "ledger.db")
+    assert len(rows) == 1
+    assert (rows[0]["attempt"], rows[0]["http_status"], rows[0]["outcome"]) == (
+        4, 400, "provider_request_rejected"
+    )
+    assert "secret" not in json.dumps(rows)
+    with pytest.raises(DecisionUnavailable):
+        decide({}, _questions()[:1], guard=guard, stage="intent", run_id="run",
+               reserve_call=lambda: False, session=session)
+    assert len(session.calls) == 1
+    assert len(load_stage_attempts(tmp_path / "ledger.db")) == 1
+
+
+def test_architecture_audit_records_actual_decision_model_and_budget_slot(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    from kicraft.cli.web_cost_report import load_rows, load_stage_attempts
+    from kicraft.server import decision_layer, draft_audit, stage_runtime
+
+    monkeypatch.setattr(decision_layer, "_api_key", lambda: "k")
+    monkeypatch.setattr(draft_audit, "architecture_questions", lambda candidate: _questions()[:1])
+    response = _FakeResponse({"answers": {}, "usage": {"input_tokens": 5, "cost": 1e-6}})
+    session = _FakeSession(response)
+    monkeypatch.setattr(decision_layer.requests, "post", session.post)
+    guard = SpendGuard(Settings(api_key="k", ledger_path=tmp_path / "ledger.db"))
+    client = SimpleNamespace(guard=guard, s=SimpleNamespace(
+        enable_draft_audit=True, draft_audit_model=decision_layer.DEFAULT_MODEL,
+        draft_audit_confidence=0.7,
+    ))
+    slots = []
+    def reserve(mode):
+        slots.append(mode)
+        return 4
+    stage_runtime._audit_architecture_draft(client, {}, run_id="run", reserve_call=reserve)
+    row, = load_stage_attempts(tmp_path / "ledger.db")
+    receipt = next(r for r in load_rows(tmp_path / "ledger.db") if r["meta"].get("phase") == "decision")
+    assert slots == ["draft_audit"]
+    assert (row["attempt"], row["call_mode"], row["model"]) == (
+        4, "draft_audit", decision_layer.DEFAULT_MODEL
+    )
+    assert (receipt["meta"]["attempt"], receipt["meta"]["call_mode"], receipt["model"]) == (
+        row["attempt"], row["call_mode"], row["model"]
+    )

@@ -471,3 +471,120 @@ def test_temt6000_readout_rejects_an_adc_without_a_readable_controller_path():
     assert not facts["gates"]
 
 
+
+
+def _expanded_s3_light_acquisition(*, direct=False):
+    from kicraft.design.models import Architecture
+    from kicraft.design.recipes import apply_architecture_recipe_resolution
+    from kicraft.server.stage_work_units import probe_architecture_construction
+
+    architecture = Architecture.model_validate({
+        "topologies": {"MAIN": "Light acquisition over I2C"},
+        "mcu_present": True,
+        "rail_voltages": {"+3V3": 3.3, "GND": 0.0, "VBUS": 5.0},
+        "power_nets": ["+3V3", "GND", "VBUS"],
+        "inter_sheet_nets": [],
+        "sheets": [{"name": "MAIN", "stem": "MAIN", "function": "Light acquisition"}],
+        "requirements": [
+            {"id": "light", "sheet": "MAIN", "role": "sensor",
+             "family": "ambient-light-phototransistor", "exact_part": "TEMT6000X01",
+             "parameters": {"analog_rail_v": 3.3, "consumer_input_max_v": 3.3},
+             "ports": {"vplus": "+3V3", "vminus": "GND", "analog_out": "LIGHT"}},
+            {"id": "adc", "sheet": "MAIN", "role": "sensor",
+             "family": "ads1115-i2c-adc", "exact_part": "ADS1115IDGSR",
+             "parameters": {"address_strap": "gnd"},
+             "ports": {"vdd": "+3V3", "gnd": "GND", "sda": "SDA", "scl": "SCL",
+                       "io0": "LIGHT", "io1": "GND", "io2": "GND", "io3": "GND"}},
+            {"id": "pullups", "sheet": "MAIN", "role": "bus_interface", "family": "i2c-pullups",
+             "parameters": {"voltage": 3.3, "speed_hz": 400000, "bus_capacitance_pf": 50},
+             "ports": {"vdd": "+3V3", "sda": "SDA", "scl": "SCL"}},
+            {"id": "mcu", "sheet": "MAIN", "role": "mcu_core",
+             "family": "esp32-s3-module", "exact_part": "ESP32-S3-MINI-1-N8",
+             "interfaces": ["i2c_controller", "usb_device"],
+             "ports": {"vdd": "+3V3", "gnd": "GND", "i2c_sda": "SDA", "i2c_scl": "SCL",
+                       "usb_dm": "USB_DM", "usb_dp": "USB_DP"}},
+            {"id": "usb", "sheet": "MAIN", "role": "connector",
+             "family": "usb-c-usb2-device", "exact_part": "USB-C-USB2-DEVICE",
+             "ports": {"vbus": "VBUS", "gnd": "GND", "usb_dm": "USB_DM", "usb_dp": "USB_DP"}},
+        ],
+    })
+    if direct:
+        architecture.requirements = [r for r in architecture.requirements if r.id not in {"adc", "pullups"}]
+        controller = next(r for r in architecture.requirements if r.id == "mcu")
+        controller.ports["adc_light"] = "LIGHT"
+        controller.interfaces = ["adc", "usb_device"]
+        next(r for r in architecture.requirements if r.id == "light").parameters["consumer_input_max_v"] = 5.0
+    resolved = apply_architecture_recipe_resolution(architecture)
+    bom = probe_architecture_construction({"architecture": resolved.model_dump()})
+    assert bom is not None
+    pads = {(endpoint["ref"], endpoint["pin"]): connection["net_name"]
+            for connection in bom["connections"] for endpoint in connection["endpoints"]}
+    return resolved, bom, pads
+
+
+def test_expanded_temt6000_ads1115_s3_acquisition_has_real_power_and_bus():
+    from kicraft.design.part_identity import reviewed_part
+
+    architecture, bom, pads = _expanded_s3_light_acquisition()
+    parts = bom["parts"]
+    adc = next(p["ref"] for p in parts if p.get("mpn") == "ADS1115IDGSR")
+    mcu = next(p["ref"] for p in parts if p.get("mpn") == "ESP32-S3-MINI-1-N8")
+    assert {pin: pads[adc, pin] for pin in ("1", "3", "4", "5", "6", "7", "8", "9", "10")} == {
+        "1": "GND", "3": "GND", "4": "LIGHT", "5": "GND", "6": "GND",
+        "7": "GND", "8": "+3V3", "9": "SDA", "10": "SCL",
+    }
+    assert {"ref": adc, "pin": "2"} in bom["no_connect_pins"]
+    allocations = next(s.pin_allocations for s in architecture.recipe_selections if "mcu" in s.requirement_ids)
+    assert {a.net for a in allocations} >= {"SDA", "SCL"}
+    assert all(pads[mcu, a.pin] == a.net for a in allocations if a.net in {"SDA", "SCL"})
+    bypass = next(p for p in parts if p.get("recipe_role") == "decoupling"
+                  and p.get("recipe_id") == "ads1115-i2c-adc@1")
+    assert bypass["value"] == "100nF"
+    assert {pads[bypass["ref"], "1"], pads[bypass["ref"], "2"]} == {"+3V3", "GND"}
+    for value, nets in (("4.7k", {"+3V3", "SDA"}), ("4.7k", {"+3V3", "SCL"})):
+        assert any(p.get("value") == value and {pads.get((p["ref"], "1")), pads.get((p["ref"], "2"))} == nets for p in parts)
+    domain = reviewed_part("ADS1115IDGSR").support_network["analog_input"]
+    assert domain["recommended_min_above_ground_v"] == domain["recommended_max_above_reference_v"] == 0
+    assert domain["above_reference_margin_v"] == domain["below_ground_margin_v"] == 0.3
+    facts = temt6000_readout_facts(
+        parts, {}, pads,
+        mcu_facts={"complete_mcu_refs": [mcu], "complete_mcu_supplies": {mcu: {"rail": "+3V3", "ground": "GND"}}},
+        powered_mcu_refs={mcu},
+        supply_voltage=lambda rail, ground: 3.3 if (rail, ground) == ("+3V3", "GND") else None,
+    )
+    assert facts["gates"]["external_ambient_light_acquisition_function"] == "pass"
+
+
+def test_direct_s3_adc_rejects_false_producer_limit():
+    from kicraft.design.recipes import RecipeResolutionError
+
+    with pytest.raises(RecipeResolutionError) as rejected:
+        _expanded_s3_light_acquisition(direct=True)
+    errors = [row for row in rejected.value.diagnostics
+              if row.code == "unsupported_lowerer_contract" and row.requirement_id == "light"]
+    assert "actual_adc_input_max_v=2.9" in errors[0].evidence
+    assert "effective_input_limit_v=2.9" in errors[0].evidence
+
+
+@pytest.mark.parametrize("fault", ("wrong_input", "wrong_supply", "missing_pullup"))
+def test_expanded_s3_adc_acquisition_rejects_broken_physical_path(fault):
+    _, bom, pads = _expanded_s3_light_acquisition()
+    parts = bom["parts"]
+    adc = next(p["ref"] for p in parts if p.get("mpn") == "ADS1115IDGSR")
+    mcu = next(p["ref"] for p in parts if p.get("mpn") == "ESP32-S3-MINI-1-N8")
+    if fault == "wrong_input":
+        pads[adc, "4"] = "OPEN"
+        pads[adc, "2"] = "LIGHT"
+    elif fault == "wrong_supply":
+        pads[adc, "8"] = "OTHER_SUPPLY"
+    else:
+        pullup = next(p["ref"] for p in parts if p.get("value") == "4.7k"
+                      and {pads.get((p["ref"], "1")), pads.get((p["ref"], "2"))} == {"+3V3", "SDA"})
+        pads[pullup, "1"] = "OPEN"
+    facts = temt6000_readout_facts(
+        parts, {}, pads,
+        mcu_facts={"complete_mcu_refs": [mcu], "complete_mcu_supplies": {mcu: {"rail": "+3V3", "ground": "GND"}}},
+        powered_mcu_refs={mcu},
+        supply_voltage=lambda rail, ground: 3.3 if (rail, ground) == ("+3V3", "GND") else None,
+    )
+    assert "external_ambient_light_acquisition_function" not in facts["gates"]

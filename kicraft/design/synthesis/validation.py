@@ -4514,9 +4514,41 @@ def _declared_pin_reaches_port_net(
     return False
 
 
-def _external_interface_has_recipe_witness(requirement, bom, protocol: str) -> bool:
-    """Prove an external interface from a matching, fully wired recipe expansion."""
+def _external_interface_has_construction_witness(requirement, bom, protocol: str) -> bool:
+    """Prove an external interface from a complete reviewed construction."""
+    from kicraft.design.lowering import lower_requirement, lowerer_supports_external_interface
     from kicraft.design.recipes.registry import get_recipe
+
+    if lowerer_supports_external_interface(requirement.family, protocol):
+        refs = _canonical_lowerer_refs(requirement, bom)
+        if refs:
+            artifact = lower_requirement(requirement)
+            parts = {part.ref: part for part in bom.parts if part.ref in refs}
+            role_refs = {
+                (part.lowering_role, part.lowering_index): part.ref
+                for part in parts.values()
+            }
+            expected = {
+                (role_refs[(pin.role, pin.index)], str(pin.pin), pin.net, requirement.sheet)
+                for pin in artifact.pins
+            } | {
+                (role_refs[(pin.role, pin.index)], str(pin.pin), None, requirement.sheet)
+                for pin in artifact.no_connects
+            }
+            actual = [
+                (endpoint.ref, str(endpoint.pin), connection.net_name, connection.sheet)
+                for connection in bom.connections for endpoint in connection.endpoints
+                if endpoint.ref in refs
+            ] + [
+                (endpoint.ref, str(endpoint.pin), None, parts[endpoint.ref].sheet)
+                for endpoint in bom.no_connect_pins if endpoint.ref in refs
+            ]
+            if (
+                all(part.sheet == requirement.sheet for part in parts.values())
+                and len(actual) == len(expected)
+                and set(actual) == expected
+            ):
+                return True
 
     for manifest in getattr(bom, "recipe_ownership", ()) or ():
         if requirement.id not in (getattr(manifest, "requirement_ids", ()) or ()):
@@ -4626,10 +4658,10 @@ def check_requirement_physical_realization(
         for obligation in requirement.obligations:
             if (
                 obligation.kind == "external_interface"
-                and not _external_interface_has_recipe_witness(requirement, bom, obligation.protocol)
+                and not _external_interface_has_construction_witness(requirement, bom, obligation.protocol)
             ):
                 bad.append(
-                    f"E_EXTERNAL_INTERFACE {requirement.id!r}: no complete reviewed recipe "
+                    f"E_EXTERNAL_INTERFACE {requirement.id!r}: no complete reviewed construction "
                     f"and wired port witness for external protocol {obligation.protocol!r}"
                 )
         requirement_parts = _physical_requirement_parts(

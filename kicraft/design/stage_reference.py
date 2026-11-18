@@ -280,6 +280,40 @@ def _principal_part_assembly_snapshot(definition) -> dict | None:
 
 
 
+def _compact_reference(value):
+    """Omit absent data, not false/zero constraints or selectable choices."""
+    if isinstance(value, dict):
+        return {
+            key: _compact_reference(item)
+            for key, item in value.items()
+            if item is not None and item != {} and item != [] and item != ()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_compact_reference(item) for item in value]
+    return value
+
+
+def _architecture_recipe_projection(summary: dict) -> dict:
+    # GPIO numbers duplicate the full physical pad capability records. Application
+    # binding instructions are shared once, rather than repeated for every MCU.
+    from .recipes.resolver import _PORT_ALIASES
+
+    projected = {
+        key: value for key, value in summary.items()
+        if key not in {"allocatable_gpios", "application_port_binding"}
+    }
+    projected["port_aliases"] = {
+        port["name"]: _PORT_ALIASES[port["name"]]
+        for port in summary["external_ports"] if port["name"] in _PORT_ALIASES
+    }
+    return _compact_reference(projected)
+
+
+def architecture_lowerer_summaries() -> list[dict]:
+    """The same complete contact contracts, without absent expansion fields."""
+    return [_compact_reference(row) for row in lowerer_summaries()]
+
+
 def architecture_recipe_summaries(intent: dict) -> list[dict]:
     """Prefer exact reviewed MCU identities per named part, then family matches.
 
@@ -293,7 +327,7 @@ def architecture_recipe_summaries(intent: dict) -> list[dict]:
     )
     from kicraft.design.recipes import get_recipe, recipe_summaries
 
-    summaries = recipe_summaries()
+    summaries = [_architecture_recipe_projection(row) for row in recipe_summaries()]
     for summary in summaries:
         snapshot = _principal_part_assembly_snapshot(get_recipe(summary["recipe"]))
         if snapshot is not None:
@@ -348,7 +382,7 @@ def architecture_reference_extras(intent: dict) -> dict:
     """
     extras: dict = {}
     extras["circuit_recipes"] = architecture_recipe_summaries(intent)
-    extras["circuit_lowerers"] = lowerer_summaries()
+    extras["circuit_lowerers"] = architecture_lowerer_summaries()
     standard = standard_form_factor_block(intent)
     if standard:
         extras["standard_form_factor"] = standard
