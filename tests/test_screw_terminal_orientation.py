@@ -942,3 +942,33 @@ def test_mating_axis_survives_leaf_artifact_transform():
     transformed = _transform_component(restored, Point(10.0, 20.0), 90.0)
     assert restored.mating_axis == transformed.mating_axis == "board_normal"
 
+
+
+@pytest.mark.parametrize("edge, rotation", [("bottom", 0), ("right", 90), ("top", 180), ("left", 270)])
+def test_reviewed_qwiic_side_entry_faces_zoned_edge(tmp_path, edge, rotation):
+    pcbnew = pytest.importorskip("pcbnew")
+    from kicraft.autoplacer.brain.connector_edge_gap import connector_facings
+    from kicraft.autoplacer.hardware.adapter import connector_mating_evidence
+    from kicraft.design.synthesis.footprint_library import load_footprint_file
+    from kicraft.parts_library.footprint_opening import annotate_connector_opening
+
+    lib = Path(__file__).resolve().parents[1] / "kicraft/parts_library/jst-sh-4p-qwiic/jst-sh-4p-qwiic.pretty"
+    name = "CONN-SMD_4P-P1.00_SM04B-SRSS-TB-LF-SN"
+    fp = load_footprint_file(pcbnew, lib / f"{name}.kicad_mod")
+    assert connector_mating_evidence(fp) == ("in_plane", 90.0)
+    # The mating face is not the PCB edge; its solder tabs extend past it.
+    assert not annotate_connector_opening(pcbnew, fp, name)
+    fp.SetReference("J4")
+    fp.SetPosition(pcbnew.VECTOR2I(pcbnew.FromMM(20), pcbnew.FromMM(20)))
+    fp.SetOrientationDegrees(rotation)
+    assert connector_mating_evidence(fp) == ("in_plane", 90.0)
+    native = pcbnew.BOARD()
+    native.Add(fp)
+    pcb = tmp_path / "qwiic.kicad_pcb"
+    assert pcbnew.SaveBoard(str(pcb), native)
+    (verdict,) = connector_facings(str(pcb), {"J4": {"edge": edge}})
+    assert verdict.status == "ok"
+    fp.SetOrientationDegrees((rotation + 180) % 360)
+    assert pcbnew.SaveBoard(str(pcb), native)
+    (verdict,) = connector_facings(str(pcb), {"J4": {"edge": edge}})
+    assert verdict.status == "misoriented"

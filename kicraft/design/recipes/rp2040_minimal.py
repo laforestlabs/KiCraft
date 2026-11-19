@@ -15,8 +15,8 @@ from .models import (
 )
 
 RP2040_CORE = RecipeDefinition(
-    # This is an unregistered component core.  The production composable
-    # definition is `rp2040-minimal@4` in rp2040_minimal_v2.py.
+    # Shared support hardware and the pinned castellated banks for the
+    # versioned composable definitions in rp2040_minimal_v2.py.
     recipe="rp2040-core",
     required_sheet_roles=("mcu", "io"),
     parameter_defaults={},

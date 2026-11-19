@@ -268,6 +268,54 @@ def test_power_pour_preserves_source_face_ground_via_landings(tmp_path):
     # landings: there are deliberately no fixed tracks carrying those bonds.
     assert audit_local_copper(pcbnew.LoadBoard(path), [spec]) == []
 
+
+def test_centered_leaf_power_pour_keeps_native_plane_ground(tmp_path):
+    import hashlib
+
+    from kicraft.autoplacer.brain.leaf_routing import (
+        _audit_leaf_plane_grounds,
+        _finish_leaf_ground_planes,
+        _leaf_power_plane_config,
+    )
+    from kicraft.autoplacer.brain.types import Point
+    from kicraft.autoplacer.hardware.ground_reservations import reserve_connected_ground
+
+    routed = tmp_path / "centered.kicad_pcb"
+    staged = tmp_path / "source.kicad_pcb"
+    _board(str(routed), {"1": "GND", "2": "GND", "3": "VBUS", "4": "VBUS"})
+    cfg = {"power_plane_nets": ["VBUS"], "zone_clearance_mm": 0.3}
+    offset = Point(2.5, 3)
+    board = pcbnew.LoadBoard(str(routed))
+    reverse = pcbnew.VECTOR2I(_mm(-offset.x), _mm(-offset.y))
+    for item in (*board.GetFootprints(), *board.GetDrawings()):
+        item.Move(reverse)
+    board.Save(str(staged))
+    _finish_leaf_ground_planes(staged, cfg, ("GND",))
+    board = pcbnew.LoadBoard(str(staged))
+    marker = "source ground witness"
+    proof = reserve_connected_ground(board, "GND", marker, width_mm=0.127, router_clearance_mm=0.153)
+    assert proof["pads"] == 2 and proof["zones"]
+    board.Save(str(staged))
+    digest = hashlib.sha256(staged.read_bytes()).hexdigest()
+    plan = {"board_path": str(staged), "zone_name": marker, "sha256": digest}
+
+    pour_power_planes(str(routed), cfg)
+    _finish_leaf_ground_planes(routed, cfg, ("GND",))
+    validation = {"accepted": True}
+    _audit_leaf_plane_grounds(routed, cfg, ("GND",), validation)
+    assert validation["leaf_plane_ground"]["incomplete"] == ["GND"]
+    assert not validation["accepted"]
+
+    with _leaf_power_plane_config(cfg, plan, offset) as power_cfg:
+        pour_power_planes(str(routed), power_cfg)
+    _finish_leaf_ground_planes(routed, cfg, ("GND",))
+    validation = {"accepted": True}
+    _audit_leaf_plane_grounds(routed, cfg, ("GND",), validation)
+    assert validation["leaf_plane_ground"]["incomplete"] == []
+    assert validation["accepted"]
+    assert hashlib.sha256(staged.read_bytes()).hexdigest() == digest
+    assert not any(z.GetIsRuleArea() for z in pcbnew.LoadBoard(str(routed)).Zones())
+
 # ---------------------------------------------------------------------------
 # GND thermal-via stitcher: collision guard + small-pad escape stitching
 # ---------------------------------------------------------------------------

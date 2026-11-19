@@ -293,6 +293,7 @@ def run(
         normalize_array_decaps,
     )
     from kicraft.design.synthesis.sheet_partition import (
+        isolate_owned_blocks,
         split_dense_sheets_enabled,
         split_dense_soc_sheets,
     )
@@ -320,6 +321,7 @@ def run(
     # docs/plans/dense-soc-leaf-unconnected-plan.md P3).
     if split_dense_sheets_enabled():
         split_dense_soc_sheets(state.bom, state.architecture)
+    isolate_owned_blocks(state.bom, state.architecture)
     ensure_leaf_stems_distinct(state.project_stem, state.architecture.sheets)
     owned_files = _read_generated_files(project_dir)
     output_paths = [
@@ -446,6 +448,16 @@ def run(
             failures,
             artifacts=artifacts.model_copy(update={"status": "failed"}),
             results=results,
+        )
+    if not smoke:
+        from kicraft.leaf_library.qualification import synthesis_requests
+
+        requests = synthesis_requests(
+            state, project_dir, sheet_instances, pcb, pro, ap, results,
+        )
+        atomic_write_text(
+            project_dir / ".kicraft" / "qualified-leaf-requests.json",
+            json.dumps(requests, indent=2, sort_keys=True) + "\n",
         )
     manifest = project_dir / ".kicraft" / "synthesis-generated.json"
     payload = json.loads(manifest.read_text(encoding="utf-8"))

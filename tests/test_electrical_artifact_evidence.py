@@ -161,7 +161,7 @@ def _fixed_buck_artifact(*, branches=1, defect=None):
 
 
 def _adjustable_buck_artifact():
-    return _buck_artifact(["tps54331-adjustable@2"], equal_feedback=True)
+    return _buck_artifact(["tps54331-adjustable@4"], equal_feedback=True)
 
 
 def test_isolated_converter_cannot_establish_a_board_input_voltage_rating(tmp_path, monkeypatch):

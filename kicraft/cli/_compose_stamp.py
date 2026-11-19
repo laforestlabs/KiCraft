@@ -43,13 +43,15 @@ def _stamp_parent_board(
     Returns the stamped board path.
     """
     import json as _json
-    import hashlib
     import os
     import tempfile
 
     from kicraft.autoplacer.brain.subcircuit_artifacts import slugify_subcircuit_id
     from kicraft.autoplacer.brain.types import Layer
     from kicraft.autoplacer.routing_board import run_pcbnew_script_file
+    from kicraft.autoplacer.brain.subcircuit_artifacts import (
+        serialize_components, serialize_traces, serialize_vias,
+    )
 
     composition = state.composition
     if composition is None:
@@ -260,6 +262,7 @@ def _stamp_parent_board(
     # sheet and looks lopsided in the schematic / board editor.
     _PAGE_W_MM = float(cfg.get("parent_page_width_mm", 297.0))
     _PAGE_H_MM = float(cfg.get("parent_page_height_mm", 210.0))
+    _dx = _dy = 0.0
     if outline_data:
         _board_w = outline_data["br_x"] - outline_data["tl_x"]
         _board_h = outline_data["br_y"] - outline_data["tl_y"]
@@ -301,6 +304,26 @@ def _stamp_parent_board(
                 _pt[0] += _dx
                 _pt[1] += _dy
 
+    qualified = {entry.instance_path: entry.qualified_reuse for entry in state.entries if entry.qualified_reuse}
+    state.qualified_geometry = [
+        {
+            "instance_path": child.instance_path,
+            "entry": qualified[child.instance_path]["entry"],
+            "identity": qualified[child.instance_path]["identity"],
+            "content_hash": qualified[child.instance_path]["content_hash"],
+            "internal_nets": qualified[child.instance_path]["internal_nets"],
+            "page_offset": [_dx, _dy],
+            "layout": {
+                "components": serialize_components(child.transformed.transformed_components),
+                "traces": serialize_traces(child.transformed.transformed_traces),
+                "vias": serialize_vias(child.transformed.transformed_vias),
+            },
+        }
+        for child in composition.composed_children if child.instance_path in qualified
+    ]
+    if len(state.qualified_geometry) != len(qualified):
+        raise RuntimeError("qualified block missing from the composed geometry")
+
     payload = {
         "pcb_path": str(output_pcb),
         "output_path": str(output_pcb),
@@ -319,16 +342,6 @@ def _stamp_parent_board(
             _json.dump(payload, f)
 
         run_pcbnew_script_file(_PARENT_STAMP_SCRIPT_PATH, tmp_path)
-        ownership = {
-            "version": 1,
-            "stamped_board_sha256": hashlib.sha256(output_pcb.read_bytes()).hexdigest(),
-            "stamped_board_path": str(output_pcb),
-            "traces": [item for item in traces_json if item.get("escape_ownership")],
-            "vias": [item for item in vias_json if item.get("escape_ownership")],
-        }
-        Path(str(output_pcb) + ".escape_ownership.json").write_text(
-            _json.dumps(ownership, sort_keys=True, indent=2) + "\n"
-        )
     finally:
         try:
             os.unlink(tmp_path)
@@ -346,6 +359,14 @@ def _stamp_parent_board(
             shutil.copy2(str(src_pro), str(sibling_pro))
     except OSError:
         pass
+
+    if state.qualified_geometry:
+        from kicraft.leaf_library.qualification import check_composed_geometry
+
+        preservation = check_composed_geometry(output_pcb, state.qualified_geometry)
+        state.geometry_validation["qualified_block_preservation"] = preservation
+        if not preservation["accepted"]:
+            raise RuntimeError(f"parent stamp invalidated qualified block geometry: {preservation['instances']}")
 
     print(f"Parent board stamped to {output_pcb} (subprocess)")
     return output_pcb

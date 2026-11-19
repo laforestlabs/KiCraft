@@ -31,11 +31,17 @@ from kicraft.design.part_identity import (
     physical_inventory_record,
     reviewed_part,
 )
+from kicraft.design.recipe_versions import (
+    RP2040_ACTIVE_RECIPE,
+    RP2040_PINNED_RECIPE,
+    RP2040_RECIPE_IDS,
+)
 from kicraft.design.synthesis.validation import _net_voltage, named_part_tokens
 
 from .models import RecipeDefinition, RegisteredRecipe
-from .pin_allocator import PinAllocationError, allocate_requirement_pins
-from .registry import migrate_recipe_selections, protected_identities, registered_recipes
+from .pin_allocator import PinAllocationError, allocate_requirement_pins, canonical_fixed_i2c_port
+from .registry import get_recipe, migrate_recipe_selections, protected_identities, registered_recipes
+from .rp2040_minimal_v2 import effective_rp2040_definition
 
 _PROGRAMMING_PEER_PORTS = {
     "uart_tx": "rx",
@@ -309,7 +315,7 @@ def _recipe_edge_companion(
 def _coalesce_mcu_support_requirements(
     result: ResolutionResult,
     requirements: list[CircuitRequirement],
-    recipes: tuple[RegisteredRecipe, ...],
+    definitions: dict[str, RecipeDefinition],
 ) -> None:
     """Attach proven support obligations to one identically configured MCU.
 
@@ -320,7 +326,6 @@ def _coalesce_mcu_support_requirements(
     class. Ambiguous ownership remains an architecture error.
     """
     by_id = {requirement.id: requirement for requirement in requirements}
-    definitions = {recipe.definition.recipe: recipe.definition for recipe in recipes}
 
     def core_ids(selection: RecipeSelection) -> list[str]:
         return [
@@ -2281,7 +2286,13 @@ def resolve_architecture_recipes(
         protected_identities=sorted(protected_identities()),
     )
     used_ids = {row.id for row in requirements}
-    for sheet, recipe in _named_mcu_sheets(architecture_model, recipes).items():
+    # A typed architecture owns every core through its requirements. A sheet
+    # can describe the MCU signals it exposes without carrying the chip.
+    # Infer physical MCU instances from prose only in old sheet-only designs.
+    legacy_mcu_sheets = (
+        _named_mcu_sheets(architecture_model, recipes) if not architecture_model.requirements else {}
+    )
+    for sheet, recipe in legacy_mcu_sheets.items():
         if any(row.role == "mcu_core" and row.sheet == sheet for row in requirements):
             continue
         requirement_id = "auto_mcu_" + sheet.lower().replace(" ", "_")
@@ -2701,7 +2712,13 @@ def resolve_architecture_recipes(
         # retain their programming method and exact selected silicon.
         uart_variants = _ROM_UART_VARIANTS
         existing_selection = existing_by_requirement.get(requirement.id)
-        if existing_selection is not None and existing_selection.recipe == "rp2040-minimal@4":
+        if existing_selection is not None and existing_selection.recipe in RP2040_RECIPE_IDS:
+            if (existing_selection.recipe == RP2040_PINNED_RECIPE
+                    and definition.recipe == RP2040_ACTIVE_RECIPE):
+                # The active exact-part match protects the silicon identity, but
+                # an already committed instance retains its versioned geometry.
+                definition = get_recipe(RP2040_PINNED_RECIPE)
+                definitions[definition.recipe] = definition
             if definition.recipe != existing_selection.recipe:
                 result.blocking.append(ResolutionDiagnostic(
                     code="conflicting_saved_recipe_selection",
@@ -2914,14 +2931,9 @@ def resolve_architecture_recipes(
                 )
                 continue
             parameters["native_usb"] = True
-        if definition.recipe == "rp2040-minimal@4":
-            from .rp2040_minimal_v2 import effective_rp2040_definition
-
+        if definition.recipe in RP2040_RECIPE_IDS:
             try:
-                definition = effective_rp2040_definition(
-                    definition, {**definition.parameter_defaults, **requirement.parameters},
-                    requirement.ports,
-                )
+                definition = effective_rp2040_definition(definition, parameters, requirement.ports)
             except ValueError as exc:
                 result.blocking.append(ResolutionDiagnostic(
                     code="conflicting_recipe_parameter",
@@ -3005,6 +3017,25 @@ def resolve_architecture_recipes(
             assumption_rows.append(
                 f"{requirement.id}: firmware must enable CAN remap {parameters['can_remap']}"
             )
+        canonical_ports: dict[str, str] = {}
+        alias_conflict = False
+        for port, net in requirement.ports.items():
+            canonical = canonical_fixed_i2c_port(definition, port)
+            previous = canonical_ports.setdefault(canonical, net)
+            if previous != net:
+                result.blocking.append(ResolutionDiagnostic(
+                    code="conflicting_interface_port",
+                    requirement_id=requirement.id,
+                    sheet=requirement.sheet,
+                    recipe=definition.recipe,
+                    message=f"I2C aliases for {canonical!r} select different nets {previous!r}, {net!r}",
+                ))
+                alias_conflict = True
+                break
+        if alias_conflict:
+            continue
+        if canonical_ports != requirement.ports:
+            requirement = requirement.model_copy(update={"ports": canonical_ports})
         bindings, port_diagnostics = _port_bindings(definition, requirement, architecture_model)
         hall_diagnostics = _hall_supply_diagnostics(
             definition, requirement, architecture_model, bindings
@@ -3142,9 +3173,9 @@ def resolve_architecture_recipes(
         )
         sheet_map = {role: requirement.sheet for role in definition.required_sheet_roles}
         selection_requirement_ids = [requirement.id]
-        if existing is not None and existing.recipe == "rp2040-minimal@4":
+        if existing is not None and existing.recipe in RP2040_RECIPE_IDS:
             sheet_map = dict(existing.sheets)
-            if requirement.role == "mcu_core":
+            if requirement.role == "mcu_core" and definition.edges:
                 selection_requirement_ids.extend(
                     row.id for row in requirements
                     if row.id in existing.requirement_ids
@@ -3201,14 +3232,13 @@ def resolve_architecture_recipes(
                 }
             )
         )
-    _coalesce_mcu_support_requirements(result, requirements, recipes)
-    definitions = {recipe.definition.recipe: recipe.definition for recipe in recipes}
+    _coalesce_mcu_support_requirements(result, requirements, definitions)
     # A native RP2040 expansion already owns the 27-ohm termination pair.
     # Direct callers of the resolver must not add the connector's 22-ohm pair.
     rp2040_pairs = {
         (row.port_bindings["usb_dm"], row.port_bindings["usb_dp"])
         for row in result.selections
-        if row.recipe == "rp2040-minimal@4"
+        if row.recipe in RP2040_RECIPE_IDS
         and row.parameters.get("native_usb") is True
         and {"usb_dm", "usb_dp"} <= row.port_bindings.keys()
     }

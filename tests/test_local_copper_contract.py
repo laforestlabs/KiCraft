@@ -742,3 +742,30 @@ def test_ground_forest_uses_short_front_bond_instead_of_long_back_detour(tmp_pat
                for zone in masks if zone.IsOnLayer(pcbnew.F_Cu))
     _fill(board)
     assert not audit_local_copper(board, [spec])
+
+
+def test_ground_forest_does_not_reserve_an_incomplete_mesh(tmp_path):
+    from kicraft.autoplacer.hardware.ground_reservations import (
+        IncompleteGroundForestError, reserve_connected_ground,
+    )
+
+    board, _ = _ground_fixture(tmp_path)
+    _pad(board, "J1", (7, 5), net="GND")
+    # The native pour is connected, but the wider requested witness cannot
+    # fit around the two turns of the narrow dogleg.
+    _ground_zone(board, pcbnew.F_Cu, [
+        (2, 2), (9, 2), (9, 4), (11, 4), (11, 6), (12, 6), (12, 2),
+        (18, 2), (18, 8), (12, 8), (12, 6.5), (10.5, 6.5), (10.5, 4.5),
+        (9, 4.5), (9, 8), (2, 8),
+    ])
+    _fill(board)
+    board.BuildConnectivity()
+    assert board.GetConnectivity().GetUnconnectedCount(False) == 0
+
+    # Both pads on the left admit a wide witness; do not stamp their edge
+    # before discovering that it cannot be joined to the third pad.
+    with pytest.raises(IncompleteGroundForestError, match="no complete native-filled witness forest"):
+        reserve_connected_ground(
+            board, "GND", "incomplete ground forest", width_mm=1.2, router_clearance_mm=.17,
+        )
+    assert not any(zone.GetIsRuleArea() for zone in board.Zones())

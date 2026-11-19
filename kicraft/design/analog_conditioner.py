@@ -155,7 +155,7 @@ def _analog_conditioner(requirement: CircuitRequirement) -> LoweringArtifact | N
         consumer_limit = float(parameters["consumer_input_max_v"]) if "consumer_input_max_v" in parameters else None
     except (TypeError, ValueError):
         return None
-    if type(parameters.get("channel_count", 2)) is bool or channels not in {2, 4, 8} or sensor not in _SENSOR_DEFAULTS or rail != 5.0 or load_min < 10_000 or load_cap > 100 or consumer_limit is not None and consumer_limit <= 0:
+    if type(parameters.get("channel_count", 2)) is bool or channels not in {2, 4, 8} or sensor not in _SENSOR_DEFAULTS or rail not in (3.3, 5.0) or load_min < 10_000 or load_cap > 100 or consumer_limit is not None and consumer_limit <= 0:
         return None
     power_cycle_isolation = parameters.get("power_cycle_isolation", False)
     if type(power_cycle_isolation) is not bool:
@@ -167,6 +167,15 @@ def _analog_conditioner(requirement: CircuitRequirement) -> LoweringArtifact | N
         return None
     requested_amplifier = parameters.get("amplifier_exact_part")
     if requirement.exact_part and requested_amplifier and str(requirement.exact_part).casefold() != str(requested_amplifier).casefold():
+        return None
+    # Microchip DS20001060AQ: MCP9700A operates at 2.3–5.5 V and
+    # MCP6002 at 1.8–6 V with rail-to-rail I/O. The untrimmed temperature
+    # network is supply-independent; its conservative output bound is VDD.
+    # Other reviewed transfers and reset/isolation circuits remain 5 V only.
+    if rail == 3.3 and not (
+        sensor == "temperature" and exact == "mcp6002-i/sn"
+        and parameters.get("trim", False) is False and not power_cycle_isolation
+    ):
         return None
     if any(key in parameters for key in ("sensor_transfer", "sensor_range", "output_range_v", "bandwidth_hz")):
         # These defaults have finite documented envelopes, but no alternate
@@ -438,7 +447,7 @@ def _analog_conditioner(requirement: CircuitRequirement) -> LoweringArtifact | N
             "The conditioner owns no board-edge output connector. Each analog_out_<n> port must bind to a declared consumer or an architecture-owned connector contact so the requested interface remains independently verifiable.",
             "With power_cycle_isolation, each external output is gated by an unswitched SN74LVC1G66DBVR; current-sense inputs are gated too. isolation_enable must be the independently powered supervisor RESET release regenerated through an unswitched SN74LVC1G17 Schmitt buffer, never raw RESET or power-switch EN. Every isolator has its own 100 nF unswitched-supply bypass. The external interface is limited to 0..5 V.",
             "Each amplifier and MCP9700 or SHT30 sensor needs its own 100 nF bypass placed close to its supply pins; delivered pad connectivity alone does not establish this board-stage placement requirement.",
-            "MCP9700A -E operation is specified from -40 to 125 C (Microchip DS20001942K pp. 3–4); at 125 C the nominal 1.75 V sensor output becomes 2.625 V at gain 1.5, and the +4 C sensor error gives 1.79 V before gain. Trim raises nominal gain to 2; generic resistor tolerances and amplifier errors are not specified, so the conservative consumer bound is the 5 V supply rail.",
+            f"MCP9700A -E operation is specified from -40 to 125 C (Microchip DS20001942K pp. 3–4); at 125 C the nominal 1.75 V sensor output becomes 2.625 V at gain 1.5, and the +4 C sensor error gives 1.79 V before gain. Trim raises nominal gain to 2; generic resistor tolerances and amplifier errors are not specified, so the conservative consumer bound is the {rail:g} V supply rail.",
             "The switched reset domain includes amplifier and sensor bypasses and sensor output capacitors; its total must not exceed 1 uF. Isolation bypasses are on the unswitched supply.",
             *((
                 "SHT30-ARP humidity output is 10–90% of VDD (0.5–4.5 V at 5 V); the 100k/100k divider and unity-gain buffer give nominal 0.25–2.25 V for 0–100% RH. Both sensor outputs have 1 nF loads and every sensor has 100 nF bypass. reset_button=true shorts the real active-low sensor nRESET to return; it does not reset or power-cycle the amplifier. The 10 kOhm external reset pull-up exceeds the manufacturer's 2 kOhm minimum. Manufactured accuracy, pulse timing and settling remain unverified.",
@@ -581,14 +590,14 @@ ANALOG_CONDITIONER_LOWERER = RegisteredLowerer(
     port_keys=("vplus, vminus; analog_out_<n>; power-cycle isolation also isolation_vdd/isolation_enable; current sense also load_return_in_<n>/load_return_out_<n>",),
     required_port_keys=("vplus", "vminus"),
     reference_port_keys=("vminus",),
-    parameter_choices=(("channel_count", (2, 4, 8)), ("sensor_type", tuple(_SENSOR_DEFAULTS)), ("topology", tuple(_SENSOR_DEFAULTS)), ("amplifier_exact_part", tuple(part[0] for part in _ANALOG_PARTS.values())), ("analog_rail_v", (5.0,)), ("trim", (False, True)), ("power_cycle_isolation", (False, True)), ("reset_button", (False, True))),
+    parameter_choices=(("channel_count", (2, 4, 8)), ("sensor_type", tuple(_SENSOR_DEFAULTS)), ("topology", tuple(_SENSOR_DEFAULTS)), ("amplifier_exact_part", tuple(part[0] for part in _ANALOG_PARTS.values())), ("analog_rail_v", (3.3, 5.0)), ("trim", (False, True)), ("power_cycle_isolation", (False, True)), ("reset_button", (False, True))),
     port_directions=(("vplus", "input"), ("vminus", "bidirectional"), ("isolation_vdd", "input"), ("isolation_enable", "input")),
     port_patterns=((r"analog_out_[1-8]", "output"), (r"load_return_(?:in|out)_[1-8]", "bidirectional")),
     derived_port_patterns=((r"sensor_[1-8]_(?:signal|return)", "bidirectional"), (r"conditioned_[1-8]", "output"), (r"analog_out_return", "bidirectional")),
     reviewed_exact_parts=tuple(part[0] for part in _ANALOG_PARTS.values()),
     parameter_constraints=(
         "Bind analog_out_<n> to the requested consumers for exactly channel_count channels. vplus is the amplifier positive SUPPLY (SOIC-8 pin 8); vminus is its supply RETURN (pin 4), not an inverting signal input. The compiler binds the declared supply and published return; never drive vminus with sensor, trim or reset signals. The compiler owns the on-board sensors, amplifier inputs, feedback networks and internal conditioned nodes; do not wire them as separate external signals. Set trim=true for the reviewed on-board trimmer instead of driving a supply pin from an external trimmer. With power_cycle_isolation, isolation_vdd is the unswitched 5 V rail and isolation_enable is the reset-supervisor release that stays low until the switched rail has recovered. Current sensing additionally binds a distinct low-side Kelvin load_return_in_<n> and shared-return load_return_out_<n> for every channel; parallel shunts are rejected. The analog output connector is an architecture-owned connector requirement, never an analog-conditioner parameter.",
-        "Only the reviewed MCP6002-I/SN, LM358DR and TLV9062IDR SOIC-8 amplifier identities are supported at the fixed 5 V analog rail. Named sensors, output spans, bandwidths, and transfers outside the documented default circuits are refused rather than guessed.",
+        "MCP6002-I/SN with untrimmed MCP9700AT-E/TT temperature channels also supports a 3.3 V analog rail and consumers rated at least 3.3 V. The other reviewed MCP6002-I/SN, LM358DR and TLV9062IDR circuits require the 5 V rail. Named sensors, output spans, bandwidths, and transfers outside these documented circuits are refused rather than guessed.",
         "Generic humidity uses sourceable SHT30-ARP-B2.5KS analog sensors, not I2C SHT30-DIS. An explicit HIH-4010-001 remains exact. For a requested humidity reset button set reset_button=true on this conditioner: the compiler owns one physical button and a 10k pull-up on the sensors' actual active-low nRESET. No separate power-cycle/reset-switch requirement is needed for that sensor reset. This option is refused for sensors without reviewed reset contacts.",
     ),
 )

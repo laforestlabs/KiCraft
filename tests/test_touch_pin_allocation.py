@@ -180,7 +180,7 @@ def _rp2040_requirement(*, adc_count=4, **ports):
 
 
 def _rp2040_definition(*, exposed=30, bindings=None):
-    definition = get_recipe("rp2040-minimal@4")
+    definition = get_recipe("rp2040-minimal@5")
     return effective_rp2040_definition(
         definition, {**definition.parameter_defaults, "gpio_exposed": exposed}, bindings or {}
     )
@@ -192,8 +192,9 @@ def test_rp2040_four_adc_allocations_reach_physical_mcu_and_exposed_contacts():
     assert {row.capability for row in allocations} == {"adc"}
     assert len({row.net for row in allocations}) == 4
     expansion = expand_recipe(RecipeSelection(
-        recipe="rp2040-minimal@4", instance="main",
+        recipe="rp2040-minimal@5", instance="main",
         sheets={"mcu": "MCU", "io": "IO"},
+        parameters={"breakout_style": "castellated"},
         port_bindings={"vdd": "+3V3", "gnd": "GND", "usb_dm": "DM", "usb_dp": "DP"},
         pin_allocations=allocations,
     ))
@@ -220,7 +221,7 @@ def test_rp2040_adc_capacity_respects_exposed_gpio_limit():
     with pytest.raises(PinAllocationError):
         allocate_requirement_pins(definition, _rp2040_requirement())
     expansion = expand_recipe(RecipeSelection(
-        recipe="rp2040-minimal@4", instance="limited",
+        recipe="rp2040-minimal@5", instance="limited",
         sheets={"mcu": "MCU", "io": "IO"},
         parameters={"gpio_exposed": 29},
         port_bindings={"vdd": "+3V3", "gnd": "GND", "usb_dm": "DM", "usb_dp": "DP"},

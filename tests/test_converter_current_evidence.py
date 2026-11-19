@@ -48,8 +48,8 @@ def _bound_source(voltage: float):
 @pytest.mark.parametrize(
     ("recipe", "output_voltage", "input_voltage"),
     (
-        ("tps54331-adjustable@2", 3.3, 18.0),
-        ("tps54331-adjustable@2", 3.3, 24.0),
+        ("tps54331-adjustable@4", 3.3, 18.0),
+        ("tps54331-adjustable@4", 3.3, 24.0),
         ("tps54331-12v-1a@2", 12.0, 18.0),
     ),
 )

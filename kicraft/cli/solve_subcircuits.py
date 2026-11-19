@@ -43,6 +43,7 @@ import os
 import random
 import shutil
 import site
+import subprocess
 import sys
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -181,7 +182,12 @@ from kicraft.autoplacer.kicad_routing_tools import (
     KicadRoutingToolsTimeoutError,
     KicadRoutingToolsUnavailableError,
 )
-from kicraft.cli._leaf_replication import materialize_sibling, plan_leaf_replication
+from kicraft.cli._leaf_replication import (
+    LeafGroup, materialize_qualified_leaf, materialize_sibling, plan_leaf_replication,
+)
+from kicraft.fsutil import atomic_write_text
+from kicraft.leaf_library import LeafLibrary
+from kicraft.leaf_library.qualification import discover, qualify_and_publish, read_requests, validate_entry
 
 
 # Minimum outline-origin offset (mm) that counts as a genuine A4 page-centering when
@@ -257,6 +263,19 @@ class SolvedLeafSubcircuit:
             solved_components = copy.deepcopy(routed_state.components)
             routed_traces = copy.deepcopy(routed_state.traces)
             routed_vias = copy.deepcopy(routed_state.vias)
+            receipt = round_result.routing.get("validation", {}).get("signal_escape_geometry_receipt")
+            if receipt:
+                import hashlib
+
+                from kicraft.autoplacer.brain.copper_accounting import attach_stamped_escape_ownership
+
+                if receipt["board_sha256"] != hashlib.sha256(Path(routed_board_path).read_bytes()).hexdigest():
+                    raise ValueError("signal escape ownership receipt does not bind the selected leaf round")
+                ownership = attach_stamped_escape_ownership(
+                    {"traces": routed_traces, "vias": routed_vias}, receipt,
+                )
+                if ownership["unresolved_source_uuids"]:
+                    raise ValueError("selected leaf round lost signal escape copper ownership")
             antenna_edge_intents = copy.deepcopy(routed_state.antenna_edge_intents)
             # The standalone leaf board is centered on its A4 page for viewing
             # (leaf_routing._center_on_leaf_page). Re-base its geometry back to its own
@@ -2101,18 +2120,33 @@ def _print_human_summary(
 
 
 def _json_summary(
-    results: list[SolvedLeafSubcircuit], persisted: list[dict[str, Any]]
+    results: list[SolvedLeafSubcircuit],
+    persisted: list[dict[str, Any]],
+    imported: list[dict[str, Any]] | None = None,
+    decisions: dict[str, Any] | None = None,
+    catalogue: list[dict] | None = None,
 ) -> dict[str, Any]:
     pairs = _persisted_results(results, persisted)
     return {
-        "leaf_subcircuits": len(pairs),
+        "leaf_subcircuits": len(pairs) + len(imported or []),
         "results": [
             {
                 "solved": solved.to_dict(),
                 "artifact_metadata": metadata,
             }
             for solved, metadata in pairs
+        ] + [
+            {
+                "solved": {
+                    "sheet_name": metadata["sheet_name"], "instance_path": metadata["instance_path"],
+                    "rounds": [], "qualified_reuse": metadata["qualified_reuse"],
+                },
+                "artifact_metadata": metadata,
+            }
+            for metadata in imported or []
         ],
+        "qualified_reuse": decisions or {},
+        "qualified_catalogue": catalogue or [],
     }
 
 
@@ -2268,13 +2302,63 @@ def main(argv: list[str] | None = None) -> int:
             print("error: no matching leaf subcircuits found", file=sys.stderr)
             return 1
 
+        project_dir = top_schematic.parent
+        library = LeafLibrary.from_env()
+        from kicraft.autoplacer.brain.pins import read_pins, unpin_leaf
+
+        experiments = project_dir / ".experiments"
+        old_pins = read_pins(experiments)["pinned_leaves"]
+        requests, request_error = read_requests(project_dir, pcb_path, top_schematic)
+        if not args.route:
+            requests, request_error = {}, "independent routing not requested"
+        entries, catalogue = discover(library, requests)
+        if catalogue:
+            for item in catalogue:
+                print(f"[qualified-leaf] {item['status']} {item['entry']}: {item['reason']}")
+        imported = []
+        pending = []
+        decisions = {}
+        for node in leaves:
+            path = node.id.instance_path
+            request = requests.get(path, {})
+            decision = {"status": "not_eligible", "reason": request.get("reason") or request_error or
+                        "no checked block contract for this leaf", "local_solve_performed": False}
+            decisions[path] = decision
+            if "contract" in request:
+                decision.update(status="miss", reason="no compatible qualified entry", identity=request["identity"])
+                for leaf, entry in entries.get(request["identity"], ()):
+                    try:
+                        metadata = materialize_qualified_leaf(leaf, entry, request, node, board_state, project_dir, cfg)
+                    except (OSError, ValueError, KeyError, RuntimeError, TypeError, AttributeError) as exc:
+                        reason = f"instance could not preserve qualified layout: {exc}"
+                        catalogue.append({"status": "rejected_instance", "entry": leaf.slug, "reason": reason})
+                        decision["reason"] = reason
+                        continue
+                    imported.append(metadata)
+                    decisions[path] = metadata["qualified_reuse"]
+                    break
+            if decisions[path]["status"] != "reused":
+                pending.append(node)
+                leaf_key = Path(resolve_artifact_paths(project_dir, node.id).artifact_dir).name
+                if str(old_pins.get(leaf_key, {}).get("source", "")).startswith("qualified:"):
+                    unpin_leaf(experiments, leaf_key)
+            print(f"[qualified-leaf] {node.id.sheet_name}: {decisions[path]['status']} "
+                  f"{decisions[path].get('entry') or decisions[path].get('reason', '')}")
+
         # Identical-leaf reuse (docs/plans/identical-leaf-reuse-plan.md): group
         # structurally-identical leaves (repeated channels) so the search runs
         # ONCE per class; each sibling reuses the representative's geometry
         # verbatim (its own refs/nets). Only representatives are solved below;
         # siblings are materialized from the representative's artifacts after
         # persistence. Kill switch: cfg['leaf_replication'].
-        leaf_groups = plan_leaf_replication(leaves, board_state, cfg)
+        # Independently qualify every eligible miss. An identical leaf in this
+        # run may have very different electrical/fab constraints from its sibling;
+        # keep ordinary within-project replication for the remaining blocks.
+        qualified_misses = [n for n in pending if "contract" in requests.get(n.id.instance_path, {})]
+        ordinary = [n for n in pending if "contract" not in requests.get(n.id.instance_path, {})]
+        leaf_groups = [LeafGroup(n) for n in qualified_misses] + plan_leaf_replication(ordinary, board_state, cfg)
+        pending_order = {node.id.instance_path: i for i, node in enumerate(pending)}
+        leaf_groups.sort(key=lambda group: pending_order[group.representative.id.instance_path])
         representatives = [group.representative for group in leaf_groups]
         _sibling_total = sum(len(group.members) for group in leaf_groups)
         if _sibling_total:
@@ -2457,7 +2541,40 @@ def main(argv: list[str] | None = None) -> int:
         # partially-failed rounds appear as completely empty in the UI.
         for solved in solved_results:
             try:
-                persisted.append(_persist_solution(solved, cfg))
+                metadata = _persist_solution(solved, cfg)
+                path = solved.instance_path
+                decision = decisions[path]
+                decision["local_solve_performed"] = True
+                request = requests.get(path, {})
+                if "contract" in request:
+                    try:
+                        publication = qualify_and_publish(library, request, metadata, solved.best_round.round_index)
+                    except (OSError, ValueError, RuntimeError, KeyError, TypeError, AttributeError, subprocess.SubprocessError) as exc:
+                        decision.update(status="qualification_failed", reason=str(exc))
+                    else:
+                        # Compose the exact published board even for its first
+                        # project, not the pre-normalization search snapshot.
+                        leaf = library.find(publication["entry"])
+                        if leaf is None:
+                            raise RuntimeError("qualified leaf became undiscoverable before its first installation")
+                        metadata = materialize_qualified_leaf(
+                            leaf, validate_entry(leaf), request, solved.node, board_state, project_dir, cfg,
+                            publication=publication,
+                        )
+                        decision = decisions[path] = metadata["qualified_reuse"]
+                        print(f"[qualified-leaf] {solved.sheet_name}: {decision['status']} {decision['entry']}")
+                        persisted.append(metadata)
+                        continue
+                    print(f"[qualified-leaf] {solved.sheet_name}: {decision['status']} "
+                          f"{decision.get('entry') or decision.get('reason', '')}")
+                metadata["qualified_reuse"] = decision
+                metadata_path = Path(metadata["artifact_paths"]["metadata_json"])
+                atomic_write_text(metadata_path, json.dumps(metadata, indent=2, sort_keys=True) + "\n")
+                for snapshot in metadata_path.parent.glob("round_[0-9]*_metadata.json"):
+                    old = json.loads(snapshot.read_text(encoding="utf-8"))
+                    old["qualified_reuse"] = decision
+                    atomic_write_text(snapshot, json.dumps(old, indent=2, sort_keys=True) + "\n")
+                persisted.append(metadata)
             except Exception as exc:
                 failed_by_path[solved.instance_path] = {
                     "sheet_name": solved.sheet_name,
@@ -2494,6 +2611,11 @@ def main(argv: list[str] | None = None) -> int:
                     sib_meta = materialize_sibling(
                         rep_meta, sib_node, ref_map, net_map
                     )
+                    sib_decision = decisions[sib_node.id.instance_path]
+                    sib_decision.update(status="replicated_within_project", local_solve_performed=False)
+                    sib_meta["qualified_reuse"] = sib_decision
+                    atomic_write_text(Path(sib_meta["artifact_paths"]["metadata_json"]),
+                                      json.dumps(sib_meta, indent=2, sort_keys=True) + "\n")
                     persisted.append(sib_meta)
                     solved_results.append(
                         _dataclasses.replace(rep_solved, node=sib_node)
@@ -2521,6 +2643,9 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     if failed_by_path:
+        for path, failure in failed_by_path.items():
+            if path in decisions:
+                decisions[path].update(status="local_solve_failed", reason=failure["error"], local_solve_performed=True)
         failure_lines = [
             f"{item.get('instance_path', path)}:{item.get('error', 'unknown_error')}"
             for path, item in sorted(failed_by_path.items())
@@ -2533,7 +2658,7 @@ def main(argv: list[str] | None = None) -> int:
         # Still emit JSON summary so autoexperiment can ingest partial results.
         if args.json:
             payload = json.dumps(
-                _json_summary(solved_results, persisted), indent=2, default=str
+                _json_summary(solved_results, persisted, imported, decisions, catalogue), indent=2, default=str
             )
             print("===SOLVE_SUBCIRCUITS_JSON_START===")
             print(payload)
@@ -2542,7 +2667,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.json:
         payload = json.dumps(
-            _json_summary(solved_results, persisted), indent=2, default=str
+            _json_summary(solved_results, persisted, imported, decisions, catalogue), indent=2, default=str
         )
         print("===SOLVE_SUBCIRCUITS_JSON_START===")
         print(payload)
@@ -2550,6 +2675,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     _print_human_summary(solved_results, persisted)
+    for metadata in imported:
+        print(f"- {metadata['sheet_name']}: reused {metadata['qualified_reuse']['entry']} (local solve bypassed)")
     return 0
 
 

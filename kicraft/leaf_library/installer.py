@@ -266,6 +266,52 @@ def install_leaf(
     )
 
 
+def install_qualified_snapshot(
+    leaf: LoadedLeaf,
+    *,
+    project_dir: Path,
+    leaf_key: str,
+    snapshot_id: str,
+    pcb_source: Path,
+    layout: dict,
+    metadata: dict,
+) -> Path:
+    """Install a verified, already-remapped physical instance without new wiring.
+
+    The qualifier owns electrical compatibility and geometry correspondence.
+    Pin only after every snapshot and its source evidence are durably written.
+    """
+    from kicraft.fsutil import atomic_write_text
+
+    verify_content_hash_at_install(leaf)
+    for token in (leaf_key, snapshot_id):
+        if not token or token in (".", "..") or any(c in token for c in ("/", "\\", "\x00")):
+            raise ValueError("invalid qualified snapshot identity")
+    project_dir = Path(project_dir)
+    artifact_dir = project_dir / ".experiments" / "subcircuits" / leaf_key
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    prefix = artifact_dir / f"round_{snapshot_id}"
+    atomic_write_text(
+        Path(f"{prefix}_leaf_routed.kicad_pcb"),
+        Path(pcb_source).read_text(encoding="utf-8"),
+    )
+    for suffix, payload in (("solved_layout", layout), ("metadata", metadata)):
+        atomic_write_text(
+            Path(f"{prefix}_{suffix}.json"),
+            json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        )
+    for name in ("manifest.json", "qualification.json"):
+        atomic_write_text(
+            artifact_dir / f"round_{snapshot_id}_{name}",
+            (leaf.dir / name).read_text(encoding="utf-8"),
+        )
+    pin_leaf(
+        project_dir / ".experiments", leaf_key, snapshot_id,
+        source=f"qualified:{leaf.slug}",
+    )
+    return artifact_dir
+
+
 def _merge_fragment(dst: dict[str, object], src: dict[str, object]) -> None:
     """Additive merge of a renumbered fragment into the project autoplacer.
 
@@ -314,6 +360,7 @@ __all__ = [
     "InstalledLeaf",
     "LIBRARY_IMPORT_SNAPSHOT_ID",
     "install_leaf",
+    "install_qualified_snapshot",
     "verify_content_hash_at_install",
     "verify_dependencies",
 ]

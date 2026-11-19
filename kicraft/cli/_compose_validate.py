@@ -104,8 +104,8 @@ def _repair_parent_outline(
 
     for ref, comp in (composition.board_state.components or {}).items():
         if ref not in edge_constrained or comp.mating_axis == "board_normal":
-            b_tl, b_br = comp.bbox()
-            _grow(b_tl, b_br)
+            native_rect = state.native_component_rects.get(ref)
+            _grow(*(native_rect if native_rect is not None else comp.bbox()))
         for pad in comp.pads:
             p_tl, p_br = pad.bbox()
             _grow(p_tl, p_br)
@@ -655,7 +655,8 @@ def _validate_parent_geometry(
         # geometry_union tracks the full physical extent of every component
         # so the diagnostic shows where the actual copper/courtyard lives
         # relative to the board outline, not just the courtyard centerline.
-        phys_tl, phys_br = comp.physical_bbox()
+        native_rect = state.native_component_rects.get(ref)
+        phys_tl, phys_br = native_rect if native_rect is not None else comp.physical_bbox()
         geometry_union_min_x = min(geometry_union_min_x, phys_tl.x)
         geometry_union_min_y = min(geometry_union_min_y, phys_tl.y)
         geometry_union_max_x = max(geometry_union_max_x, phys_br.x)
@@ -663,7 +664,7 @@ def _validate_parent_geometry(
 
         # Board-normal headers do not have a housing that mates past the edge.
         # Fabricated edge terminals have their own final geometry contract.
-        body_tl, body_br = comp.bbox()
+        body_tl, body_br = native_rect if native_rect is not None else comp.bbox()
         if (ref in edge_constrained and comp.mating_axis != "board_normal") or ref in fabricated_edge_refs:
             component_outside = False
         else:

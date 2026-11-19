@@ -96,14 +96,12 @@ class LeafLibrary:
         return cls(resolve_library_dir())
 
     def iter_dirs(self) -> Iterator[Path]:
-        """Yield every direct child directory of the library base.
-
-        Returns an empty iterator if the base dir does not exist.
+        """Yield published leaf directories, excluding staging/quarantine data.
         """
         if not self.base_dir.is_dir():
             return
         for child in sorted(self.base_dir.iterdir()):
-            if child.is_dir():
+            if child.is_dir() and not child.name.startswith("."):
                 yield child
 
     def _verify_hash(self, leaf_dir: Path, manifest: Manifest) -> bool:
@@ -133,8 +131,9 @@ class LeafLibrary:
         except Exception as exc:  # JSON decode, encoding, etc.
             return BrokenLeaf(dir=leaf_dir, reason=f"manifest read: {exc}")
 
-        # Directory name must match manifest name -- catches rename mistakes.
-        if leaf_dir.name != manifest.name:
+        # Legacy unversioned directories remain readable, never rewritten.
+        expected_names = {manifest.name, f"{manifest.name}@{manifest.version}"}
+        if leaf_dir.name not in expected_names:
             return BrokenLeaf(
                 dir=leaf_dir,
                 reason=(
@@ -180,15 +179,16 @@ class LeafLibrary:
         if "@" not in slug:
             return None
         name, version = slug.split("@", 1)
-        leaf_dir = self.base_dir / name
-        if not leaf_dir.is_dir():
+        # Never let a slug escape the library root.
+        if not name or not version or any(c in slug for c in ("/", "\\", "\x00")):
             return None
-        result = self.load_one(leaf_dir)
-        if not isinstance(result, LoadedLeaf):
-            return None
-        if result.manifest.version != version:
-            return None
-        return result
+        for leaf_dir in (self.base_dir / slug, self.base_dir / name):
+            if not leaf_dir.is_dir():
+                continue
+            result = self.load_one(leaf_dir)
+            if isinstance(result, LoadedLeaf) and result.manifest.version == version:
+                return result
+        return None
 
 
 __all__ = [

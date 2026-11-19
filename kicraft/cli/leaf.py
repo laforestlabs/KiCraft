@@ -45,14 +45,16 @@ def _cmd_list(args: argparse.Namespace) -> int:
 
 def _cmd_show(args: argparse.Namespace) -> int:
     lib = LeafLibrary(_base_dir(args))
-    leaf_dir = lib.base_dir / args.name
-    if not leaf_dir.is_dir():
-        print(f"error: leaf {args.name!r} not found in {lib.base_dir}", file=sys.stderr)
-        return 1
-    result = lib.load_one(leaf_dir)
-    if not hasattr(result, "manifest"):
-        # BrokenLeaf
-        print(f"error: leaf {args.name!r} is broken: {result.reason}", file=sys.stderr)
+    if "@" in args.name:
+        result = lib.find(args.name)
+    else:
+        matches = [leaf for leaf in lib.load_all()[0] if leaf.manifest.name == args.name]
+        if len(matches) > 1:
+            print("error: multiple versions; specify name@version", file=sys.stderr)
+            return 1
+        result = matches[0] if matches else None
+    if result is None:
+        print(f"error: leaf {args.name!r} not found or invalid in {lib.base_dir}", file=sys.stderr)
         return 1
     print(json.dumps(result.manifest.model_dump(mode="json"), indent=2, sort_keys=True))
     return 0
@@ -85,7 +87,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p_list.set_defaults(func=_cmd_list)
 
     p_show = sub.add_parser("show", help="Pretty-print a leaf's manifest")
-    p_show.add_argument("name", help="Leaf name (directory name in the library)")
+    p_show.add_argument("name", help="Leaf name@version (name alone if unambiguous)")
     p_show.set_defaults(func=_cmd_show)
 
     p_path = sub.add_parser("path", help="Print the resolved library path")

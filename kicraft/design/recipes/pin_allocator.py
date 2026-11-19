@@ -62,6 +62,15 @@ FIXED_INTERFACES = {
 }
 
 
+def canonical_fixed_i2c_port(definition: RecipeDefinition, name: str) -> str:
+    """An I2C alias of a dedicated peripheral pad is not a second pad request."""
+    fixed = definition.fixed_port_pins or {}
+    for aliases, _ in FIXED_INTERFACES["i2c_controller"]:
+        if name in aliases:
+            return next((alias for alias in aliases if alias in fixed), name)
+    return name
+
+
 def _interface_port_error(
     requirement: CircuitRequirement,
     interface: str,

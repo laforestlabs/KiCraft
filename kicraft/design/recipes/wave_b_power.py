@@ -7,6 +7,9 @@ from __future__ import annotations
 
 import math
 
+from kicraft.design.models import BOMAccessory
+from kicraft.design.part_identity import TPS54331_DDA_NATIVE_LAND, TPS54331_DDA_NATIVE_SYMBOL
+
 from .models import (
     RecipeComponentGroup as Group,
     RecipeDefinition,
@@ -175,7 +178,7 @@ _ENABLE_CONTROL_MAX_V: dict[str, float] = {
     "tlv62569-3v3@3": 5.5,
     "ap63203-3v3@1": 32.0,
     "ap63205-5v@2": 32.0,
-    "tps54331-adjustable@2": 6.0,
+    "tps54331-adjustable@4": 6.0,
     "tps54331-12v-1a@2": 6.0,
     "lm2577t-adj-12v-boost@1": 18.0,
     "lm2577t-adj-2s-12v-boost@1": 18.0,
@@ -187,6 +190,20 @@ _ENABLE_CONTROL_MAX_V: dict[str, float] = {
 def enable_control_max_voltage(recipe: str) -> float | None:
     """Maximum verified voltage for an externally driven EN pin on this exact recipe."""
     return _ENABLE_CONTROL_MAX_V.get(recipe)
+
+
+def enable_control_drive_range(recipe: str) -> tuple[float, float] | None:
+    """Reviewed high-true direct logic drive; not the EN absolute maximum.
+
+    TI TLV62569 §§6.3/6.5 and Diodes AP6320x DS41326 electrical
+    characteristics give the guaranteed high thresholds. Touch-accessible
+    shunts use only a logic/control rail, even on a high-voltage EN pin.
+    """
+    if recipe == "tlv62569-3v3@3":
+        return 1.2, 5.5
+    if recipe in {"ap63203-3v3@1", "ap63205-5v@2"}:
+        return 1.23, 5.5
+    return None
 
 
 def _part(
@@ -1362,10 +1379,12 @@ def _tps54331_buck(
     feedback_top: str,
     feedback_bottom: str,
     comp_resistor: str,
-    comp_capacitor: str,
+    comp_capacitor: Group,
     comp_hf_capacitor: str,
     source_documents: tuple[Source, ...],
     assertions: tuple[Assertion, ...],
+    input_hf_cap: Group | None = None,
+    standard_fab_land: bool = False,
 ) -> RecipeDefinition:
     """A complete TPS54331 buck with the data-sheet-required support circuit.
 
@@ -1377,6 +1396,7 @@ def _tps54331_buck(
     protected by ``enable_control_max_voltage``.
     """
     datasheet = "https://www.ti.com/lit/ds/symlink/tps54331.pdf"
+    input_hf = input_hf_cap or _catalog_cap("input_hf_cap", "10nF 50V X7R")
     return _power_recipe(
         recipe=recipe,
         family=family,
@@ -1414,21 +1434,22 @@ def _tps54331_buck(
                 "converter",
                 "U",
                 "TPS54331DDAR",
-                "tps54331:TPS54331DDAR",
+                TPS54331_DDA_NATIVE_SYMBOL if standard_fab_land else "tps54331:TPS54331DDAR",
+                TPS54331_DDA_NATIVE_LAND if standard_fab_land else
                 "tps54331:SOIC-8_L4.9-W3.9-P1.27-LS6.0-BL-EP",
                 mpn="TPS54331DDAR",
                 datasheet=datasheet,
             ),
             inductor,
             input_cap,
-            _catalog_cap("input_hf_cap", "10nF 50V X7R"),
+            input_hf,
             output_cap,
             _passive("feedback_top", "R", feedback_top),
             _passive("feedback_bottom", "R", feedback_bottom),
             _catalog_cap("bootstrap_cap", "100nF 16V X7R"),
-            _catalog_cap("softstart_cap", "10nF 50V X7R"),
+            input_hf.model_copy(update={"role": "softstart_cap"}),
             _passive("comp_resistor", "R", comp_resistor),
-            _catalog_cap("comp_capacitor", comp_capacitor),
+            comp_capacitor,
             _catalog_cap("comp_hf_capacitor", comp_hf_capacitor),
             _part(
                 "catch_diode",
@@ -1509,28 +1530,52 @@ def _tps54331_buck(
     )
 
 
+_TPS54331_3V3_HF_DATASHEET = "https://jlcpcb.com/api/file/downloadByFileSystemAccessId/8588933294913806336"
+_TPS54331_3V3_COMP_DATASHEET = "https://product.samsungsem.com/mlcc/CL10C102JB8NNN.do"
+_UNIROYAL_0603_DATASHEET = "https://jlcpcb.com/api/file/downloadByFileSystemAccessId/8579706381320323072"
+
+
 TPS54331_ADJUSTABLE = _tps54331_buck(
-    recipe="tps54331-adjustable@2",
+    recipe="tps54331-adjustable@4",
     family="tps54331-adjustable",
     exact_part="TPS54331DDAR",
     output_voltage=3.3,
     rated_output_current_a=0.5,
+    standard_fab_land=True,
     inductor=_part(
         "inductor", "L", "15uH FXL0630-150-M", "inductor-15uh-3a:FXL0630-150-M",
         "inductor-15uh-3a:IND-SMD_L7.0-W6.6_FXL0630", mpn="FXL0630-150-M",
         datasheet="https://datasheet.lcsc.com/datasheet/pdf/40dfb6cb4606b2ccaa4e89438a42f563.pdf?productCode=C177243",
     ),
     input_cap=_catalog_cap("input_cap", "4.7uF 50V X7R", quantity=2),
+    input_hf_cap=_part(
+        "input_hf_cap", "C", "10nF 50V X7R, GCM188R71H103KA37D", *_C,
+        mpn="GCM188R71H103KA37D", datasheet=_TPS54331_3V3_HF_DATASHEET,
+    ),
     output_cap=_catalog_cap("output_cap", "47uF 25V X5R", quantity=2),
     feedback_top="10.2k 1%",
     feedback_bottom="3.24k 1%",
     comp_resistor="29.4k 1%",
-    comp_capacitor="1nF 50V C0G",
+    comp_capacitor=_part(
+        "comp_capacitor", "C", "1nF 50V C0G, CL10C102JB8NNNC", *_C,
+        mpn="CL10C102JB8NNNC", datasheet=_TPS54331_3V3_COMP_DATASHEET,
+    ),
     comp_hf_capacitor="47pF 50V C0G",
     source_documents=(
         *_source("https://www.ti.com/lit/ds/symlink/tps54331.pdf", "TPS54331 datasheet", "Sections 6.1, 6.3, 6.5, 8.2.2.5--8.2.2.10 and 8.4"),
+        *_source("https://www.ti.com/lit/ds/symlink/tps54331.pdf", "TPS54331 SLVS839H",
+                 "§8.4.1 p.25: ground plane and adjacent heat-spreading vias",
+                 "pp.35–37: DDA outline 4202561/F, package paddle 4206322-5/L, "
+                 "and land/stencil drawing 4208951-5/D; 0.127 mm stencil",
+                 reviewed_date="2026-11-19"),
         *_source("https://www.ti.com/lit/ug/slvu247a/slvu247a.pdf", "TPS54331EVM-232", "Tables 1-1, 1-2 and 4-1"),
         *_source("https://datasheet.lcsc.com/datasheet/pdf/40dfb6cb4606b2ccaa4e89438a42f563.pdf?productCode=C177243", "Cjiang FXL series", "FXL0630 electrical table and dimensions"),
+        *_source(_TPS54331_3V3_HF_DATASHEET, "Murata GCM series",
+                 "GCM188R71H103KA37D/C85863: 0603, 10 nF ±10%, 50 V, X7R",
+                 reviewed_date="2026-11-19"),
+        *_source(_TPS54331_3V3_COMP_DATASHEET, "Samsung CL10C102JB8NNN series",
+                 "CL10C102JB8NNNC/C163508: 0603, 1 nF ±5%, 50 V, C0G",
+                 reviewed_date="2026-11-19"),
     ),
     assertions=(
         Assertion(code="tps54331_3v3_input_envelope", message=(
@@ -1551,10 +1596,119 @@ TPS54331_ADJUSTABLE = _tps54331_buck(
         )),
         Assertion(code="tps54331_3v3_layout_validation", message=(
             "Place input ceramics and B340A catch diode close to VIN/PH/GND, bootstrap 100 nF between BOOT and PH, output bank at the inductor, and C3 module decoupling at its supply pins. "
-            "Bond the PowerPAD to GND with thermal vias. Check output ripple, C3 RF transmit steps, startup, thermal rise and EMI on the actual board; none is measured here."
+            "Solder PowerPAD 9 to the mask-defined ground land and connect the filled ground "
+            "planes through an adjacent plated via outside the assembly apertures. The local "
+            "4 mm / 4 mm² per-face checks verify CAD spreading continuity, not thermal resistance, "
+            "0.5 A performance, or a finished-board rating. Verify transients, thermal rise and EMI."
         )),
     ),
 )
+TPS54331_ADJUSTABLE = TPS54331_ADJUSTABLE.model_copy(update={
+    "placement_constraints": (*TPS54331_ADJUSTABLE.placement_constraints,
+        Placement(kind="thermal_current_path", role="converter", parameters={
+            "outer_copper_oz": 1.0, "dual_layer_ground": True,
+            "local_radius_mm": 4.0, "minimum_local_ground_area_mm2": 4.0,
+        })),
+})
+
+
+TPS54331_3V3_SHUNT_CONTROLS = TPS54331_ADJUSTABLE.model_copy(update={
+    "recipe": "tps54331-3v3-shunt-controls@3",
+    "family": "tps54331-3v3-shunt-controls",
+    # It is a circuit selector, not a second exact ordering-code selector
+    # for the same IC; the converter group still pins TPS54331DDAR.
+    "exact_part": None,
+    "protected_aliases": ("tps54331-3v3-shunt-controls",),
+    "identity_aliases": (),
+    "parameter_defaults": {**TPS54331_ADJUSTABLE.parameter_defaults, "reset_control": False},
+    "allowed_parameters": {
+        **TPS54331_ADJUSTABLE.allowed_parameters, "reset_control": (False, True),
+    },
+    "ports": (
+        Port(name="input", direction="power", supply_voltage_range_v=(18.0, 28.0)),
+        Port(name="gnd", direction="power"),
+        Port(name="output", direction="power"),
+    ),
+    "internal_nets": (*TPS54331_ADJUSTABLE.internal_nets, "enable_bias1", "enable_bias2"),
+    "parts": (
+        *(part for part in TPS54331_ADJUSTABLE.parts if part.role != "enable_jumper"),
+        Group(role="enable_bias_top", reference_prefix="R", quantity=3, value="10k 1%",
+              symbol=_R[0], footprint=_R[1], sheet_role="power", mpn="0603WAF1002T5E",
+              datasheet=_UNIROYAL_0603_DATASHEET),
+        Group(role="enable_bias_bottom", reference_prefix="R", value="5.9k 1%",
+              symbol=_R[0], footprint=_R[1], sheet_role="power", mpn="0603WAF5901T5E",
+              datasheet=_UNIROYAL_0603_DATASHEET),
+        Group(role="enable_jumper", reference_prefix="JP", value="EN DISABLE",
+              symbol="Connector_Generic:Conn_01x02",
+              footprint="Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical",
+              sheet_role="power", mpn="TSW-102-07-G-S",
+              datasheet="https://www.samtec.com/products/tsw-102-07-g-s",
+              accessories=(BOMAccessory(mpn="SNT-100-BL-G", lcsc="C6680974",
+                                        datasheet="https://www.lcsc.com/datasheet/C6680974.pdf"),)),
+        Group(role="reset_button", reference_prefix="SW", value="RESET",
+              symbol="kmr232ngulclfs:KMR232NGULCLFS", footprint="kmr232ngulclfs:KMR232NGULCLFS",
+              sheet_role="power", mpn="KMR232NGULCLFS",
+              datasheet="https://datasheet.lcsc.com/datasheet/pdf/b5da7fd4e81211d634f1332fb1486a1f.pdf"),
+    ),
+    "pins": (
+        *TPS54331_ADJUSTABLE.pins,
+        *(Pin(role="enable_bias_top", index=index, pin=pin, net=net)
+          for index, (first, second) in enumerate(zip(
+              ("input", "enable_bias1", "enable_bias2"),
+              ("enable_bias1", "enable_bias2", "enable"), strict=True,
+          ))
+          for pin, net in (("1", first), ("2", second))),
+        Pin(role="enable_bias_bottom", pin="1", net="enable"),
+        Pin(role="enable_bias_bottom", pin="2", net="gnd"),
+        Pin(role="reset_button", pin="1", net="enable"),
+        Pin(role="reset_button", pin="2", net="gnd"),
+    ),
+    "source_documents": (
+        *TPS54331_ADJUSTABLE.source_documents,
+        *_source("https://www.ti.com/lit/ds/symlink/tps54331.pdf",
+                 "TPS54331 SLVS839H", "Table 5-1; §§6.1, 6.5, 7.3.4 and 7.3.5: EN/UVLO and slow start"),
+        *_source("https://datasheet.lcsc.com/datasheet/pdf/b5da7fd4e81211d634f1332fb1486a1f.pdf",
+                 "C&K KMR2 NG", "SPST-NO; ULC minimum 1 µA at 1.8 V; maximum 32 V / 50 mA"),
+        *_source("https://www.samtec.com/products/tsw-102-07-g-s", "Samtec TSW", "Mating SNT shunt"),
+        *_source("https://www.lcsc.com/datasheet/C6680974.pdf", "Samtec SNT", "Removable shunt"),
+        *_source(_UNIROYAL_0603_DATASHEET, "UniRoyal 0603 thick-film resistors",
+                 "§§2,5–7,9,11: C25804 and C23071, ±1%, ±100 ppm/°C, "
+                 "0.1 W through 70°C then derated; working voltage limited by power and 75 V",
+                 reviewed_date="2026-11-19"),
+    ),
+    "electrical_assertions": (
+        *(row for row in TPS54331_ADJUSTABLE.electrical_assertions
+          if row.code not in {"tps54331_enable_safe_states", "tps54331_3v3_input_envelope"}),
+        Assertion(code="tps54331_local_shunt_states", message=(
+            "For 18–28 V at VIN, three series 10k 1% resistors above 5.9k 1% bias EN "
+            "from the unswitched input. Over −40…+85 °C, resistance tolerance, ±100 ppm/°C "
+            "and a conservative ±100 µA EN pin-current bound give 2.39–5.23 V open: "
+            "above the 1.35 V maximum enable threshold and below the 6 V absolute maximum. "
+            "A fitted shunt or held reset independently grounds EN. A sole closed contact "
+            "carries approximately 0.49–1.05 mA; each upper resistor drops under 10 V "
+            "and dissipates under 10 mW. The reset switch is the 1 µA / 1.8 V ULC variant. "
+            "With the disable shunt removed, releasing reset permits the reviewed slow "
+            "start. The converter stops switching while held; output discharge time "
+            "depends on fitted load and capacitance. No measured performance, surge "
+            "immunity, or guaranteed power-cycle timing is claimed."
+        )),
+    ),
+})
+
+
+def expand_tps54331_shunt_controls(resolved):
+    from .registry import expand_static_definition
+
+    disabled = {
+        role for parameter, role in (
+            ("enable_control", "enable_jumper"), ("reset_control", "reset_button"),
+        ) if resolved.parameters[parameter] is not True
+    }
+    definition = TPS54331_3V3_SHUNT_CONTROLS.model_copy(update={
+        "parts": tuple(group for group in TPS54331_3V3_SHUNT_CONTROLS.parts if group.role not in disabled),
+        "pins": tuple(pin for pin in TPS54331_3V3_SHUNT_CONTROLS.pins if pin.role not in disabled),
+    })
+    return expand_static_definition(definition, resolved)
 
 
 YLPTEC_K7803M_1000R3 = _power_recipe(
@@ -1728,7 +1882,7 @@ TPS54331_12V_1A = _tps54331_buck(
     feedback_top="140k 1%",
     feedback_bottom="10k 1%",
     comp_resistor="255k 1%",
-    comp_capacitor="680pF 50V C0G",
+    comp_capacitor=_catalog_cap("comp_capacitor", "680pF 50V C0G"),
     comp_hf_capacitor="22pF 50V C0G",
     source_documents=_source(
         "https://www.ti.com/lit/ds/symlink/tps54331.pdf",
@@ -3000,6 +3154,7 @@ WAVE_B_POWER_RECIPES = (
     AP63203_3V3,
     AP63205_5V,
     TPS54331_ADJUSTABLE,
+    TPS54331_3V3_SHUNT_CONTROLS,
     YLPTEC_K7803M_1000R3,
     K7803M_3V3_REVERSE_BLOCKED,
     TPS54331_12V_1A,

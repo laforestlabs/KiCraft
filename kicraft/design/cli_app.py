@@ -7149,6 +7149,50 @@ def _canonical_usb_for_config(state, config: dict) -> list[dict]:
     return canonical
 
 
+def _verify_qualified_delivery(pcb: Path, routed: Path, project_dir: Path) -> dict | None:
+    """Recheck selected qualified instances after every delivery-side mutation."""
+    from kicraft.leaf_library.qualification import check_composed_geometry
+
+    metadata_path = routed.with_name("metadata.json")
+    has_requests = (project_dir / ".kicraft" / "qualified-leaf-requests.json").is_file()
+    if not metadata_path.is_file():
+        if has_requests:
+            raise ValueError("selected parent lacks qualified geometry custody metadata")
+        return None
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    receipt = metadata.get("validation", {}).get("qualified_block_preservation")
+    if "qualified_geometry" not in metadata:
+        if has_requests or receipt is not None:
+            raise ValueError("selected parent lacks qualified geometry expectations")
+        return None
+    expected = metadata["qualified_geometry"]
+    if not isinstance(expected, list):
+        raise ValueError("selected parent has malformed qualified geometry expectations")
+    if not expected and receipt is None:
+        return None
+    if not isinstance(receipt, dict) or receipt.get("accepted") is not True:
+        raise ValueError("selected parent lacks an accepted qualified preservation receipt")
+    if receipt.get("pcb_sha256") != hashlib.sha256(routed.read_bytes()).hexdigest():
+        raise ValueError("selected parent changed after qualified geometry verification")
+
+    def identities(rows):
+        result = []
+        for row in rows:
+            values = tuple(row.get(key) for key in (
+                "instance_path", "entry", "identity", "content_hash",
+            ))
+            if not all(isinstance(value, str) and value for value in values):
+                raise ValueError("qualified instance custody identity is incomplete")
+            result.append(values)
+        if len(result) != len(set(result)):
+            raise ValueError("qualified instance custody contains duplicate identities")
+        return set(result)
+
+    if identities(expected) != identities(receipt.get("instances", [])):
+        raise ValueError("qualified instances differ from the selected parent receipt")
+    return check_composed_geometry(pcb, expected)
+
+
 def _promote_verify_fab(
     state,
     state_path: Path,
@@ -7306,11 +7350,17 @@ def _promote_verify_fab(
     # rediscover another round's placement or infer ownership from locked copper.
     cleanup_path = pcb.with_suffix(".escape-cleanup.receipt.json")
     try:
-        from kicraft.autoplacer.brain.escape_cleanup import cleanup_signal_escapes
-        cleanup_receipt = cleanup_signal_escapes(
-            pcb, Path(str(routed) + ".escape_ownership.json"), cleanup_path,
+        from kicraft.autoplacer.brain.escape_cleanup import (
+            cleanup_signal_escapes, finish_boundary_escape_landings,
         )
-        cleanup_receipt["ok"] = cleanup_receipt.get("accepted") is True
+        ownership_path = Path(str(routed) + ".escape_ownership.json")
+        cleanup_receipt = cleanup_signal_escapes(pcb, ownership_path, cleanup_path)
+        boundary_landings = finish_boundary_escape_landings(pcb, ownership_path, cleanup_receipt)
+        if boundary_landings:
+            cleanup_receipt["boundary_landings"] = boundary_landings
+        cleanup_receipt["ok"] = (
+            cleanup_receipt.get("accepted") is True and boundary_landings.get("accepted") is not False
+        )
     except Exception as exc:
         cleanup_receipt = {"ok": False, "error": str(exc)}
         print(f"[build]     signal escape cleanup unverified ({exc})", file=sys.stderr)
@@ -7401,6 +7451,19 @@ def _promote_verify_fab(
     if config_error:
         gate["fab_acceptable"] = False
         gate.setdefault("reasons", []).append(config_error)
+    try:
+        qualified_delivery = _verify_qualified_delivery(pcb, routed, project_dir)
+        if qualified_delivery is not None:
+            gate["qualified_block_preservation"] = qualified_delivery
+            if qualified_delivery.get("accepted") is not True:
+                gate["fab_acceptable"] = False
+                gate.setdefault("reasons", []).append(
+                    "qualified block geometry changed in the delivered board"
+                )
+    except Exception as exc:
+        gate["qualified_block_preservation"] = {"accepted": False, "error": str(exc)}
+        gate["fab_acceptable"] = False
+        gate.setdefault("reasons", []).append(f"qualified block delivery unverified: {exc}")
     # Recheck promoted native geometry, never just requested router settings.
     try:
         specs = config.get("local_bypasses", [])
@@ -7411,16 +7474,16 @@ def _promote_verify_fab(
                 raise ValueError("autoplacer config lacks current recipe local contracts; regenerate synthesis")
         thermal_requirements = _canonical_thermal_for_config(state, config, do_fab=do_fab)
         config["thermal_requirements"] = thermal_requirements
+        from kicraft.autoplacer.fab_profile import requires_two_ounce
         from kicraft.pcb_layers import has_two_ounce_outer_stackup
         heavy_copper = has_two_ounce_outer_stackup(pcb)
-        if thermal_requirements and not heavy_copper:
+        if requires_two_ounce(config) and not heavy_copper:
             raise ValueError("required 2 oz outer copper stackup is absent")
         if heavy_copper:
             from kicraft.autoplacer.fab_profile import fab_floors, require_two_ounce_project_rules
             from kicraft.autoplacer.routing_board import require_copper_min_width, require_two_ounce_holes
-            physical_cfg = {**config, "thermal_requirements": thermal_requirements or [
-                {"outer_copper_oz": 2.0}
-            ]}
+            # Fabrication floors follow actual copper, not a lower contract minimum.
+            physical_cfg = {**config, "thermal_requirements": [{"outer_copper_oz": 2.0}]}
             require_two_ounce_project_rules(pcb.with_suffix(".kicad_pro"), physical_cfg)
             require_copper_min_width(pcb, fab_floors(physical_cfg)["track_mm"])
             require_two_ounce_holes(pcb)
@@ -8207,10 +8270,10 @@ def _layout_route_fab_impl(
                 raise ValueError("required silk reservations are stale; regenerate synthesis")
         thermal = _canonical_thermal_for_config(state, config, do_fab=do_fab)
         if thermal:
-            from kicraft.autoplacer.fab_profile import require_two_ounce_project_rules
+            from kicraft.autoplacer.fab_profile import requires_two_ounce, require_two_ounce_project_rules
             from kicraft.pcb_layers import has_two_ounce_outer_stackup
             config["thermal_requirements"] = thermal
-            if not has_two_ounce_outer_stackup(pcb):
+            if requires_two_ounce(config) and not has_two_ounce_outer_stackup(pcb):
                 raise ValueError("required 2 oz outer copper stackup is absent before layout")
             require_two_ounce_project_rules(pcb.with_suffix(".kicad_pro"), config)
         if route and usb_contracts:

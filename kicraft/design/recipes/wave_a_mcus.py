@@ -1530,6 +1530,7 @@ CH32V003F4P6_MINIMAL = RecipeDefinition(
     protected_aliases=("CH32V003", "CH32V003F4P6"),
     identity_aliases=("ch32v003f4p6", "ch32v003f4p6:CH32V003F4P6"),
     required_sheet_roles=("mcu",),
+    local_reset_aliases=("nrst", "reset", "input_reset"),
     parameter_defaults={"logic_voltage_v": 3.3, "consumer_input_max_v": 3.3},
     allowed_parameters={
         "logic_voltage_v": (3.3,),
@@ -1655,6 +1656,7 @@ CH32V003F4U6_MINIMAL = RecipeDefinition(
     protected_aliases=("CH32V003", "CH32V003F4U6"),
     identity_aliases=("ch32v003f4u6", "ch32v003f4u6:CH32V003F4U6"),
     required_sheet_roles=("mcu",),
+    local_reset_aliases=("nrst", "reset", "input_reset"),
     parameter_defaults={"logic_voltage_v": 3.3, "consumer_input_max_v": 3.3},
     allowed_parameters={
         "logic_voltage_v": (3.3,),

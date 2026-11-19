@@ -141,3 +141,56 @@ def test_no_hub_no_split() -> None:
                         power_nets=["VDD", "GND"], inter_sheet_nets=[])
     bom = BOM(parts=parts, connections=conns)
     assert split_dense_soc_sheets(bom, arch) == []
+
+
+def _owned_board():
+    from kicraft.design.models import CircuitRequirement, RecipeOwnershipManifest, RecipeSelection
+
+    parts = [_part(ref) for ref in ("U1", "C1", "SW1", "R1")]
+    parts[2].lowering_requirement_id = parts[3].lowering_requirement_id = "control"
+    bom = BOM(
+        parts=parts,
+        connections=[_conn("CONTROL", "U1", "SW1"), _conn("GND", "C1", "R1")],
+        recipe_ownership=[RecipeOwnershipManifest(
+            recipe="test-core@1", instance="core", refs=["U1", "C1"],
+            requirement_ids=["core"],
+        )],
+    )
+    arch = Architecture(
+        sheets=[Sheet(name=SHEET, stem=SHEET, function="mixed")],
+        power_nets=["GND"], inter_sheet_nets=[],
+        requirements=[
+            CircuitRequirement(id="core", sheet=SHEET, role="mcu_core", family="test-core"),
+            CircuitRequirement(id="control", sheet=SHEET, role="user_io", family="switch-input"),
+        ],
+        recipe_selections=[RecipeSelection(
+            recipe="test-core@1", instance="core", sheets={"mcu": SHEET},
+            requirement_ids=["core"],
+        )],
+    )
+    return bom, arch
+
+
+def test_owned_partition_preserves_wiring_and_complete_support():
+    from kicraft.design.synthesis.sheet_partition import isolate_owned_blocks
+    from kicraft.design.synthesis.validation import check_inter_sheet_nets_realized
+
+    bom, arch = _owned_board()
+    before = {(c.net_name, ep.ref, ep.pin) for c in bom.connections for ep in c.endpoints}
+    isolate_owned_blocks(bom, arch)
+    sheets = {part.ref: part.sheet for part in bom.parts}
+    assert sheets["U1"] == sheets["C1"]
+    assert sheets["SW1"] == sheets["R1"] != sheets["U1"]
+    assert next(req for req in arch.requirements if req.id == "control").sheet == sheets["SW1"]
+    assert {(c.net_name, ep.ref, ep.pin) for c in bom.connections for ep in c.endpoints} == before
+    assert check_inter_sheet_nets_realized(arch, bom).ok
+    assert isolate_owned_blocks(bom, arch) == []
+
+
+def test_owned_partition_keeps_private_copper_boundary_indivisible():
+    from kicraft.design.synthesis.sheet_partition import isolate_owned_blocks
+
+    bom, arch = _owned_board()
+    bom.recipe_ownership[0].internal_nets = ["CONTROL"]
+    assert isolate_owned_blocks(bom, arch) == []
+    assert {part.sheet for part in bom.parts} == {SHEET}

@@ -31,6 +31,7 @@ class CompositionEntry:
     trace_count: int
     via_count: int
     anchor_count: int
+    qualified_reuse: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -50,6 +51,7 @@ class CompositionEntry:
             "trace_count": self.trace_count,
             "via_count": self.via_count,
             "anchor_count": self.anchor_count,
+            "qualified_reuse": self.qualified_reuse,
         }
 
 
@@ -106,6 +108,7 @@ class ParentCompositionState:
     composition_notes: list[str] = field(default_factory=list)
     composition: ParentComposition | None = None
     copper_manifest: CopperManifest | None = None
+    qualified_geometry: list[dict[str, Any]] = field(default_factory=list)
     # Keep-in rects around parent-local locked components (e.g. mounting
     # holes) that must be stamped onto the parent board as rule-area
     # keep-outs so the autorouter cannot route tracks or place vias through
@@ -116,6 +119,8 @@ class ParentCompositionState:
     # are expected to extend beyond the board outline (e.g. USB-C shell);
     # the geometry validator must only flag them when pads fall outside.
     edge_constrained_refs: frozenset[str] = field(default_factory=frozenset)
+    # World-space native courtyard/pad extents, without synthetic silk reserves.
+    native_component_rects: dict[str, tuple[Point, Point]] = field(default_factory=dict)
     # Fabrication-only terminals intentionally straddle Edge.Cuts (castellations).
     # Their pad copper is exempt from ordinary containment but remains subject to
     # the dedicated final edge-datum/pitch gate.

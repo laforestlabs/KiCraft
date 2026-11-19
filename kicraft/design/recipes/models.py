@@ -9,6 +9,7 @@ from typing import Callable, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from kicraft.design.models import (
+    BOMAccessory,
     BomPart,
     EdgeInterface,
     JsonScalar,
@@ -36,6 +37,7 @@ class RecipeComponentGroup(BaseModel):
     mpn: str | None = None
     datasheet: str | None = None
     sourcing_note: str | None = None
+    accessories: tuple[BOMAccessory, ...] = ()
 
 
 class RecipePinSpec(BaseModel):
@@ -170,6 +172,9 @@ class RecipeDefinition(BaseModel):
     # Reviewed protocols served by a physical external interface, not merely
     # by an onboard load or an arbitrary part name.
     external_interface_protocols: tuple[str, ...] = ()
+    # These intent endpoint aliases request a reset already built inside this
+    # recipe. They are not externally bindable application GPIOs.
+    local_reset_aliases: tuple[str, ...] = ()
     # Optional MCU-only mapping for ports whose documented peripheral function
     # is selected only when the architecture binds it.  The allocator reserves
     # these pads only for bound ports, so a muxed ADC/GPIO function can remain
@@ -187,6 +192,13 @@ class RecipeDefinition(BaseModel):
     @model_validator(mode="after")
     def _default_ties_name_another_port(self):
         names = {port.name for port in self.ports}
+        if self.local_reset_aliases and (
+            names.intersection(self.local_reset_aliases)
+            or not any(group.role == "reset_button" for group in self.parts)
+            or not any(pin.role == "reset_button" and pin.net in self.internal_nets
+                       for pin in self.pins)
+        ):
+            raise ValueError(f"recipe {self.recipe} local reset must remain recipe-owned")
         if self.pass_through:
             power_ports = {port.name for port in self.ports if port.direction == "power"}
             if not {"input", "output"} <= power_ports:
@@ -243,3 +255,4 @@ class RecipeExpansion(BaseModel):
 class RegisteredRecipe:
     definition: RecipeDefinition
     expand: Callable[[ResolvedRecipeSelection], RecipeExpansion] | None = None
+    selectable: bool = True

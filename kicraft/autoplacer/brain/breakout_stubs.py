@@ -79,6 +79,9 @@ class BreakoutSpec:
         stamping this spec. Required for perimeter power ties: their copper is
         optional, so it must detour or be omitted rather than use the dense-row
         escape exception.
+    via_exit:
+        Required ``(end_xy, width_mm)`` launch from the tip via on the
+        opposite outer face. Stamp the dog-bone and launch together or neither.
     via_outside_smd_pads:
         Keep the entire tip via clear of all SMD solder lands, including
         same-net lands. Used for ordinary ground-return dogbones.
@@ -109,6 +112,7 @@ class BreakoutSpec:
     strict_same_footprint: bool = False
     via_outside_smd_pads: bool = False
     short_fanout_fallback: bool = False
+    via_exit: tuple[tuple[float, float], float] | None = None
 
 
 def _find_pad(
@@ -785,7 +789,7 @@ def add_breakout_stubs(
     board = pcbnew.LoadBoard(pcb_path)
     from kicraft.autoplacer.hardware.history_geometry import capture_board
     capture_board(board, phase="guarded_breakout_input")
-    if any(spec.via_outside_smd_pads for spec in specs):
+    if any(spec.via_outside_smd_pads or spec.via_exit is not None for spec in specs):
         from kicraft.autoplacer.brain.gnd_pour import _board_edge_geometry
 
         via_edge_geometry = _board_edge_geometry(board)
@@ -830,11 +834,14 @@ def add_breakout_stubs(
     hole_min_mm = _h2h if _h2h > 0 else float(cfg.get("hole_to_hole_min_mm", 0.25))
     holes: list[tuple[float, float, float]] = []
     via_pts: list[tuple[int, float, float]] = []
+    via_holes: list[tuple[int, float, float, float]] = []
     for t in board.GetTracks():
         if t.GetClass() == "PCB_VIA":
             p = t.GetPosition()
             x_mm, y_mm = pcbnew.ToMM(p.x), pcbnew.ToMM(p.y)
-            holes.append((x_mm, y_mm, pcbnew.ToMM(t.GetDrillValue()) / 2.0))
+            drill_r = pcbnew.ToMM(t.GetDrillValue()) / 2.0
+            holes.append((x_mm, y_mm, drill_r))
+            via_holes.append((t.GetNetCode(), x_mm, y_mm, drill_r))
             via_pts.append((t.GetNetCode(), x_mm, y_mm))
     for _fp in board.GetFootprints():
         for _p in _fp.Pads():
@@ -851,6 +858,9 @@ def add_breakout_stubs(
 
     def _pt(xy: tuple[float, float]):
         return pcbnew.VECTOR2I(pcbnew.FromMM(xy[0]), pcbnew.FromMM(xy[1]))
+
+    def _xy(position):
+        return [pcbnew.ToMM(position.x), pcbnew.ToMM(position.y)]
 
     for spec in specs:
         if spec.start_xy is not None:
@@ -896,26 +906,27 @@ def add_breakout_stubs(
             hole_clearance_mm=hole_clearance_mm,
         )
 
-        def _track_hits_keepout(points: list[tuple[float, float]]) -> bool:
+        def _track_hits_keepout(points, copper_layer=layer, radius=half_width_mm) -> bool:
             return any(
-                track_intersects_rule_area(a, b, half_width_mm, area)
+                track_intersects_rule_area(a, b, radius, area)
                 for a, b in zip(points, points[1:])
                 for area in rule_areas
-                if area.zone.IsOnLayer(layer)
+                if area.zone.IsOnLayer(copper_layer)
             )
 
         def _via_hits_keepout(xy: tuple[float, float]) -> bool:
             return any(via_intersects_rule_area(xy, via_r_mm, area) for area in rule_areas)
 
-        def _conflicts_with_copper(points: list[tuple[float, float]]) -> bool:
+        def _conflicts_with_copper(
+            points, copper_layer=layer, radius=half_width_mm,
+            *, clearance=src_cl_mm, guard=0.0,
+        ) -> bool:
             """True when the path runs too close to other-net stamped/board copper."""
             for a, b in zip(points, points[1:]):
                 for o_net, o_a, o_b, o_hw, o_cl, o_layer in stamped:
-                    if o_net == net_code:
+                    if o_net == net_code or (o_layer is not None and o_layer != copper_layer):
                         continue
-                    if o_layer is not None and o_layer != layer:
-                        continue
-                    need = max(floor_mm, src_cl_mm, o_cl) + half_width_mm + o_hw
+                    need = max(floor_mm, clearance, o_cl) + radius + o_hw + guard
                     if _seg_seg_dist_mm(a, b, o_a, o_b) < need:
                         return True
             return False
@@ -941,8 +952,9 @@ def add_breakout_stubs(
             """A same-net via already sits under the stub end: the plane bond
             exists, so stamp the track but not a duplicate via (two shield
             legs tying to the same SMD pad is the common case)."""
+            redundancy_radius = 0.000002 if spec.via_exit is not None else via_r_mm
             return any(
-                n == net_code and ((xy[0] - vx) ** 2 + (xy[1] - vy) ** 2) ** 0.5 <= via_r_mm
+                n == net_code and math.hypot(xy[0] - vx, xy[1] - vy) <= redundancy_radius
                 for n, vx, vy in via_pts
             )
 
@@ -956,10 +968,11 @@ def add_breakout_stubs(
             radius = int(pcbnew.FromMM(via_r_mm))
             if _via_hits_smd_pad(board, point, radius, authorized_net=net_code):
                 return False
-            if spec.via_outside_smd_pads and not _via_clears_board_edge(
-                point.x, point.y, edge_geometry=via_edge_geometry, via_radius_iu=radius
-            ):
-                return False
+            if spec.via_outside_smd_pads or (spec.via_exit is not None and inner_box is not None):
+                if not _via_clears_board_edge(
+                    point.x, point.y, edge_geometry=via_edge_geometry, via_radius_iu=radius
+                ):
+                    return False
             if not _point_clears_obstacles(via_obs, xy[0], xy[1]):
                 return False
             for o_net, o_a, o_b, o_hw, o_cl, _o_layer in stamped:
@@ -1107,13 +1120,53 @@ def add_breakout_stubs(
             summary["skipped"].append(f"{spec.ref}.{spec.pad}:off_board")
             continue
 
+        exit_points = None
+        if spec.via_exit is not None:
+            exit_end, exit_width_mm = spec.via_exit
+            exit_layer = pcbnew.B_Cu if layer == pcbnew.F_Cu else pcbnew.F_Cu
+            exit_width = pcbnew.FromMM(max(exit_width_mm, default_w))
+            exit_radius = pcbnew.ToMM(exit_width) / 2
+            exit_clearance = _own_clearance_mm(pad, exit_layer, floor_mm)
+            exit_points = [points[-1], exit_end]
+            exit_obs, _ = _foreign_pad_margins(
+                board, pad, floor_mm=floor_mm, half_width_mm=exit_radius,
+                layer_id=exit_layer, strict_same_fp=True, hole_clearance_mm=hole_clearance_mm,
+            )
+            # Check the whole capsule against cutouts as well as the outer
+            # contour; endpoint-only box checks can overrun a rounded edge.
+            exit_off_board = inner_box is not None and (
+                via_edge_geometry is None
+                or not via_edge_geometry["polygon"].Contains(_pt(exit_end))
+                or any(
+                    _seg_seg_dist_mm(*exit_points, (pcbnew.ToMM(ax), pcbnew.ToMM(ay)),
+                                     (pcbnew.ToMM(bx), pcbnew.ToMM(by)))
+                    < pcbnew.ToMM(via_edge_geometry["clearance_iu"]) + exit_radius
+                    for ax, ay, bx, by in via_edge_geometry["segments"]
+                )
+            )
+            if (not spec.via_at_end or exit_off_board
+                or not _segment_clears_obstacles(exit_obs, *exit_points)
+                or _track_hits_keepout(exit_points, exit_layer, exit_radius)
+                or _conflicts_with_copper(
+                    exit_points, exit_layer, exit_radius,
+                    clearance=exit_clearance, guard=STAMP_CLEARANCE_GUARD_MM,
+                )
+                or any(
+                    n != net_code and _seg_seg_dist_mm(*exit_points, (x, y), (x, y))
+                    < exit_radius + drill_r + hole_clearance_mm
+                    for n, x, y, drill_r in via_holes
+                )):
+                summary["skipped"].append(f"{spec.ref}.{spec.pad}:via_exit_blocked")
+                continue
+
         owned_items = []
-        for a, b in zip(points, points[1:]):
+
+        def _stamp_track(a, b, track_layer, track_width, clearance_mm):
             track = pcbnew.PCB_TRACK(board)
             track.SetStart(_pt(a))
             track.SetEnd(_pt(b))
-            track.SetWidth(width)
-            track.SetLayer(layer)
+            track.SetWidth(track_width)
+            track.SetLayer(track_layer)
             track.SetNetCode(net_code)
             if lock:
                 track.SetLocked(True)
@@ -1121,12 +1174,15 @@ def add_breakout_stubs(
             if signal_escape_owner:
                 owned_items.append({
                     "uuid": track.m_Uuid.AsString(), "kind": "track",
-                    "net": pad.GetNetname(), "layer": spec.layer,
-                    "start_mm": list(a), "end_mm": list(b),
-                    "width_mm": pcbnew.ToMM(width),
+                    "net": track.GetNetname(), "layer": board.GetLayerName(track.GetLayer()),
+                    "start_mm": _xy(track.GetStart()), "end_mm": _xy(track.GetEnd()),
+                    "width_mm": pcbnew.ToMM(track.GetWidth()),
                 })
             summary["segments"] += 1
-            stamped.append((net_code, a, b, half_width_mm, src_cl_mm, layer))
+            stamped.append((net_code, a, b, pcbnew.ToMM(track_width) / 2, clearance_mm, track_layer))
+
+        for a, b in zip(points, points[1:]):
+            _stamp_track(a, b, layer, width, src_cl_mm)
 
         if spec.via_at_end and not _via_redundant(points[-1]):
             via = pcbnew.PCB_VIA(board)
@@ -1141,10 +1197,14 @@ def add_breakout_stubs(
                 via.SetLocked(True)
             board.Add(via)
             if signal_escape_owner:
+                try:
+                    native_width = via.GetWidth(pcbnew.F_Cu)
+                except TypeError:
+                    native_width = via.GetWidth()
                 owned_items.append({
                     "uuid": via.m_Uuid.AsString(), "kind": "via",
-                    "net": pad.GetNetname(), "position_mm": list(points[-1]),
-                    "size_mm": via_size_mm, "drill_mm": via_drill_size_mm,
+                    "net": via.GetNetname(), "position_mm": _xy(via.GetPosition()),
+                    "size_mm": pcbnew.ToMM(native_width), "drill_mm": pcbnew.ToMM(via.GetDrill()),
                 })
             summary["vias"] += 1
             # Later specs must respect this via: its hole (hole-to-hole), its
@@ -1153,6 +1213,9 @@ def add_breakout_stubs(
             holes.append((points[-1][0], points[-1][1], via_drill_r_mm))
             stamped.append((net_code, points[-1], points[-1], via_r_mm, src_cl_mm, None))
             via_pts.append((net_code, points[-1][0], points[-1][1]))
+            via_holes.append((net_code, points[-1][0], points[-1][1], via_drill_r_mm))
+        if exit_points is not None:
+            _stamp_track(*exit_points, exit_layer, exit_width, exit_clearance)
 
         if signal_escape_owner:
             summary["owned_signal_escapes"].append({

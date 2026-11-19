@@ -976,6 +976,19 @@ class ExternalADCContract(BaseModel):
     rate_or_accuracy_promised: Literal[False] = False
 
 
+class PowerOutputHeaderContract(BaseModel):
+    """Compiler-proven source and reference for one two-contact 5 V output."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    header_requirement: str
+    source_requirement: str
+    source_port: str
+    source_return_port: str
+    rail: str
+    ground: str
+
+
 class Architecture(BaseModel):
     model_config = ConfigDict(allow_inf_nan=False)
 
@@ -994,6 +1007,7 @@ class Architecture(BaseModel):
     standard_form_factor: str | None = None
     recipe_selections: list[RecipeSelection] = Field(default_factory=list)
     external_adc_contracts: list[ExternalADCContract] = Field(default_factory=list)
+    power_output_header_contracts: list[PowerOutputHeaderContract] = Field(default_factory=list)
     requirements: list[CircuitRequirement] = Field(default_factory=list)
     # Canonical original facts survive recipe resolution and all later stage normalization. The
     # compiler writes them from the committed intent/spec set; each owner-requiring row was named

@@ -32,6 +32,7 @@ import traceback as _traceback
 import pcbnew
 
 from kicraft.autoplacer.hardware._pad_nets import propagate_pad_nets
+from kicraft.autoplacer.hardware.escape_receipt import write_escape_receipt
 from kicraft.autoplacer.hardware.silk_refdes import legalize_refdes
 
 
@@ -199,6 +200,7 @@ def main(argv: list[str]) -> int:
         except Exception:
             return 0
 
+    _escape_owners = {}
     for _t in _traces:
         _s = pcbnew.PCB_TRACK(board)
         _s.SetStart(
@@ -217,6 +219,8 @@ def main(argv: list[str]) -> int:
         if _nc > 0:
             _s.SetNetCode(_nc)
         board.Add(_s)
+        if owner := _t.get("escape_ownership"):
+            _escape_owners[_s.m_Uuid.AsString()] = (_t["net_name"], owner)
 
     for _v in _vias:
         _tv = pcbnew.PCB_VIA(board)
@@ -232,6 +236,8 @@ def main(argv: list[str]) -> int:
         if _nc > 0:
             _tv.SetNetCode(_nc)
         board.Add(_tv)
+        if owner := _v.get("escape_ownership"):
+            _escape_owners[_tv.m_Uuid.AsString()] = (_v["net_name"], owner)
 
     # Silk for this leaf arrives in the payload's "silkscreen" list
     # (built by leaf_routing._silk_for_leaf against the post-repair
@@ -375,6 +381,9 @@ def main(argv: list[str]) -> int:
             f"capture_dir={_capture_dir} self_load_error={_self_load_err!r}"
         )
         return 2
+
+    if _escape_owners:
+        write_escape_receipt(_out_path, _verify, _escape_owners)
 
     print("OK")
     return 0

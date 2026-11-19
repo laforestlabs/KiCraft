@@ -14,8 +14,17 @@ from typing import Callable, Literal, Mapping
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from kicraft.design.models import BOMAccessory, CircuitRequirement, JsonScalar, RequirementObligation
+from kicraft.design.models import BOM, BOMAccessory, CircuitRequirement, JsonScalar, RequirementObligation
 from kicraft.design.part_identity import quantity_subject_binds, reviewed_part
+
+POWER_OUTPUT_HEADER_PROTOCOL = "5v-gnd-output-header"
+DEFAULT_MOMENTARY_BUTTON = "KMR232NGULCLFS"
+
+
+def requires_power_output_header(requirement: CircuitRequirement) -> bool:
+    return any(obligation.kind == "external_interface"
+               and obligation.protocol == POWER_OUTPUT_HEADER_PROTOCOL
+               for obligation in requirement.obligations)
 
 
 class LoweringArray(BaseModel):
@@ -195,6 +204,8 @@ class RegisteredLowerer:
     supply_port_keys: tuple[str, ...] = ()
     # Protocols implemented by the complete reviewed construction, not by its family label.
     external_interface_protocols: tuple[str, ...] = ()
+    # Immutable device address for a reviewed two-wire SDA/SCL peripheral.
+    fixed_i2c_address: int | None = None
     # The reviewed ordering code the lowerer realizes. A build that refuses every other code
     # (including none) publishes it here, so the refusal can name the part the draft must state.
     required_exact_part: str | None = None
@@ -332,6 +343,8 @@ def lowerer_summaries() -> list[dict]:
                 if lowerer.external_interface_protocols
                 else {}
             ),
+            **({"fixed_i2c_address": f"{lowerer.fixed_i2c_address:#04x}"}
+               if lowerer.fixed_i2c_address is not None else {}),
             **(
                 {"required_exact_part": lowerer.required_exact_part}
                 if lowerer.required_exact_part
@@ -687,6 +700,67 @@ def lower_requirement(requirement: CircuitRequirement | dict) -> LoweringArtifac
                 f"the exact part {requirement.exact_part!r}"
             )
     return artifact
+
+
+def verified_lowering(
+    requirement: CircuitRequirement, bom: BOM,
+) -> tuple[LoweringArtifact, dict[tuple[str, int], str]] | None:
+    """Recover a complete lowered instance from its committed parts and wiring.
+
+    A lowerer tag alone proves nothing. Recompute the artifact, require a
+    bijection from its role/index pairs to actual refs, and compare the complete
+    connected and explicitly unconnected pin sets.
+    """
+    try:
+        artifact = lower_requirement(requirement)
+    except ValueError:
+        return None
+    if artifact is None:
+        return None
+    groups = {group.role: group for group in artifact.groups}
+    refs: dict[tuple[str, int], str] = {}
+    used_refs: set[str] = set()
+    for part in bom.parts:
+        if part.lowering_requirement_id != requirement.id:
+            continue
+        group = groups.get(part.lowering_role or "")
+        index = part.lowering_index
+        if (
+            part.resolution_source != "lowerer"
+            or part.resolution_id != artifact.lowerer_id
+            or part.sheet != requirement.sheet
+            or group is None or index is None or not 0 <= index < group.quantity
+            or (group.role, index) in refs or part.ref in used_refs
+            or part.symbol != group.symbol or part.footprint != group.footprint
+            or part.assembly != group.assembly
+            or (group.mpn and (part.mpn or "").casefold() != group.mpn.casefold())
+            or (not group.mpn and part.value != group.value)
+        ):
+            return None
+        refs[group.role, index] = part.ref
+        used_refs.add(part.ref)
+    if not refs or len(refs) != sum(group.quantity for group in artifact.groups):
+        return None
+    expected = {
+        (refs[pin.role, pin.index], pin.pin, pin.net, requirement.sheet) for pin in artifact.pins
+    }
+    observed = [
+        (pin.ref, str(pin.pin), connection.net_name, connection.sheet)
+        for connection in bom.connections for pin in connection.endpoints
+        if pin.ref in used_refs
+    ]
+    expected_nc = {
+        (refs[pin.role, pin.index], pin.pin) for pin in artifact.no_connects
+    }
+    observed_nc = [
+        (pin.ref, str(pin.pin)) for pin in bom.no_connect_pins if pin.ref in used_refs
+    ]
+    if (
+        len(observed) != len(expected) or set(observed) != expected
+        or len(observed_nc) != len(expected_nc) or set(observed_nc) != expected_nc
+    ):
+        return None
+    return artifact, refs
 
 
 def _artifact(
@@ -1539,9 +1613,9 @@ def _connector(
     )
 
 def _reviewed_jst_xh_connector(requirement: CircuitRequirement) -> LoweringArtifact | None:
-    """Lower one reviewed JST XH carrier whose contact count exactly matches its interface."""
-    nets = _contact_nets(requirement.ports, prefixes=("pin",))
-    if nets is None:
+    """Select the exact-width reviewed carrier; unwired spare positions stay open."""
+    indexed = _contact_net_map(requirement.ports, prefixes=("pin",))
+    if not indexed or all(net == "NC" for net in indexed.values()):
         return None
     from kicraft.design.part_identity import reviewed_parts_for_feature
 
@@ -1549,14 +1623,20 @@ def _reviewed_jst_xh_connector(requirement: CircuitRequirement) -> LoweringArtif
     if exact:
         record = reviewed_part(exact)
         candidates = (record,) if record is not None else ()
+        if record is None or not record.contacts:
+            return None
+        width = len(record.contacts)
     else:
         candidates = reviewed_parts_for_feature("jst-xh-connector")
+        width = max(max(indexed), _stated_contact_count(requirement.obligations))
+    if max(indexed) > width or _stated_contact_count(requirement.obligations) > width:
+        return None
     matches = [
         record
         for record in candidates
         if record is not None
         and record.family == "jst-xh-connector"
-        and len(record.contacts) == len(nets)
+        and len(record.contacts) == width
         and record.symbol
         and record.footprint
     ]
@@ -1577,7 +1657,14 @@ def _reviewed_jst_xh_connector(requirement: CircuitRequirement) -> LoweringArtif
         (group,),
         tuple(
             LoweringPin(role="connector", pin=contact, net=net)
-            for contact, net in zip(record.contacts, nets, strict=True)
+            for index, contact in enumerate(record.contacts, 1)
+            if (net := indexed.get(index, "NC")) != "NC"
+        ),
+        no_connects=tuple(
+            LoweringNoConnect(role="connector", pin=contact,
+                              reason="reserved JST contact is intentionally unconnected")
+            for index, contact in enumerate(record.contacts, 1)
+            if indexed.get(index, "NC") == "NC"
         ),
     )
 
@@ -1858,6 +1945,11 @@ def _pin_header(requirement: CircuitRequirement) -> LoweringArtifact | None:
     ports = _numbered_connector_ports(requirement, fill_gaps=True, minimum=stated)
     if ports is None:
         return None
+    if requires_power_output_header(requirement) and (
+        set(ports) != {"pin1", "pin2"} or len(set(ports.values())) != 2
+        or "NC" in ports.values()
+    ):
+        raise ValueError("the 5 V/GND output header must use exactly two distinct wired contacts")
     filled = tuple(
         index for index in range(1, len(ports) + 1) if f"pin{index}" not in requirement.ports
     )
@@ -2456,7 +2548,7 @@ def _switch_input(requirement: CircuitRequirement) -> LoweringArtifact | None:
         ):
             return None
     else:
-        record = reviewed_part("KMR232NGULCLFS")
+        record = reviewed_part(DEFAULT_MOMENTARY_BUTTON)
     if record is None:
         return None
     # Contact ratings constrain declared voltage, not a voltage guessed from a net label.
@@ -2479,9 +2571,9 @@ def _switch_input(requirement: CircuitRequirement) -> LoweringArtifact | None:
             role="switch",
             reference_prefix="SW",
             value="BUTTON",
-            symbol="kmr232ngulclfs:KMR232NGULCLFS",
-            footprint="kmr232ngulclfs:KMR232NGULCLFS",
-            mpn="KMR232NGULCLFS",
+            symbol=record.symbol,
+            footprint=record.footprint,
+            mpn=DEFAULT_MOMENTARY_BUTTON,
             datasheet="https://datasheet.lcsc.com/datasheet/pdf/b5da7fd4e81211d634f1332fb1486a1f.pdf",
         )
     ]
@@ -4129,6 +4221,11 @@ def _fused_power_distribution(requirement: CircuitRequirement) -> LoweringArtifa
             ),
         ),
     )
+
+
+_TMP102_ADDRESS = 0x48
+
+
 def _tmp102_temperature(requirement: CircuitRequirement) -> LoweringArtifact | None:
     """TMP102AIDRLR with ADD0 grounded, bypass and independent I2C pullups."""
     ports = requirement.ports
@@ -4167,7 +4264,7 @@ def _tmp102_temperature(requirement: CircuitRequirement) -> LoweringArtifact | N
             owner_role="sensor", bypass_role="bypass",
             power_pins=("5", "1"), ground_pins=("2", "2"), max_distance_mm=2.5,
         ),),
-        assumptions=("ADD0 grounded selects I2C address 0x48; supply 1.4 to 3.6 V. "
+        assumptions=(f"ADD0 grounded selects I2C address {_TMP102_ADDRESS:#04x}; supply 1.4 to 3.6 V. "
                      "Verify bus capacitance and pull-up rise time for the actual layout.",
                      "TI TMP102 SBOS397I sections 4 and 7.2."),
     )
@@ -4187,6 +4284,7 @@ for _lowerer in (
         ("vdd", "gnd", "sda", "scl"),
         required_port_keys=("vdd", "gnd", "sda", "scl"),
         reviewed_exact_part="TMP102AIDRLR",
+        fixed_i2c_address=_TMP102_ADDRESS,
     ),
     RegisteredLowerer(
         "usb-c-breakout@1",
@@ -4275,13 +4373,21 @@ for _lowerer in (
         ),
         parameter_choices=(("rows", (1, 2)), ("gender", ("male", "female"))),
         port_patterns=((r"pin[1-9][0-9]*", "bidirectional"),),
+        external_interface_protocols=(POWER_OUTPUT_HEADER_PROTOCOL,),
+        parameter_constraints=(
+            "A 5v-gnd-output-header must have exactly two contacts bound to a sourced "
+            "5 V rail and its return. If other 5 V rails exist, explicitly select this "
+            "connector's rail using supply or a numbered contact.",
+        ),
     ),
     RegisteredLowerer(
         "reviewed-jst-xh-connector@1",
         frozenset({"jst-connector", "jst-xh-connector"}),
         _reviewed_jst_xh_connector,
         (),
-        ("<pin1..pinN: every real JST XH contact, with a reviewed exact-width carrier>",),
+        ("<pin1..pinN: physical JST XH contacts; bind the signal and return/supply "
+         "contacts the interface actually uses. A reviewed part or contact-count obligation "
+         "sets the size; spare contacts are no-connects, not inferred signals.>",),
         port_patterns=((r"pin[1-9][0-9]*", "bidirectional"),),
     ),
     RegisteredLowerer(
@@ -4486,8 +4592,10 @@ for _lowerer in (
             ("pull_policy", ("internal", "external")),
             ("active_level", ("low", "high")),
         ),
-        reviewed_exact_parts=("KMR232NGULCLFS", "TL3342F260QG"),
+        reviewed_exact_parts=(DEFAULT_MOMENTARY_BUTTON, "TL3342F260QG"),
         parameter_constraints=(
+            "For an ordinary momentary button, leave exact_part unset to use the reviewed "
+            f"{DEFAULT_MOMENTARY_BUTTON} default; retain user-required identities and mechanics.",
             "An unspecified pull policy uses an external pull resistor; explicit internal bias remains internal.",
             "When known, voltage is the switch supply in volts and must not exceed the selected contact rating.",
         ),

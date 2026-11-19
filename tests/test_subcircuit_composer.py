@@ -1,6 +1,6 @@
 """Tests for kicraft.autoplacer.brain.subcircuit_composer -- parent composition.
 
-All tests use synthetic/mock data only; no pcbnew dependency.
+Tests use synthetic inputs except the regression for native connector geometry.
 """
 
 from __future__ import annotations
@@ -606,3 +606,38 @@ def test_parent_anchor_resolver_does_not_add_child_origin_twice():
     )
 
     assert anchors["U1"] == Point(15.0, 7.0)
+
+
+def test_native_connector_anchor_ignores_reserved_silk_but_keeps_pad_clearance(tmp_path):
+    """SM04B hold-down pads, not the mouth or its synthetic label lane, set the board cut."""
+    from pathlib import Path
+
+    from kicraft.autoplacer.brain.subcircuit_composer import extract_leaf_blocker_set
+    from kicraft.design.synthesis.footprint_library import load_footprint_file
+
+    pcbnew = pytest.importorskip("pcbnew")
+    lib = Path(__file__).resolve().parents[1] / "kicraft/parts_library/jst-sh-4p-qwiic/jst-sh-4p-qwiic.pretty"
+    fp = load_footprint_file(pcbnew, lib / "CONN-SMD_4P-P1.00_SM04B-SRSS-TB-LF-SN.kicad_mod")
+    fp.SetReference("J4")
+    fp.SetPosition(pcbnew.VECTOR2I(pcbnew.FromMM(20), pcbnew.FromMM(20)))
+    board = pcbnew.CreateEmptyBoard()
+    board.Add(fp)
+    native = tmp_path / "qwiic.kicad_pcb"
+    assert pcbnew.SaveBoard(str(native), board)
+
+    component = _make_component("J4", 20, 20, w=14, h=14)
+    component.kind = "connector"
+    component.mating_axis = "in_plane"
+    component.opening_direction = 90.0
+    artifact = LoadedSubcircuitArtifact(
+        artifact_dir=str(tmp_path), metadata={}, debug={},
+        layout=_make_layout("QWIIC", {"J4": component}),
+        source_files={"mini_pcb": str(native)},
+    )
+    blocker = extract_leaf_blocker_set(artifact)
+    assert blocker.component_rects["J4"][1].y == 27.0  # still reserved for packing
+    assert blocker.component_edge_rects["J4"][1].y == pytest.approx(22.84)
+    spec = derive_attachment_constraints([artifact], {}, {"J4": {"edge": "bottom"}}, {}).child_specs[0]
+    (entry,) = spec.models[0].constraint_entries
+    cut = entry.local_anchor_offset.y - entry.constraint.outward_overhang_mm
+    assert cut == pytest.approx(23.04)  # native pad at y=22.84, plus copper clearance

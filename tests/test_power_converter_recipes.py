@@ -103,11 +103,11 @@ def test_tps54331_3v3_composition_respects_load_boundary(load_a, blocked):
     result = resolve_architecture_recipes(architecture)
     assert any(d.code == "recipe_output_current_exceeded" for d in result.blocking) is blocked
     if not blocked:
-        assert any(s.recipe == "tps54331-adjustable@2" for s in result.selections)
+        assert any(s.recipe == "tps54331-adjustable@4" for s in result.selections)
 
 
 def test_tps54331_3v3_feedback_tolerance_stays_within_c3_supply_range():
-    definition = get_recipe("tps54331-adjustable@2")
+    definition = get_recipe("tps54331-adjustable@4")
     parts = {part.role: part for part in definition.parts}
     top = float(parts["feedback_top"].value.split("k", 1)[0])
     bottom = float(parts["feedback_bottom"].value.split("k", 1)[0])
@@ -140,7 +140,7 @@ def _assert_tps54331_buck_topology(definition) -> None:
     assert pins[("enable_jumper", 0, "2")] == "gnd"
 
 
-@pytest.mark.parametrize("recipe", ("tps54331-adjustable@2", "tps54331-12v-1a@2"))
+@pytest.mark.parametrize("recipe", ("tps54331-adjustable@4", "tps54331-12v-1a@2"))
 def test_tps54331_recipes_have_complete_buck_and_safe_enable_topology(recipe):
     definition = get_recipe(recipe)
     _assert_tps54331_buck_topology(definition)
@@ -177,6 +177,86 @@ def test_tps54331_recipes_have_complete_buck_and_safe_enable_topology(recipe):
     assert not any(part.recipe_role == "enable_jumper" for part in default_expansion.parts)
 
 
+@pytest.mark.parametrize("recipe", ("tps54331-adjustable@4", "tps54331-3v3-shunt-controls@3"))
+def test_tps54331_3v3_recipes_pin_rated_capacitors_on_reviewed_lands(recipe):
+    supports = {part.role: part for part in get_recipe(recipe).parts}
+    for role, mpn, rating in (
+        ("input_hf_cap", "GCM188R71H103KA37D", "10nF 50V X7R"),
+        ("softstart_cap", "GCM188R71H103KA37D", "10nF 50V X7R"),
+        ("comp_capacitor", "CL10C102JB8NNNC", "1nF 50V C0G"),
+    ):
+        assert supports[role].mpn == mpn
+        assert supports[role].value == f"{rating}, {mpn}"
+        assert supports[role].footprint == "Capacitor_SMD:C_0603_1608Metric"
+        assert supports[role].datasheet
+
+
+@pytest.mark.parametrize("recipe", ("tps54331-adjustable@4", "tps54331-3v3-shunt-controls@3"))
+def test_tps54331_dda_assembly_land_keeps_no_vip_thermal_path(recipe):
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from kicraft.design.models import BOM
+    from kicraft.design.part_identity import physical_inventory_record
+    from kicraft.design.synthesis.autoplacer import canonical_recipe_thermal_requirements
+    from kicraft.parts_library.manifest import load_manifest, verify_content_hash
+
+    selection = RecipeSelection(recipe=recipe, instance="buck", sheets={"power": "POWER"},
+                                port_bindings={"input": "VIN", "gnd": "GND", "output": "VOUT"})
+    expanded = expand_recipe(selection)
+    part = next(p for p in expanded.parts if p.recipe_role == "converter")
+    assert part.mpn == "TPS54331DDAR"
+    record = physical_inventory_record(mpn=part.mpn, symbol=part.symbol, footprint=part.footprint)
+    assert record is not None and record.contacts == tuple(str(i) for i in range(1, 10))
+    library, footprint = part.footprint.split(":")
+    path = Path(__file__).resolve().parents[1] / "kicraft" / "parts_library" / library
+    manifest = load_manifest(path)
+    assert manifest.footprint_name == footprint and verify_content_hash(path, manifest)
+    text = (path / f"{library}.pretty" / f"{footprint}.kicad_mod").read_text()
+    assert "(drill " not in text
+    assert '(pad "9" smd rect (at 0 0) (size 4.89 2.94)' in text
+    assert '(size 3.00 2.13) (layers "F.Mask" "F.Paste")' in text
+    bom = BOM(parts=expanded.parts, connections=expanded.connections,
+              recipe_ownership=[expanded.ownership])
+    assert canonical_recipe_thermal_requirements(
+        SimpleNamespace(recipe_selections=[expanded.selection]), bom
+    ) == [{
+        "owner_ref": part.ref, "ground_pins": ["7", "9"], "outer_copper_oz": 1.0,
+        "ground_layers": ["F.Cu", "B.Cu"], "local_radius_mm": 4.0,
+        "minimum_local_ground_area_mm2": 4.0, "connected_ground_spreading": True,
+    }]
+
+
+def test_tps54331_momentary_reset_and_disable_shunt_share_only_local_enable():
+    selection = RecipeSelection(
+        recipe="tps54331-3v3-shunt-controls@3", instance="controls", sheets={"power": "POWER"},
+        parameters={"enable_control": True, "reset_control": True},
+        port_bindings={"input": "VIN", "gnd": "GND", "output": "VOUT"},
+    )
+    definition = get_recipe(selection.recipe)
+    assert definition.rated_output_current_a == 0.5
+    assert next(row for row in definition.ports if row.name == "input").supply_voltage_range_v == (18, 28)
+    expansion = expand_recipe(selection)
+    nets = _endpoint_nets(expansion)
+    parts = {part.recipe_role: part for part in expansion.parts}
+    en = nets[parts["converter"].ref, "3"]
+    assert en not in {"VIN", "VOUT", "GND"}
+    for role in ("enable_jumper", "reset_button", "enable_bias_bottom"):
+        assert nets[parts[role].ref, "1"] == en
+        assert nets[parts[role].ref, "2"] == "GND"
+    assert [accessory.mpn for accessory in parts["enable_jumper"].accessories] == ["SNT-100-BL-G"]
+    top = [part for part in expansion.parts if part.recipe_role == "enable_bias_top"]
+    assert len(top) == 3
+    assert {part.mpn for part in top} == {"0603WAF1002T5E"}
+    assert parts["enable_bias_bottom"].mpn == "0603WAF5901T5E"
+    assert [nets[part.ref, "1"] for part in top] == ["VIN", nets[top[0].ref, "2"], nets[top[1].ref, "2"]]
+    assert nets[top[-1].ref, "2"] == en
+    with pytest.raises(ValueError, match="enable"):
+        expand_recipe(selection.model_copy(update={
+            "port_bindings": {**selection.port_bindings, "enable": "VOUT"},
+        }))
+
+
 def test_tps54331_12v_feedback_math_is_connected_and_exact_nominally():
     definition = get_recipe("tps54331-12v-1a@2")
     parts = {part.role: part for part in definition.parts}
@@ -191,7 +271,7 @@ def test_enable_control_voltage_limits_are_part_specific():
     # AP6320x documents EN as a high-voltage input; TPS54331 does not.
     assert enable_control_max_voltage("ap63203-3v3@1") == 32.0
     assert enable_control_max_voltage("ap63205-5v@2") == 32.0
-    assert enable_control_max_voltage("tps54331-adjustable@2") == 6.0
+    assert enable_control_max_voltage("tps54331-adjustable@4") == 6.0
     assert enable_control_max_voltage("tps54331-12v-1a@2") == 6.0
     assert enable_control_max_voltage("lm2577t-adj-12v-boost@1") == 18.0
 
@@ -621,8 +701,8 @@ def test_converter_input_rail_respects_reviewed_voltage_envelope(vin, incompatib
         ("lm2577t-adj-12v-boost@1", 6.0, False),
         ("lm2577t-adj-2s-12v-boost@1", 7.4, True),
         ("lm2577t-adj-2s-12v-boost@1", 9.0, False),
-        ("tps54331-adjustable@2", 24.0, True),
-        ("tps54331-adjustable@2", 28.1, False),
+        ("tps54331-adjustable@4", 24.0, True),
+        ("tps54331-adjustable@4", 28.1, False),
         ("tps54331-12v-1a@2", 18.0, True),
         ("tps54331-12v-1a@2", 12.0, False),
         ("tps61088-2s-12v-1a@1", 7.4, True),

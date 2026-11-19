@@ -22,9 +22,9 @@ SCRIPT = (Path(__file__).parents[1] / "kicraft" / "autoplacer" / "hardware"
           / "_silk_legend_subprocess.py")
 
 
-def _run(tmp_path: Path, labels: list[dict], legend_lines=None) -> tuple[dict, Path]:
+def _run(tmp_path: Path, labels: list[dict], legend_lines=None, *, source=FIXTURE) -> tuple[dict, Path]:
     board = tmp_path / "board.kicad_pcb"
-    shutil.copy(FIXTURE, board)
+    shutil.copy(source, board)
     result_path = tmp_path / "result.json"
     if legend_lines is None:
         legend_lines = [
@@ -142,11 +142,13 @@ def test_pinout_labels_placed_per_pin(tmp_path):
         _mm_box,
     )
 
-    # Pick the first footprint with >=4 real-numbered pads; a pinout label is
-    # only meaningful on a multi-pin part.
-    src = pcbnew.LoadBoard(str(FIXTURE))
-    fp = next(f for f in src.GetFootprints()
-              if len([p for p in f.Pads() if p.GetNumber().strip()]) >= 4)
+    source = _label_board(
+        tmp_path, [(0, 0), (30, 0), (30, 30), (0, 30)],
+        [("1", 10, 10), ("2", 12.54, 10), ("3", 15.08, 10), ("4", 17.62, 10)],
+        (8.7, 8.7, 18.92, 11.3),
+    )
+    src = pcbnew.LoadBoard(str(source))
+    fp = src.FindFootprintByReference("J1")
     ref = fp.GetReference()
     pads = [p for p in fp.Pads() if p.GetNumber().strip()][:3]
     texts = {p.GetNumber(): f"P{i + 1}" for i, p in enumerate(pads)}
@@ -157,17 +159,17 @@ def test_pinout_labels_placed_per_pin(tmp_path):
                  for p in pads],
         "priority": 1, "heights_mm": [0.8],
     }
-    result, board_path = _run(tmp_path, [label])
+    result, board_path = _run(tmp_path, [label], legend_lines=[], source=source)
 
     per_pin_ids = [p["id"] for p in result["placed"]
                    if p["id"].startswith("pins:")]
-    assert len(per_pin_ids) >= 2
+    assert set(per_pin_ids) == {f"pins:{number}" for number in texts}
 
     board, board_texts, poly, mm_box = _board_texts_and_geometry(board_path)
     by_text = {t.GetText(): t for t in board_texts}
     pad_centers = {
         p.GetNumber(): ((b[0] + b[2]) / 2, (b[1] + b[3]) / 2)
-        for p in pads for b in [_mm_box(p.GetBoundingBox())]
+        for p in fp.Pads() for b in [_mm_box(p.GetBoundingBox())]
     }
 
     placed_boxes = {}
@@ -179,19 +181,15 @@ def test_pinout_labels_placed_per_pin(tmp_path):
         placed_boxes[num] = box
         assert bbox_inside_poly(box, poly, 0.4)
 
-    assert len(placed_boxes) >= 2
+    assert set(placed_boxes) == set(texts)
 
     # Every per-pin label clears courtyards/pads (the placer's own obstacle
     # set, margin 0.1 is tighter than the placer's 0.25 clearance).
-    fresh = pcbnew.LoadBoard(str(FIXTURE))
+    fresh = pcbnew.LoadBoard(str(source))
     for box in placed_boxes.values():
         for ob in _collect_obstacles(fresh)["F"]:
             assert not boxes_overlap(box, ob, 0.1)
 
-    # Distinct positions: per-pin placement, not one blob at the courtyard.
-    centers = [((b[0] + b[2]) / 2, (b[1] + b[3]) / 2)
-               for b in placed_boxes.values()]
-    assert len({(round(c[0], 2), round(c[1], 2)) for c in centers}) >= 2
 
     # Adjacency: each label sits nearest its OWN pad's center (the robust
     # form of "within a few mm of its own pad" — the placer backs off to a
@@ -205,3 +203,218 @@ def test_pinout_labels_placed_per_pin(tmp_path):
         own = pad_centers[num]
         assert all(_dist(tc, own) < _dist(tc, pad_centers[n])
                    for n in pad_centers if n != num)
+
+
+def _label_board(tmp_path, outline, contacts, courtyard):
+    import pcbnew
+
+    source = tmp_path / "seed.kicad_pcb"
+    board = pcbnew.NewBoard(str(source))
+    point = lambda x, y: pcbnew.VECTOR2I(pcbnew.FromMM(x), pcbnew.FromMM(y))
+    for start, end in zip(outline, outline[1:] + outline[:1]):
+        edge = pcbnew.PCB_SHAPE(board)
+        edge.SetShape(pcbnew.SHAPE_T_SEGMENT)
+        edge.SetStart(point(*start))
+        edge.SetEnd(point(*end))
+        edge.SetLayer(pcbnew.Edge_Cuts)
+        edge.SetWidth(pcbnew.FromMM(0.05))
+        board.Add(edge)
+    fp = pcbnew.FOOTPRINT(board)
+    fp.SetReference("J1")
+    fp.Reference().SetVisible(False)
+    fp.Value().SetVisible(False)
+    board.Add(fp)
+    court = pcbnew.PCB_SHAPE(fp)
+    court.SetShape(pcbnew.SHAPE_T_RECT)
+    court.SetStart(point(*courtyard[:2]))
+    court.SetEnd(point(*courtyard[2:]))
+    court.SetLayer(pcbnew.F_CrtYd)
+    court.SetWidth(pcbnew.FromMM(0.05))
+    fp.Add(court)
+    for number, x, y in contacts:
+        pad = pcbnew.PAD(fp)
+        pad.SetNumber(number)
+        pad.SetPosition(point(x, y))
+        pad.SetSize(point(1, 1))
+        pad.SetShape(pcbnew.PAD_SHAPE_RECT)
+        pad.SetAttribute(pcbnew.PAD_ATTRIB_SMD)
+        pad.SetLayerSet(pcbnew.PAD.SMDMask())
+        fp.Add(pad)
+    board.Save(str(source))
+    return source
+
+
+@pytest.mark.parametrize("kind,text", [("pinout", "SIG"), ("io", "IN OUT")])
+def test_required_label_uses_clear_local_slot_in_concave_outline(tmp_path, kind, text):
+    source = _label_board(
+        tmp_path,
+        [(9, 9), (11.4, 9), (11.4, 10.25), (16.2, 10.25),
+         (16.2, 15.5), (12.3, 15.5), (12.3, 11.5), (9, 11.5)],
+        [("1", 10, 10)], (9, 9, 11, 11),
+    )
+    label = {"id": "required:J1", "kind": kind, "ref": "J1",
+             "required": True, "priority": 1, "heights_mm": [0.8]}
+    if kind == "pinout":
+        label["pins"] = [{"pin": "1", "text": text}]
+    else:
+        label["text"] = text
+    result, path = _run(tmp_path, [label], legend_lines=[], source=source)
+    assert result["required_missing"] == []
+    board, texts, poly, mm_box = _board_texts_and_geometry(path)
+    assert len(texts) == 1
+    assert " ".join(texts[0].GetText().split()) == text
+    box = mm_box(texts[0].GetBoundingBox())
+    assert box[0] > 12.3  # The only usable space is the local wing.
+    assert bbox_inside_poly(box, poly, 0.4)
+    from kicraft.autoplacer.hardware._silk_legend_subprocess import _collect_obstacles
+    import pcbnew
+    original = pcbnew.LoadBoard(str(source))
+    assert not any(boxes_overlap(box, ob, 0.2) for ob in _collect_obstacles(original)["F"])
+
+
+def test_required_pin_label_cannot_identify_unlabelled_nc_contact(tmp_path):
+    source = _label_board(
+        tmp_path, [(9, 8.3), (18, 8.3), (18, 12), (9, 12)],
+        [("1", 10, 10), ("2", 12, 10)], (9.4, 9.4, 12.6, 10.6),
+    )
+    result, _ = _run(tmp_path, [{
+        "id": "required:J1", "kind": "pinout", "ref": "J1",
+        "required": True, "priority": 1, "heights_mm": [0.8],
+        "pins": [{"pin": "1", "text": "SIG"}],
+    }], legend_lines=[], source=source)
+    assert result["required_missing"] == ["required:J1:1"]
+    assert not result["placed"]
+
+
+def test_contact_annotation_keeps_its_slot_before_flexible_title(tmp_path):
+    source = _label_board(
+        tmp_path,
+        [(9, 9), (11.4, 9), (11.4, 10.25), (15.8, 10.25),
+         (15.8, 11.5), (22, 11.5), (22, 18), (17, 18), (17, 12.5),
+         (15.8, 12.5), (15.8, 13), (12.3, 13), (12.3, 11.5), (9, 11.5)],
+        [("1", 10, 10)], (9, 9, 11, 11),
+    )
+    result, path = _run(tmp_path, [
+        {"id": "required:title", "kind": "io", "ref": "J1", "text": "IN",
+         "required": True, "priority": 1, "heights_mm": [0.8]},
+        {"id": "required:contact", "kind": "pinout", "ref": "J1",
+         "pins": [{"pin": "1", "text": "SIG"}],
+         "required": True, "priority": 1, "heights_mm": [0.8]},
+    ], legend_lines=[], source=source)
+    assert result["required_missing"] == []
+    _, texts, poly, mm_box = _board_texts_and_geometry(path)
+    boxes = {text.GetText(): mm_box(text.GetBoundingBox()) for text in texts}
+    assert boxes["SIG"][2] < 16
+    assert boxes["IN"][0] > 17
+    assert all(bbox_inside_poly(box, poly, 0.4) for box in boxes.values())
+
+
+def test_dense_header_keeps_interior_contacts_unambiguous(tmp_path):
+    import pcbnew
+
+    source = _label_board(
+        tmp_path, [(4.5, 4.2), (17, 4.2), (17, 13.2), (4.5, 13.2)],
+        [("1", 9, 10), ("2", 10, 10), ("3", 11, 10), ("4", 12, 10)],
+        (8, 8.8, 13, 12.5),
+    )
+    board = pcbnew.LoadBoard(str(source))
+    blocker = pcbnew.FOOTPRINT(board)
+    blocker.SetReference("U1")
+    blocker.Reference().SetVisible(False)
+    blocker.Value().SetVisible(False)
+    board.Add(blocker)
+    body = pcbnew.PCB_SHAPE(blocker)
+    body.SetShape(pcbnew.SHAPE_T_RECT)
+    body.SetStart(pcbnew.VECTOR2I(pcbnew.FromMM(5.5), pcbnew.FromMM(8)))
+    body.SetEnd(pcbnew.VECTOR2I(pcbnew.FromMM(8), pcbnew.FromMM(11.6)))
+    body.SetLayer(pcbnew.F_CrtYd)
+    body.SetWidth(pcbnew.FromMM(0.05))
+    blocker.Add(body)
+    board.Save(str(source))
+    names = {"1": "GND", "2": "3V3", "3": "SDA", "4": "SCL"}
+    result, path = _run(tmp_path, [{
+        "id": "required:bus", "kind": "pinout", "ref": "J1",
+        "pins": [{"pin": pin, "text": name} for pin, name in names.items()],
+        "required": True, "priority": 1, "heights_mm": [0.8],
+    }], legend_lines=[], source=source)
+    assert result["required_missing"] == []
+    _, texts, _, mm_box = _board_texts_and_geometry(path)
+    boxes = {text.GetText(): mm_box(text.GetBoundingBox()) for text in texts}
+    assert set(boxes) == set(names.values())
+    for pin, name in names.items():
+        box = boxes[name]
+        center = ((box[0] + box[2]) / 2, (box[1] + box[3]) / 2)
+        own = (center[0] - (8 + int(pin))) ** 2 + (center[1] - 10) ** 2
+        assert all(own < (center[0] - (8 + int(other))) ** 2 + (center[1] - 10) ** 2
+                   for other in names if other != pin)
+
+
+def test_required_contact_reflows_reference_without_moving_electronics(tmp_path):
+    import pcbnew
+
+    source = _label_board(
+        tmp_path,
+        [(9, 9), (11.4, 9), (11.4, 10.25), (15.8, 10.25),
+         (15.8, 13), (12.3, 13), (12.3, 11.5), (9, 11.5)],
+        [("1", 10, 10)], (9, 9, 11, 11),
+    )
+    board = pcbnew.LoadBoard(str(source))
+    reference = board.FindFootprintByReference("J1").Reference()
+    reference.SetVisible(True)
+    reference.SetLayer(pcbnew.F_SilkS)
+    reference.SetTextSize(pcbnew.VECTOR2I(pcbnew.FromMM(0.8), pcbnew.FromMM(0.8)))
+    reference.SetTextThickness(pcbnew.FromMM(0.12))
+    reference.SetPosition(pcbnew.VECTOR2I(pcbnew.FromMM(14), pcbnew.FromMM(11.6)))
+    board.Save(str(source))
+    result, path = _run(tmp_path, [{
+        "id": "required:contact", "kind": "pinout", "ref": "J1",
+        "pins": [{"pin": "1", "text": "SIG"}],
+        "required": True, "priority": 1, "heights_mm": [0.8],
+    }], legend_lines=[], source=source)
+    assert result["required_missing"] == []
+    actual, texts, poly, mm_box = _board_texts_and_geometry(path)
+    assert [text.GetText() for text in texts] == ["SIG"]
+    assert bbox_inside_poly(mm_box(texts[0].GetBoundingBox()), poly, 0.4)
+    fp = actual.FindFootprintByReference("J1")
+    assert fp.Reference().IsVisible() and fp.Reference().GetLayer() == pcbnew.F_Fab
+    pad = next(pad for pad in fp.Pads() if pad.GetNumber() == "1")
+    assert (pad.GetPosition().x, pad.GetPosition().y) == (pcbnew.FromMM(10), pcbnew.FromMM(10))
+
+
+def test_full_contact_names_fit_rotated_lanes_without_moving_pads(tmp_path):
+    import pcbnew
+
+    contacts = [(str(i + 1), 7.5, 6 + i * 2.54) for i in range(5)]
+    source = _label_board(
+        tmp_path, [(0, 0), (10, 0), (10, 22), (0, 22)],
+        contacts, (5.7, 4.2, 9.3, 18),
+    )
+    names = ["BUTTON_1", "BUTTON_2", "BUTTON_3", "GND", "3.3V"]
+    result, path = _run(tmp_path, [{
+        "id": "required:signals", "kind": "pinout", "ref": "J1",
+        "pins": [{"pin": str(i + 1), "text": name} for i, name in enumerate(names)],
+        "required": True, "priority": 1, "heights_mm": [0.8],
+    }], legend_lines=[], source=source)
+    assert result["required_missing"] == []
+    actual, texts, poly, mm_box = _board_texts_and_geometry(path)
+    assert {text.GetText() for text in texts} == set(names)
+    assert any(text.GetTextAngle().AsDegrees() == 90 for text in texts)
+    original = pcbnew.LoadBoard(str(source))
+    from kicraft.autoplacer.hardware._silk_legend_subprocess import _collect_obstacles
+
+    obstacles = _collect_obstacles(original)["F"]
+    boxes = {text.GetText(): mm_box(text.GetBoundingBox()) for text in texts}
+    for i, name in enumerate(names):
+        box = boxes[name]
+        assert bbox_inside_poly(box, poly, 0.5)
+        assert not any(boxes_overlap(box, ob, 0.25) for ob in obstacles)
+        assert not any(boxes_overlap(box, ob, 0.25)
+                       for other, ob in boxes.items() if other != name)
+        center = ((box[0] + box[2]) / 2, (box[1] + box[3]) / 2)
+        own = (center[0] - contacts[i][1]) ** 2 + (center[1] - contacts[i][2]) ** 2
+        assert all(own < (center[0] - x) ** 2 + (center[1] - y) ** 2
+                   for j, (_, x, y) in enumerate(contacts) if j != i)
+    pads = actual.FindFootprintByReference("J1").Pads()
+    assert {pad.GetNumber(): (pad.GetPosition().x, pad.GetPosition().y) for pad in pads} == {
+        number: (pcbnew.FromMM(x), pcbnew.FromMM(y)) for number, x, y in contacts
+    }

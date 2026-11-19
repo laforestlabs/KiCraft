@@ -1,12 +1,17 @@
 """Legacy recipe identities whose derived artifacts require regeneration."""
 
+RP2040_PINNED_RECIPE = "rp2040-minimal@4"
+RP2040_ACTIVE_RECIPE = "rp2040-minimal@5"
+RP2040_RECIPE_IDS = frozenset({RP2040_PINNED_RECIPE, RP2040_ACTIVE_RECIPE})
+
+
 _LEGACY_RECIPE_REPLACEMENTS = {
     "hub75-sn74hct245-interface@1": "hub75-sn74hct245-interface@2",
     "usb-c-pd-receptacle@1": "usb-c-pd-receptacle@2",
     "ch224k-pd-trigger@1": "ch224k-pd-trigger@2",
-    "rp2040-minimal@1": "rp2040-minimal@4",
-    "rp2040-minimal@2": "rp2040-minimal@4",
-    "rp2040-minimal@3": "rp2040-minimal@4",
+    "rp2040-minimal@1": RP2040_ACTIVE_RECIPE,
+    "rp2040-minimal@2": RP2040_ACTIVE_RECIPE,
+    "rp2040-minimal@3": RP2040_ACTIVE_RECIPE,
     "drv8833-dual-motor@1": "drv8833-dual-motor@6",
     "drv8833-dual-motor@2": "drv8833-dual-motor@6",
     "drv8833-dual-motor@3": "drv8833-dual-motor@6",
@@ -23,7 +28,11 @@ _LEGACY_RECIPE_REPLACEMENTS = {
     "me6211-3v3@1": "me6211-3v3@2",
     "mcp1700-3v3@1": "mcp1700-3v3@2",
     "ams1117-3v3@1": "ams1117-3v3@2",
-    "tps54331-adjustable@1": "tps54331-adjustable@2",
+    "tps54331-adjustable@1": "tps54331-adjustable@4",
+    "tps54331-adjustable@2": "tps54331-adjustable@4",
+    "tps54331-adjustable@3": "tps54331-adjustable@4",
+    "tps54331-3v3-shunt-controls@1": "tps54331-3v3-shunt-controls@3",
+    "tps54331-3v3-shunt-controls@2": "tps54331-3v3-shunt-controls@3",
     "tps54331-12v-1a@1": "tps54331-12v-1a@2",
 }
 

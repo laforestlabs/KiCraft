@@ -503,3 +503,48 @@ def test_promoted_two_ounce_board_rejects_actual_narrow_trace_without_metadata(
     )
     assert rc == 7
     assert any("routed copper width 0.127" in reason for reason in summary["reasons"])
+
+
+@pytest.mark.parametrize(("damage", "reason"), [
+    ("source_changed", "changed after"),
+    ("missing_geometry", "lacks qualified geometry expectations"),
+    ("missing_receipt", "lacks an accepted"),
+    ("missing_instance", "instances differ"),
+    ("duplicate_instance", "duplicate identities"),
+])
+def test_delivery_refuses_stale_or_incomplete_qualified_custody(tmp_path, damage, reason):
+    import hashlib
+
+    routed = _touch(tmp_path / "parent" / "parent_routed.kicad_pcb", "approved copper")
+    delivered = _touch(tmp_path / "board.kicad_pcb", "delivered copper")
+    instance = {
+        "instance_path": "/block", "entry": "block@1.0.0",
+        "identity": "contract", "content_hash": "payload",
+    }
+    metadata = {
+        "qualified_geometry": [dict(instance)],
+        "validation": {"qualified_block_preservation": {
+            "accepted": True, "pcb_sha256": hashlib.sha256(routed.read_bytes()).hexdigest(),
+            "instances": [dict(instance)],
+        }},
+    }
+    if damage == "source_changed":
+        routed.write_text("different copper")
+    elif damage == "missing_geometry":
+        del metadata["qualified_geometry"]
+    elif damage == "missing_receipt":
+        metadata["validation"] = {}
+    elif damage == "missing_instance":
+        metadata["qualified_geometry"] = []
+    else:
+        metadata["qualified_geometry"].append(dict(instance))
+    routed.with_name("metadata.json").write_text(json.dumps(metadata))
+    with pytest.raises(ValueError, match=reason):
+        cli_app._verify_qualified_delivery(delivered, routed, tmp_path)
+
+
+def test_delivery_does_not_silently_drop_missing_qualified_parent_metadata(tmp_path):
+    routed = _touch(tmp_path / "parent" / "parent_routed.kicad_pcb")
+    _touch(tmp_path / ".kicraft" / "qualified-leaf-requests.json", "{}")
+    with pytest.raises(ValueError, match="lacks qualified geometry custody metadata"):
+        cli_app._verify_qualified_delivery(tmp_path / "board.kicad_pcb", routed, tmp_path)

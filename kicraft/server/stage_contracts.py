@@ -1863,6 +1863,7 @@ def _normalize_stage_response(
                 "unresolved_requirement_ids",
                 "protected_identities",
                 "declared_interfaces",
+                "power_output_header_contracts",
             )
             payload = {key: value for key, value in payload.items() if key not in server_derived}
             if intent_shaped:

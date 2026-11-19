@@ -65,7 +65,9 @@ def required_silk_defects(state, placed_ids=None, project_root=None) -> list[str
                     part.ref.startswith(prefix) for prefix in _CONNECTOR_PREFIXES):
                 defects.append(f"required silk {part.ref}: interface function not verified")
             if (part.ref in wired and part.ref not in known
-                    and part.recipe_role in {"boot_button", "reset_button"}):
+                    and (part.recipe_role in {"boot_button", "bootsel", "reset_button"}
+                         or (part.resolution_id == "switch-input@1"
+                             and part.lowering_role == "switch"))):
                 defects.append(f"required silk {part.ref}: control function not verified")
     if placed_ids is not None:
         placed = set(placed_ids)

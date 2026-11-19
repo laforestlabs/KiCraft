@@ -394,6 +394,333 @@ def test_unowned_enable_jumper_obligation_produces_one_safe_targeted_control_cir
     architecture = derive_architecture(completed)
     assert _requirement(architecture, "buck").ports["enable"] == "BUCK_ENABLE_JUMPER"
 
+
+def test_existing_unwired_enable_owner_is_completed_without_creating_a_second_jumper():
+    from kicraft.design.architecture_intent import complete_architecture_payload
+
+    intent = _hub75_intent()
+    intent["obligations"] = [{
+        "kind": "adjustability", "original_obligation_id": "power-enable",
+        "parameter": "enable", "mechanism": "jumper",
+    }]
+    intent["requirements"].append({
+        "id": "control", "sheet": "POWER", "role": "user_io", "family": "switch-input",
+        "supply": "VBUS", "obligation_ids": ["power-enable"],
+    })
+    completed = complete_architecture_payload(intent)
+    assert completed["signals"][-1] == {
+        "name": "BUCK_ENABLE_JUMPER", "from": "control.signal", "to": "buck.enable",
+    }
+    architecture = derive_architecture(completed)
+    assert _requirement(architecture, "control").ports["signal"] == "BUCK_ENABLE_JUMPER"
+    assert not any(row.id == "power-enable" for row in architecture.requirements)
+
+    intent["requirements"].append({
+        "id": "other_buck", "sheet": "POWER", "role": "regulator",
+        "family": "tlv62569-3v3", "supply": "VBUS",
+    })
+    assert not any(row.get("from") == "control.signal"
+                   for row in complete_architecture_payload(intent)["signals"])
+
+
+def test_known_reset_request_is_owned_by_real_recipe_reset_instead_of_gpio():
+    from kicraft.design.architecture_intent import complete_architecture_payload
+
+    intent = _one_part_intent({
+        "id": "core", "role": "mcu_core", "family": "ch32v003", "supply": "VLOGIC",
+    })
+    intent["mcu_present"] = True
+    intent["power"]["rails"] = {"VLOGIC": {"voltage": 3.3, "from": "input.pin1"}}
+    intent["requirements"][0]["ties"]["pin1"] = "VLOGIC"
+    intent["requirements"].append({
+        "id": "control", "sheet": "PART", "role": "user_io", "family": "switch-input",
+        "supply": "VLOGIC", "obligation_ids": ["reset"], "functional_blocks": ["RESET"],
+    })
+    intent["obligations"] = [{
+        "kind": "physical", "original_obligation_id": "reset", "component_class": "push-button",
+    }]
+    intent["signals"] = [{"name": "REQUEST", "from": "control.signal", "to": "core.input_reset"}]
+    completed = complete_architecture_payload(intent)
+    compiled = derive_architecture(completed)
+    core = _requirement(compiled, "core")
+    assert "input_reset" not in core.ports
+    assert [row.original_obligation_id for row in core.obligations] == ["reset"]
+    assert core.functional_blocks == ["THE_PART", "RESET"]
+    assert not any(row.id == "control" for row in compiled.requirements)
+    with pytest.raises(ArchitectureIntentError, match="input_reset"):
+        derive_architecture(intent)
+
+
+def test_spi_header_exposes_the_verified_controllers_reference():
+    from kicraft.design.recipes import apply_architecture_recipe_resolution
+
+    intent = _one_part_intent({
+        "id": "core", "role": "mcu_core", "family": "ch32v003", "supply": "VLOGIC",
+    })
+    intent["power"]["rails"] = {"VLOGIC": {"voltage": 3.3, "from": "input.pin1"}}
+    intent["requirements"][0]["ties"]["pin1"] = "VLOGIC"
+    intent["mcu_present"] = True
+    intent["sheets"].append({
+        "name": "SPI INTERFACE", "stem": "SPI_INTERFACE", "role": "interface",
+        "function": "Expose the CH32V003F4U6 SPI controller signals.",
+    })
+    intent["requirements"].append({
+        "id": "spi", "sheet": "SPI INTERFACE", "role": "connector", "family": "spi-header",
+    })
+    intent["signals"] = [
+        {"name": key.upper(), "from": f"core.{key}", "to": f"spi.pin{pin}"}
+        for pin, key in enumerate(("spi_sck", "spi_mosi", "spi_miso", "spi_cs0"), 1)
+    ]
+    resolved = apply_architecture_recipe_resolution(derive_architecture(intent))
+    assert _requirement(resolved, "spi").ports["pin5"] == "GND"
+    assert [row.id for row in resolved.requirements if row.role == "mcu_core"] == ["core"]
+    assert [row.instance for row in resolved.recipe_selections] == ["core"]
+    intent["requirements"][-1]["exact_part"] = "B-2100S04P-A110"
+    with pytest.raises(ArchitectureIntentError, match="spi_header_reference_missing"):
+        derive_architecture(intent)
+
+
+@pytest.mark.parametrize("family", ["push-button", "switch-input"])
+def test_ordinary_button_uses_committed_interface_and_reviewed_default(family):
+    from kicraft.design.architecture_intent import complete_architecture_payload
+    from kicraft.design.lowering import lower_requirement
+
+    payload = _one_part_intent({
+        "id": "control", "role": "user_io", "family": family,
+        "exact_part": "YZA-032-5.0W", "obligation_ids": ["button", "channels"],
+    })
+    payload["signals"] = [
+        {"name": "ACTUATE", "from": "control.signal", "to": "edge:OUTPUT", "rails": ["+5V"]},
+    ]
+    payload["obligations"] = [
+        {"kind": "physical", "original_obligation_id": "button", "component_class": "push-button"},
+        {"kind": "quantitative", "original_obligation_id": "channels", "quantity": "button signals",
+         "unit": "signals", "relation": "equal", "value": 1},
+    ]
+    user = {"goal": "Expose a biased button signal.", "named_parts": [], "constraints": []}
+    completed = complete_architecture_payload(payload, intent=user)
+    control = _requirement(derive_architecture(completed), "control")
+    assert control.family == "switch-input" and control.exact_part is None
+    assert control.ports == {"signal": "ACTUATE", "vdd": "+5V", "gnd": "GND"}
+    artifact = lower_requirement(control)
+    assert next(group.mpn for group in artifact.groups if group.role == "switch") == "KMR232NGULCLFS"
+    assert {(pin.role, pin.net) for pin in artifact.pins} == {
+        ("switch", "ACTUATE"), ("switch", "GND"), ("pullup", "ACTUATE"), ("pullup", "+5V"),
+    }
+    assert any("instead of the draft's YZA-032-5.0W" in note for note in completed["assumptions"])
+
+    for bound_intent in (
+        {**user, "named_parts": ["YZA-032-5.0W"]},
+        {**user, "constraints": ["Use through-hole panel-mount push-buttons."]},
+    ):
+        retained = complete_architecture_payload(payload, intent=bound_intent)
+        original = next(row for row in retained["requirements"] if row["id"] == "control")
+        assert original["exact_part"] == "YZA-032-5.0W"
+
+    payload["signals"].append({"name": "OTHER", "from": "input.pin2", "to": "control.contact3"})
+    retained = complete_architecture_payload(payload, intent=user)
+    original = next(row for row in retained["requirements"] if row["id"] == "control")
+    assert original["exact_part"] == "YZA-032-5.0W"
+
+
+def test_fixed_address_peripherals_cannot_share_an_i2c_bus():
+    intent = _one_part_intent({
+        "id": "core", "role": "mcu_core", "family": "ch32v003", "supply": "VLOGIC",
+    })
+    intent["power"]["rails"] = {"VLOGIC": {"voltage": 3.3, "from": "input.pin1"}}
+    intent["requirements"][0]["ties"]["pin1"] = "VLOGIC"
+    intent["mcu_present"] = True
+    intent["requirements"].extend(
+        {"id": sensor, "sheet": "PART", "role": "sensor",
+         "family": "tmp102-temperature", "supply": "VLOGIC"}
+        for sensor in ("first", "second")
+    )
+    intent["signals"] = [
+        {"name": f"BUS_{key.upper()}", "from": f"core.i2c_{key}",
+         "to": [f"first.{key}", f"second.{key}"]}
+        for key in ("sda", "scl")
+    ]
+    with pytest.raises(ArchitectureIntentError, match="share fixed I2C address 0x48"):
+        derive_architecture(intent)
+
+
+def test_unwired_jst_obligation_keeps_its_carrier_and_reports_missing_function():
+    from kicraft.design.architecture_intent import complete_architecture_payload
+
+    intent = _one_part_intent({
+        "id": "aux", "role": "connector", "family": "pin-header",
+        "obligation_ids": ["aux", "aux-width"],
+    })
+    intent["obligations"] = [
+        {"kind": "physical", "original_obligation_id": "aux", "component_class": "connector"},
+        {"kind": "quantitative", "original_obligation_id": "aux-width",
+         "quantity": "JST connector pins", "unit": "pins", "relation": "equal", "value": 4},
+    ]
+    completed = complete_architecture_payload(intent)
+    aux = next(row for row in completed["requirements"] if row["id"] == "aux")
+    assert aux["family"] == "jst-xh-connector"
+    with pytest.raises(ArchitectureIntentError, match="reviewed-jst-xh-connector@1"):
+        derive_architecture(completed)
+
+
+def _two_power_output_headers():
+    return {
+        "sheets": [
+            {"name": "SUPPLY A", "stem": "SUPPLY_A", "role": "power_input", "function": "Supply A"},
+            {"name": "SUPPLY B", "stem": "SUPPLY_B", "role": "power_input", "function": "Supply B"},
+        ],
+        "requirements": [
+            row for side in ("a", "b") for row in (
+                {"id": f"usb_{side}", "sheet": f"SUPPLY {side.upper()}", "role": "power_input",
+                 "family": "usb-c-power-sink"},
+                {"id": f"header_{side}", "sheet": f"SUPPLY {side.upper()}", "role": "connector",
+                 "family": "pin-header", "obligation_ids": ["power-output"]},
+            )
+        ],
+        "signals": [
+            {"name": f"OUTPUT_{side.upper()}", "from": f"usb_{side}.vbus",
+             "to": f"header_{side}.pin1"}
+            for side in ("a", "b")
+        ],
+        "power": {"rails": {
+            f"V_{side.upper()}": {"voltage": 5.0, "from": f"usb_{side}.vbus"}
+            for side in ("a", "b")
+        }},
+        "obligations": [{
+            "kind": "external_interface", "original_obligation_id": "power-output",
+            "protocol": "5v-gnd-output-header",
+        }],
+    }
+
+
+def test_power_output_headers_complete_separate_rails_and_prove_both_bom_owners():
+    from kicraft.design.models import BOM, ConversationState
+    from kicraft.design.recipes import apply_architecture_recipe_resolution
+    from kicraft.design.synthesis.interface_facts import reviewed_interface_facts
+    from kicraft.design.synthesis.validation import check_requirement_physical_realization
+    from kicraft.server.stage_work_units import probe_architecture_construction
+
+    architecture = apply_architecture_recipe_resolution(derive_architecture(_two_power_output_headers()))
+    assert [(_requirement(architecture, f"header_{side}").ports) for side in ("a", "b")] == [
+        {"pin1": "V_A", "pin2": "GND"}, {"pin1": "V_B", "pin2": "GND"},
+    ]
+    assert [(row.source_requirement, row.rail) for row in architecture.power_output_header_contracts] == [
+        ("usb_a", "V_A"), ("usb_b", "V_B"),
+    ]
+    bom = BOM.model_validate(probe_architecture_construction({
+        "architecture": architecture.model_dump(mode="json"),
+    }))
+    check = check_requirement_physical_realization
+    assert check(architecture, bom).ok
+    state = ConversationState(architecture=architecture, bom=bom)
+    facts = [row for row in reviewed_interface_facts(state) if row["kind"] == "power_output"]
+    assert {row["title"] for row in facts} == {"5V OUT"}
+    assert {pin["net"] for row in facts for pin in row["pins"]} == {"V_A", "V_B", "GND"}
+
+    bad_header = bom.model_copy(deep=True)
+    header = next(part for part in bad_header.parts if part.lowering_requirement_id == "header_a")
+    va = next(net for net in bad_header.connections if net.net_name == "V_A"
+              and any(ep.ref == header.ref for ep in net.endpoints))
+    va.endpoints = [ep for ep in va.endpoints if ep.ref != header.ref]
+    assert any("E_EXTERNAL_INTERFACE 'header_a'" in row
+               for row in check(architecture, bad_header).offenders)
+
+    bad_source = bom.model_copy(deep=True)
+    usb = next(part for part in bad_source.parts
+               if part.recipe_instance == "usb_a" and part.recipe_role == "connector")
+    va = next(net for net in bad_source.connections if net.net_name == "V_A"
+              and any((ep.ref, ep.pin) == (usb.ref, "A4B9") for ep in net.endpoints))
+    va.endpoints = [ep for ep in va.endpoints if (ep.ref, ep.pin) != (usb.ref, "A4B9")]
+    defects = check(architecture, bad_source).offenders
+    assert any("E_EXTERNAL_INTERFACE 'header_a'" in row for row in defects)
+    assert not any("E_EXTERNAL_INTERFACE 'header_b'" in row for row in defects)
+
+
+@pytest.mark.parametrize("fault", ["ambiguous", "wrong_voltage", "wrong_return", "extra_contact",
+                                  "duplicate_source"])
+def test_power_output_headers_refuse_unproven_or_incompatible_contacts(fault):
+    intent = _two_power_output_headers()
+    header = next(row for row in intent["requirements"] if row["id"] == "header_a")
+    rails = intent["power"]["rails"]
+    if fault == "ambiguous":
+        intent["signals"].pop(0)
+    elif fault == "wrong_voltage":
+        rails["V_A"]["voltage"] = 4.0
+    elif fault == "wrong_return":
+        rails["ANOTHER_RETURN"] = {"voltage": 0}
+        header["ties"] = {"pin2": "ANOTHER_RETURN"}
+    elif fault == "extra_contact":
+        header["ties"] = {"pin3": "GND"}
+    else:
+        rails.pop("V_B")
+        usb = next(row for row in intent["requirements"] if row["id"] == "usb_b")
+        usb["ties"] = {"vbus": "V_A"}
+    with pytest.raises(ArchitectureIntentError, match="power_output_header_contract"):
+        derive_architecture(intent)
+
+
+def test_regulator_reset_and_enable_are_owned_locally_with_verified_bom():
+    from kicraft.design.architecture_intent import complete_architecture_payload
+    from kicraft.design.models import BOM
+    from kicraft.design.recipes import apply_architecture_recipe_resolution
+    from kicraft.design.synthesis.validation import (
+        check_requirement_physical_realization, check_reviewed_input_operating_ranges,
+    )
+    from kicraft.server.stage_work_units import probe_architecture_construction
+
+    payload = _high_voltage_enable_intent()
+    payload["power"]["rails"] = {
+        "VIN": {"voltage": 24.0, "from": "input.positive"},
+        "VOUT": {"voltage": 3.3, "from": "buck.output"},
+    }
+    buck = next(row for row in payload["requirements"] if row["id"] == "buck")
+    buck.update(family="tps54331-adjustable", supply="VIN", exact_part="TPS54331DDAR")
+    output = next(row for row in payload["requirements"] if row["id"] == "output")
+    output["ties"]["positive"] = "VOUT"
+    payload["obligations"].extend([
+        {"kind": "adjustability", "original_obligation_id": "shutdown",
+         "parameter": "regulator-reset", "mechanism": "momentary-button"},
+        {"kind": "physical", "original_obligation_id": "reset-switch",
+         "component_class": "push-button"},
+    ])
+    payload["requirements"].append({
+        "id": "reset", "sheet": "POWER", "role": "user_io", "family": "switch-input",
+        "obligation_ids": ["shutdown", "reset-switch"], "functional_blocks": ["RESET"],
+    })
+    completed = complete_architecture_payload(payload)
+    architecture = apply_architecture_recipe_resolution(derive_architecture(completed))
+    buck = _requirement(architecture, "buck")
+    assert buck.family == "tps54331-3v3-shunt-controls"
+    assert buck.parameters["reset_control"] is True and buck.parameters["enable_control"] is True
+    assert "enable" not in buck.ports and not any(row.id == "reset" for row in architecture.requirements)
+    assert {row.original_obligation_id for row in buck.obligations} == {
+        "shutdown", "reset-switch", "enable_jumper",
+    }
+    bom = BOM.model_validate(probe_architecture_construction({
+        "architecture": architecture.model_dump(mode="json"),
+    }))
+    assert check_requirement_physical_realization(architecture, bom).ok
+    support = check_reviewed_input_operating_ranges(architecture, bom)
+    assert support.ok, support.offenders
+    broken = bom.model_copy(deep=True)
+    series_resistor = next(part for part in broken.parts if part.recipe_role == "enable_bias_top")
+    source = next(row for row in broken.connections if row.net_name == "VIN"
+                  and any(ep.ref == series_resistor.ref for ep in row.endpoints))
+    source.endpoints = [ep for ep in source.endpoints if ep.ref != series_resistor.ref]
+    support = check_reviewed_input_operating_ranges(architecture, broken)
+    assert any("E_ENABLE_SUPPORT" in row for row in support.offenders)
+    reset = next(part for part in bom.parts if part.recipe_role == "reset_button")
+    signal = next(row for row in bom.connections
+                  if any(ep.ref == reset.ref and ep.pin == "1" for ep in row.endpoints))
+    signal.endpoints = [ep for ep in signal.endpoints if ep.ref != reset.ref]
+    assert any("E_REGULATOR_RESET" in row
+               for row in check_requirement_physical_realization(architecture, bom).offenders)
+
+    payload["signals"].append({"name": "NOT_A_RESET", "from": "reset.signal", "to": "edge:SPARE"})
+    with pytest.raises(ArchitectureIntentError, match="regulator_reset_unrealized"):
+        derive_architecture(complete_architecture_payload(payload))
+
+
 def test_misowned_physical_enable_jumper_is_separate_from_converter():
     from kicraft.design.architecture_intent import complete_architecture_payload
     from kicraft.design.lowering import lower_requirement
@@ -3117,6 +3444,7 @@ def _reviewed_connector_intent(
             "role": "connector",
             "family": family,
             "exact_part": exact_part,
+            "ties": {"pin1": "+5V", "pin2": "GND"},
             "declared_ports": [
                 {
                     "key": "pin1",
@@ -3172,6 +3500,49 @@ def test_reviewed_four_contact_connector_allows_unused_contacts(relation):
     assert [port.pin for port in connector.declared_interface.ports] == ["1", "2"]
 
 
+def test_jst_gpio_requires_the_controllers_return_and_labels_the_allocated_pad():
+    from kicraft.design.models import BOM, ConversationState
+    from kicraft.design.recipes import apply_architecture_recipe_resolution
+    from kicraft.design.synthesis.electrical_review import _pin_names
+    from kicraft.design.synthesis.interface_facts import reviewed_interface_facts
+    from kicraft.server.stage_work_units import probe_architecture_construction
+
+    intent = _one_part_intent({
+        "id": "core", "role": "mcu_core", "family": "ch32v003", "supply": "VLOGIC",
+    })
+    intent["mcu_present"] = True
+    intent["power"]["rails"] = {"VLOGIC": {"voltage": 3.3, "from": "input.pin1"}}
+    intent["requirements"][0]["ties"]["pin1"] = "VLOGIC"
+    header = {
+        "id": "jst", "sheet": "PART", "role": "connector", "family": "jst-xh-connector",
+        "exact_part": "B4B-XH-A(LF)(SN)", "supply": "VLOGIC",
+    }
+    intent["requirements"].append(header)
+    intent["signals"] = [{"name": "EXPOSED_GPIO_SIGNAL", "from": "core.output_test",
+                          "to": "jst.pin3"}]
+    with pytest.raises(ArchitectureIntentError) as rejected:
+        derive_architecture(intent)
+    assert {"jst_gpio_reference_missing", "jst_supply_contact_missing"} <= {
+        row.code for row in rejected.value.diagnostics
+    }
+
+    header["ties"] = {"pin2": "GND", "pin4": "VLOGIC"}
+    arch = apply_architecture_recipe_resolution(derive_architecture(intent))
+    assert _requirement(arch, "jst").ports == {
+        "pin2": "GND", "pin3": "EXPOSED_GPIO_SIGNAL", "pin4": "VLOGIC",
+    }
+    bom = BOM.model_validate(probe_architecture_construction({"architecture": arch.model_dump()}))
+    connector = next(p for p in bom.parts if p.lowering_requirement_id == "jst")
+    assert (connector.ref, "1") in {(pin.ref, pin.pin) for pin in bom.no_connect_pins}
+    mcu = next(p for p in bom.parts if p.recipe_role == "mcu")
+    (allocation,) = arch.recipe_selections[0].pin_allocations
+    fact = next(row for row in reviewed_interface_facts(ConversationState(architecture=arch, bom=bom))
+                if row["ref"] == connector.ref)
+    assert {pin["pin"]: pin["text"] for pin in fact["pins"]} == {
+        "2": "GND", "3": _pin_names(mcu.symbol, None)[allocation.pin], "4": "3.3V",
+    }
+
+
 def test_qwiic_function_cannot_be_realized_with_only_generic_unused_contacts():
     payload = _reviewed_connector_intent(
         family="qwiic-i2c-connector",
@@ -3181,6 +3552,42 @@ def test_qwiic_function_cannot_be_realized_with_only_generic_unused_contacts():
     with pytest.raises(ArchitectureIntentError) as exc:
         derive_architecture(payload)
     assert "unsupported_lowerer_contract" in {row.code for row in exc.value.diagnostics}
+
+
+@pytest.mark.parametrize("split", (None, "supply", "return", "bus"))
+def test_qwiic_supply_follows_actual_shared_i2c_domain(split):
+    intent = _hub75_intent()
+    intent["power"]["rails"].update({
+        "AUX3V3": {"voltage": 3.3, "from": "aux.output"},
+        "ISOLATED_GND": {"voltage": 0.0},
+    })
+    intent["requirements"].extend([
+        {"id": "aux", "sheet": "POWER", "role": "regulator",
+         "family": "tlv62569-3v3", "supply": "VBUS"},
+        {"id": "qwiic", "sheet": "MCU", "role": "connector", "family": "qwiic-i2c-connector"},
+        {"id": "storage", "sheet": "MCU", "role": "sensor", "family": "i2c-eeprom-256k",
+         "supply": "AUX3V3" if split == "supply" else "+3V3"},
+    ])
+    if split == "return":
+        intent["requirements"][-1]["reference_bindings"] = {"gnd": "ISOLATED_GND"}
+    intent["signals"].extend([
+        {"name": "DATA", "from": "esp32.sda", "to": ["storage.sda", "qwiic.sda"]},
+        {"name": "CLOCK", "from": "esp32.scl", "to": ["storage.scl", "qwiic.scl"]},
+    ])
+    if split == "bus":
+        intent["signals"][-1]["to"] = ["qwiic.scl"]
+    if split is not None:
+        with pytest.raises(ArchitectureIntentError) as exc:
+            derive_architecture(intent)
+        assert any(
+            row.code == "unsupported_lowerer_contract" and row.requirement_id == "qwiic"
+            for row in exc.value.diagnostics
+        )
+        return
+    compiled = derive_architecture(intent)
+    assert _requirement(compiled, "qwiic").ports == {
+        "sda": "DATA", "scl": "CLOCK", "ground": "GND", "vcc": "+3V3",
+    }
 
 
 @pytest.mark.parametrize("quantity,unit", [

@@ -5,9 +5,12 @@ import hashlib
 import json
 import re
 import shutil
+import subprocess
 import tempfile
 import time
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +38,7 @@ from kicraft.autoplacer.hardware.adapter import KiCadAdapter
 from kicraft.autoplacer.kicad_routing_tools import (
     KICAD_ROUTING_TOOLS_COMMIT,
     KICAD_ROUTING_TOOLS_VERSION,
+    _propagate_sibling_project_rules,
     route_with_kicad_routing_tools,
 )
 
@@ -145,7 +149,7 @@ def _prepare_leaf_ground_reservations(
     from kicraft.autoplacer.brain.breakout_stubs import add_breakout_stubs
     from kicraft.autoplacer.brain.gnd_pour import gnd_escape_specs
     from kicraft.autoplacer.kicad_routing_tools import (
-        _project_routing_floors, _propagate_sibling_project_rules,
+        _project_routing_floors,
         _routing_project, _stamp_local_ground_keepouts,
     )
 
@@ -159,7 +163,6 @@ def _prepare_leaf_ground_reservations(
         for pin in ((ground["owner_ref"], str(ground["owner_pin"])),
                     (spec["bypass_ref"], str(ground["member_pin"]))):
             limits[pin] = min(limit, limits.get(pin, limit))
-    _propagate_sibling_project_rules(str(source_pcb), str(board_path))
     board = pcbnew.LoadBoard(str(board_path))
     escapes = []
     for net in sorted({spec["ground_return"]["net"] for spec in contracts}):
@@ -189,25 +192,88 @@ def _prepare_leaf_ground_reservations(
     return marker, set(limits)
 
 
-def _finish_leaf_ground_planes(board_path: Path, cfg: dict[str, Any]) -> None:
-    """Refill both faces for leaf-owned ordinary returns before native audit."""
+def _finish_leaf_ground_planes(
+    board_path: Path, cfg: dict[str, Any], plane_nets: tuple[str, ...] = (),
+) -> None:
+    """Refill both faces for typed returns and proved plane-routed grounds."""
     from kicraft.autoplacer.brain.gnd_pour import pour_gnd_planes
 
-    contracts = _leaf_ground_contracts(board_path, cfg)
-    if not contracts:
+    nets = set(plane_nets)
+    nets.update(spec["ground_return"]["net"] for spec in _leaf_ground_contracts(board_path, cfg))
+    if not nets:
         return
     sidecars = [board_path.with_suffix(suffix) for suffix in (".kicad_pro", ".kicad_dru")]
     rules = [(path, path.read_bytes() if path.is_file() else None) for path in sidecars]
     try:
-        for net in sorted({spec["ground_return"]["net"] for spec in contracts}):
-            pour_gnd_planes(str(board_path), {**cfg, "gnd_zone_net": net},
-                            layers=("F.Cu", "B.Cu"))
+        for net in sorted(nets):
+            result = pour_gnd_planes(str(board_path), {**cfg, "gnd_zone_net": net},
+                                     layers=("F.Cu", "B.Cu"))
+            if net in plane_nets and not result.get("zones"):
+                raise ValueError(f"leaf plane ground {net!r} was not filled: {result}")
     finally:
         for path, content in rules:
             if content is None:
                 path.unlink(missing_ok=True)
             else:
                 path.write_bytes(content)
+
+
+@contextmanager
+def _leaf_power_plane_config(
+    cfg: dict[str, Any], plan: dict | None, translation: Point,
+) -> Iterator[dict[str, Any]]:
+    """Carry the hash-bound router witnesses into the centered power-pour frame."""
+    if plan is None:
+        yield cfg
+        return
+    if not (translation.x or translation.y):
+        yield {**cfg, "_parent_ground_reservation_plan": plan}
+        return
+
+    import pcbnew
+    from kicraft.autoplacer.brain.gnd_pour import _parent_ground_reservations
+
+    staged, zones = _parent_ground_reservations(plan)
+    offset = pcbnew.VECTOR2I(pcbnew.FromMM(translation.x), pcbnew.FromMM(translation.y))
+    for zone in zones:
+        zone.Move(offset)
+    with tempfile.TemporaryDirectory(prefix="kicraft-leaf-ground-plan-") as tmp:
+        centered = Path(tmp) / "ground_plan.kicad_pcb"
+        staged.Save(str(centered))
+        yield {**cfg, "_parent_ground_reservation_plan": {
+            "board_path": str(centered), "zone_name": plan["zone_name"],
+            "sha256": hashlib.sha256(centered.read_bytes()).hexdigest(),
+        }}
+
+
+def _audit_leaf_plane_grounds(
+    board_path: Path, cfg: dict[str, Any], nets: tuple[str, ...], validation: dict,
+) -> None:
+    """A private routing pass may be skipped only for real, final connected fill."""
+    if not nets:
+        return
+    import pcbnew
+    from kicraft.autoplacer.fab_profile import fab_floors
+    from kicraft.autoplacer.hardware.ground_reservations import (
+        IncompleteGroundForestError, reserve_connected_ground,
+    )
+
+    board = pcbnew.LoadBoard(str(board_path))
+    failed = set(validation.get("drc", {}).get("unconnected_nets") or ()) & set(nets)
+    width = fab_floors(cfg)["track_mm"]
+    for net in nets:
+        try:
+            # In-memory only: none of the audit masks belongs in the artifact.
+            reserve_connected_ground(
+                board, net, "KiCraft leaf ground audit",
+                width_mm=width, router_clearance_mm=0.0,
+            )
+        except IncompleteGroundForestError:
+            failed.add(net)
+    validation["leaf_plane_ground"] = {"nets": list(nets), "incomplete": sorted(failed)}
+    if failed:
+        validation["accepted"] = False
+        validation.setdefault("rejection_reasons", []).append("leaf_plane_ground_incomplete")
 
 
 def _finish_leaf_current_landings(board_path: Path, cfg: dict[str, Any]) -> dict:
@@ -359,11 +425,20 @@ def _reserve_signal_escapes(board_path: Path, extraction: ExtractedSubcircuitBoa
         if board is None:
             raise ValueError(f"failed to load {board_path}")
         specs = signal_escape_specs(board, cfg, set(extraction.external_net_names))
+        ground = cfg.get("gnd_zone_net", "GND")
+        plane_candidate = (
+            ground and cfg.get("gnd_plane_enabled", True) and board.GetCopperLayerCount() == 2
+            and board.GetNetInfo().GetNetItem(ground) is not None
+        )
         del board
         result = add_breakout_stubs(str(board_path), specs, cfg=cfg, signal_escape_owner=True) if specs else {
             "stubs": 0, "vias": 0, "skipped": [],
         }
         result["candidates"] = len(specs)
+        if plane_candidate:
+            launches = {(spec.ref, str(spec.pad)) for spec in specs if spec.via_exit is not None}
+            if any((row["ref"], row["pad"]) in launches for row in result.get("owned_signal_escapes", ())):
+                result["plane_ground_candidate"] = ground
         print(
             f"  Signal pre-escapes: {result['stubs']}/{len(specs)} pad(s), "
             f"{result['vias']} fanout via(s), {len(result['skipped'])} blocked"
@@ -379,10 +454,64 @@ def _reserve_signal_escapes(board_path: Path, extraction: ExtractedSubcircuitBoa
 def _require_signal_escape_ownership(validation: dict, ownership: dict,
                                      reservation: dict) -> None:
     """A generated escape must never silently lose its ownership receipt."""
-    if not ownership.get("unresolved_source_uuids") and not reservation.get("error"):
+    if not ownership.get("error") and not ownership.get("unresolved_source_uuids") and not reservation.get("error"):
         return
     validation["accepted"] = False
     validation.setdefault("rejection_reasons", []).append("signal_escape_ownership_incomplete")
+
+
+def _bind_centered_signal_escapes(board: Path, receipt: dict, previous: dict) -> tuple[dict, dict]:
+    """Rebind exact native stamp receipts after zone/repair finishing."""
+    from kicraft.autoplacer.brain.copper_accounting import attach_stamped_escape_ownership
+
+    copper = import_routed_copper(str(board))
+    result = attach_stamped_escape_ownership(copper, receipt)
+    current_missing = result["unresolved_source_uuids"]
+    result["unresolved_source_uuids"] = sorted(set(previous["unresolved_source_uuids"] + current_missing))
+    if result["bound"] + len(current_missing) != previous["bound"]:
+        result["error"] = "native centered stamp lost compiler escape custody"
+    return copper, result
+
+
+def _finish_private_signal_escapes(
+    routed_board: Path, stamped_board: Path, copper: dict, private_nets: set[str],
+) -> dict:
+    """Remove only compiler-owned private branches with native partition proof."""
+    from kicraft.autoplacer.brain.escape_cleanup import cleanup_signal_escapes
+
+    from kicraft.autoplacer.brain.copper_accounting import signal_escape_geometry_receipt
+
+    owned = signal_escape_geometry_receipt({
+        name: [item for item in copper[name] if item.net in private_nets and item.escape_ownership]
+        for name in ("traces", "vias")
+    })
+    if not owned["traces"] and not owned["vias"]:
+        return {}
+    payload = {
+        "version": 1,
+        "prune_terminal_tracks": True,
+        "stamped_board_sha256": hashlib.sha256(stamped_board.read_bytes()).hexdigest(),
+        "routed_board_sha256": hashlib.sha256(routed_board.read_bytes()).hexdigest(),
+        **owned,
+    }
+    try:
+        with tempfile.TemporaryDirectory(dir=routed_board.parent, prefix=".private-escapes-") as directory:
+            temp = Path(directory)
+            ownership = temp / "ownership.json"
+            ownership.write_text(json.dumps(payload), encoding="utf-8")
+            return cleanup_signal_escapes(routed_board, ownership, temp / "cleanup.json")
+    except (OSError, ValueError, RuntimeError, KeyError) as exc:
+        return {"accepted": False, "error": str(exc)}
+
+
+def _update_escape_items(summary: dict, pruned: set[str], replacements: dict) -> dict:
+    return {"owned_signal_escapes": [
+        {**branch, "items": [
+            replacements.get(item["uuid"], item) for item in branch["items"]
+            if item["uuid"] not in pruned
+        ]}
+        for branch in summary.get("owned_signal_escapes", [])
+    ]}
 
 
 def _finish_interface_landings(
@@ -403,7 +532,7 @@ def _finish_interface_landings(
     board = pcbnew.LoadBoard(str(board_path))
     if board is None:
         raise ValueError(f"failed to load {board_path}")
-    missing = unlanded_interface_components(board, nets)
+    missing = unlanded_interface_components(board, nets, cfg)
     pads = {label for item in missing for label in item["pads"]}
     specs = [spec for spec in signal_escape_specs(board, cfg, nets)
              if f"{spec.ref}.{spec.pad}" in pads]
@@ -437,6 +566,14 @@ def _audit_interface_landings(board_path: Path, extraction: ExtractedSubcircuitB
         validation["interface_landing_audit"] = {"unlanded_components": []}
         validation["interface_unlanded_nets"] = []
         return
+    escape_cfg = {
+        key: cfg[key] for key in (
+            "fab_capability", "thermal_requirements", "escape_via_size_mm",
+            "escape_via_drill_mm", "power_nets", "usb_routing_contracts",
+        ) if key in cfg
+    }
+    if "power_nets" in escape_cfg:
+        escape_cfg["power_nets"] = sorted(escape_cfg["power_nets"])
     try:
         with tempfile.TemporaryDirectory(prefix="kicraft-interface-landings-") as tmp:
             result_path = Path(tmp) / "audit.json"
@@ -445,7 +582,8 @@ def _audit_interface_landings(board_path: Path, extraction: ExtractedSubcircuitB
                 "from kicraft.autoplacer.brain.signal_escape import unlanded_interface_components\n"
                 f"board = pcbnew.LoadBoard({str(board_path)!r})\n"
                 "if board is None: raise RuntimeError('Failed to load board')\n"
-                f"result = unlanded_interface_components(board, set({sorted(signal_nets)!r}))\n"
+                f"result = unlanded_interface_components(board, set({sorted(signal_nets)!r}), "
+                f"json.loads({json.dumps(escape_cfg)!r}))\n"
                 f"with open({str(result_path)!r}, 'w') as out: json.dump(result, out)\n"
             )
             run_pcbnew_script(script)
@@ -1101,6 +1239,8 @@ def _route_local_subcircuit_impl(
     routing_start = time.monotonic()
     leaf_routing_cfg = {**cfg, "pcb_path": str(source_pcb), "usb_routing_scope": "leaf"}
     _breakout_specs = _resolve_breakout_specs(cfg)
+    # Signal launches are sized for the same native netclass the router uses.
+    _propagate_sibling_project_rules(str(source_pcb), str(pre_route_board))
 
     # Contracted returns need an actual plane witness before signal copper can
     # fragment it. Ordinary masks remain active through all routing passes.
@@ -1113,6 +1253,16 @@ def _route_local_subcircuit_impl(
     _signal_escape = _reserve_signal_escapes(pre_route_board, extraction, cfg)
     if _signal_escape["stubs"] > 0:
         leaf_routing_cfg["routing_preserve_existing_copper"] = True
+    if plane_candidate := _signal_escape.get("plane_ground_candidate"):
+        # A late explicit GND route can enclose all of a dense launch row.
+        # Let native filled copper complete that work only if every GND pad
+        # already belongs to a protected, complete plane forest.
+        leaf_routing_cfg["routing_local_ground_reservations"] = True
+        leaf_routing_cfg["routing_plane_ground_nets"] = [plane_candidate]
+        leaf_routing_cfg["thermal_requirements"] = [
+            row for row in cfg.get("thermal_requirements", [])
+            if row["owner_ref"] in route_input_board.components
+        ]
 
     # Escape remaining GND pads after reserving dense signal exits.
     if cfg.get("gnd_pre_escape", True):
@@ -1360,11 +1510,16 @@ def _route_local_subcircuit_impl(
             },
             route_timing,
         )
+    from kicraft.autoplacer.brain.escape_cleanup import (
+        _bind_router_origin_frame, _capture_router_origin, _finish_router_origin_copper,
+        _prepare_router_origin_frame, prune_router_spurs,
+    )
+
     # Route cache: deterministic array leaves reuse identical KRT output.
     _cache_pcb = None
     _cache_meta = None
     if leaf_is_fully_array(route_input_board.components, cfg.get("arrays", [])):
-        _sig = _deterministic_route_signature(route_input_board, leaf_routing_cfg)
+        _sig = "router-origin-v1-" + _deterministic_route_signature(route_input_board, leaf_routing_cfg)
         _cache_dir = Path(artifact_paths.artifact_dir) / "route_cache"
         _cache_pcb = _cache_dir / f"{_sig}.kicad_pcb"
         _cache_meta = _cache_dir / f"{_sig}.json"
@@ -1386,6 +1541,18 @@ def _route_local_subcircuit_impl(
         if _ground_marker:
             from kicraft.autoplacer.kicad_routing_tools import _strip_router_keepouts
             _strip_router_keepouts(routed_board, _ground_marker)
+
+        routing_stats["router_spur_cleanup"] = prune_router_spurs(pre_route_board, routed_board, cfg)
+        passes = routing_stats["passes"]
+        routing_stats["router_copper_origin"] = (
+            _capture_router_origin(Path(passes[0]["router_input_path"]), routed_board)
+            if passes else {
+                "version": 1,
+                "router_input_sha256": hashlib.sha256(pre_route_board.read_bytes()).hexdigest(),
+                "router_output_sha256": hashlib.sha256(routed_board.read_bytes()).hexdigest(),
+                "items": {},
+            }
+        )
         if _cache_pcb is not None:
             _cache_dir.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(routed_board, _cache_pcb)
@@ -1393,6 +1560,13 @@ def _route_local_subcircuit_impl(
     if _ground_marker:
         from kicraft.autoplacer.kicad_routing_tools import _strip_router_keepouts
         _strip_router_keepouts(pre_route_board, _ground_marker)
+    plane_nets = tuple(routing_stats.get("plane_connected_ground_nets", ()))
+    ground_reservations = routing_stats.get("local_ground_reservations") or {}
+    ground_plan = (
+        routing_stats["local_ground_reservation_plan"]
+        if any(row["zones"] for row in ground_reservations.get("connected_ground", ()))
+        else None
+    )
     # Include any recovered signal exits in the uncentred routed layout.
     _signal_finish = _finish_interface_landings(routed_board, extraction, cfg)
     route_timing["routing_s"] = round(max(0.0, time.monotonic() - routing_start), 3)
@@ -1451,10 +1625,45 @@ def _route_local_subcircuit_impl(
 
     import_copper_start = time.monotonic()
     imported_copper = import_routed_copper(str(routed_board))
-    from kicraft.autoplacer.brain.copper_accounting import attach_signal_escape_ownership
+    from kicraft.autoplacer.brain.copper_accounting import (
+        attach_signal_escape_ownership, attach_stamped_escape_ownership, signal_escape_geometry_receipt,
+    )
     _escape_ownership = attach_signal_escape_ownership(
         imported_copper, _signal_escape, _signal_finish
     )
+    private_cleanup = {}
+    private_landings = {}
+    if not _escape_ownership["unresolved_source_uuids"]:
+        from kicraft.autoplacer.brain.signal_escape import _finish_owned_escape_landings
+
+        private_nets = set(extraction.internal_net_names) - set(extraction.external_net_names)
+        private_cleanup = _finish_private_signal_escapes(
+            routed_board, pre_route_board, imported_copper, private_nets,
+        )
+        pruned: set[str] = set()
+        if private_cleanup.get("accepted") and private_cleanup["removed"]:
+            pruned = {item["escape_ownership"]["source_uuid"]
+                      for branch in private_cleanup["removed"] for item in branch["items"]}
+            # Removing an unused compiler via can expose a router-born tail.
+            # Retire it in this leaf's original routing scope, before import;
+            # the parent must never reinterpret inherited private copper.
+
+            routing_stats["post_private_router_spur_cleanup"] = prune_router_spurs(
+                pre_route_board, routed_board, cfg, input_cleanup=private_cleanup,
+            )
+        summaries = (_signal_escape, _signal_finish)
+        if pruned:
+            summaries = tuple(_update_escape_items(summary, pruned, {}) for summary in summaries)
+        try:
+            private_landings = _finish_owned_escape_landings(routed_board, summaries, private_nets, cfg)
+        except (OSError, ValueError, RuntimeError, KeyError, subprocess.SubprocessError) as exc:
+            private_landings = {"accepted": False, "error": str(exc)}
+        replacements = private_landings.get("replacements", {})
+        if replacements:
+            summaries = tuple(_update_escape_items(summary, set(), replacements) for summary in summaries)
+        if pruned or replacements:
+            imported_copper = import_routed_copper(str(routed_board))
+            _escape_ownership = attach_signal_escape_ownership(imported_copper, *summaries)
     route_timing["import_routed_copper_s"] = round(
         max(0.0, time.monotonic() - import_copper_start), 3
     )
@@ -1469,6 +1678,12 @@ def _route_local_subcircuit_impl(
     silk_stamp_start = time.monotonic()
     silk_adapter = KiCadAdapter(str(routed_board), config=cfg)
     routed_state_for_silk = silk_adapter.load()
+    loaded_ownership = attach_stamped_escape_ownership(
+        {"traces": routed_state_for_silk.traces, "vias": routed_state_for_silk.vias},
+        signal_escape_geometry_receipt(imported_copper),
+    )
+    if loaded_ownership["unresolved_source_uuids"]:
+        _escape_ownership["unresolved_source_uuids"].extend(loaded_ownership["unresolved_source_uuids"])
     mating_edges = _leaf_mating_edges(routed_board, routed_state_for_silk.components, cfg)
     # Shrink Edge.Cuts to hug the post-route geometry the silk hugs, and center
     # the whole leaf on a standard A4 page so the standalone board opens centered in
@@ -1487,6 +1702,7 @@ def _route_local_subcircuit_impl(
         antenna_edge_intents=routed_state_for_silk.antenna_edge_intents,
         mating_edges=mating_edges,
     )
+    _delta = Point(0, 0)
     if _new_outline is not None:
         _new_tl, _new_br = _new_outline
         _delta, _centered_outline = _center_on_leaf_page(_new_tl, _new_br, cfg)
@@ -1520,6 +1736,13 @@ def _route_local_subcircuit_impl(
         vias=routed_state_for_silk.vias,
         outline=routed_state_for_silk.board_outline if mating_edges else None,
     )
+    router_origin = routing_stats["router_copper_origin"]
+    pending_origin = (
+        _prepare_router_origin_frame(router_origin, routed_board, _delta)
+        if router_origin["items"] else None
+    )
+    _centered_receipt_path = Path(f"{routed_board}.escape_ownership.json")
+    _centered_receipt_path.unlink(missing_ok=True)
     silk_adapter.stamp_subcircuit_board(
         routed_state_for_silk,
         output_path=str(routed_board),
@@ -1527,6 +1750,12 @@ def _route_local_subcircuit_impl(
         clear_existing_zones=True,
         remove_unmapped_footprints=False,
     )
+    centered_origin = _bind_router_origin_frame(pending_origin, routed_board) if pending_origin else None
+    _centered_escape_receipt = {}
+    if loaded_ownership["bound"]:
+        _centered_escape_receipt = json.loads(_centered_receipt_path.read_text(encoding="utf-8"))
+        if _centered_escape_receipt.get("stamped_board_sha256") != hashlib.sha256(routed_board.read_bytes()).hexdigest():
+            raise ValueError("centered signal escape receipt does not bind the stamped PCB")
     route_timing["silk_post_route_stamp_s"] = round(
         max(0.0, time.monotonic() - silk_stamp_start), 3
     )
@@ -1572,11 +1801,12 @@ def _route_local_subcircuit_impl(
                 repair_stranded_power,
             )
 
-            _pwr = pour_power_planes(
-                str(routed_board),
-                cfg,
-                layers=(cfg.get("power_plane_layer", "F.Cu"),),
-            )
+            with _leaf_power_plane_config(cfg, ground_plan, _delta) as power_cfg:
+                _pwr = pour_power_planes(
+                    str(routed_board),
+                    power_cfg,
+                    layers=(cfg.get("power_plane_layer", "F.Cu"),),
+                )
             if _pwr.get("nets"):
                 print(
                     f"  Power plane: poured {_pwr['nets']} on "
@@ -1592,13 +1822,22 @@ def _route_local_subcircuit_impl(
                         f"  Power strand repair: {_rep['stranded']} stranded, "
                         f"{_rep['tied']} tied, {len(_rep['skipped'])} skipped"
                     )
-        except Exception as exc:  # finishing step must never fail the leaf
+        except Exception as exc:
+            if ground_plan is not None:
+                raise
             print(f"  WARNING: power plane step failed: {exc}")
         route_timing["power_pour_s"] = round(max(0.0, time.monotonic() - power_pour_start), 3)
-    _finish_leaf_ground_planes(routed_board, cfg)
+    _finish_leaf_ground_planes(routed_board, cfg, plane_nets)
     from kicraft.autoplacer.brain.gnd_pour import finish_local_thermal_ground
     finish_local_thermal_ground(str(routed_board), cfg)
     _finish_leaf_current_landings(routed_board, cfg)
+    post_finish_cleanup = (
+        _finish_router_origin_copper(centered_origin, routed_board, cfg)
+        if centered_origin else {
+            "skipped": True, "reason": router_origin.get("ineligible", "no_router_copper"), "removed": [],
+        }
+    )
+    routing_stats["post_finish_router_spur_cleanup"] = post_finish_cleanup
 
 
     routed_validation_start = time.monotonic()
@@ -1675,6 +1914,27 @@ def _route_local_subcircuit_impl(
     validation["signal_pre_escape"] = _signal_escape
     validation["signal_finish"] = _signal_finish
     validation["signal_escape_ownership"] = _escape_ownership
+    if _centered_escape_receipt:
+        imported_copper, _escape_ownership = _bind_centered_signal_escapes(
+            routed_board, _centered_escape_receipt, _escape_ownership,
+        )
+        validation["signal_escape_ownership"] = _escape_ownership
+        validation["signal_escape_geometry_receipt"] = {
+            **signal_escape_geometry_receipt(imported_copper),
+            "board_sha256": hashlib.sha256(routed_board.read_bytes()).hexdigest(),
+        }
+    else:
+        imported_copper = import_routed_copper(str(routed_board))
+    if private_cleanup:
+        validation["private_signal_escape_cleanup"] = private_cleanup
+    if private_landings:
+        validation["private_signal_escape_landings"] = private_landings
+        if private_landings.get("accepted") is False:
+            validation["accepted"] = False
+            validation.setdefault("rejection_reasons", []).append("private_signal_escape_landing_proof")
+    if post_finish_cleanup.get("accepted") is False:
+        validation["accepted"] = False
+        validation.setdefault("rejection_reasons", []).append("post_finish_router_copper_proof")
     _require_signal_escape_ownership(validation, _escape_ownership, _signal_escape)
     _audit_interface_landings(routed_board, extraction, validation, cfg)
     if generate_diagnostics and render_intermediate:
@@ -1852,6 +2112,7 @@ def _route_local_subcircuit_impl(
 
     _validate_leaf_current_contracts(routed_board, cfg, validation)
     _validate_leaf_thermal_requirements(routed_board, cfg, validation)
+    _audit_leaf_plane_grounds(routed_board, cfg, plane_nets, validation)
 
     routed_internal, failed_internal = _internal_net_verdict(validation, extraction)
 
@@ -2160,7 +2421,9 @@ def _stamp_trivial_leaf(
     finish_local_thermal_ground(str(routed_board), cfg)
     _finish_leaf_current_landings(routed_board, cfg)
     imported_copper = import_routed_copper(str(routed_board))
-    from kicraft.autoplacer.brain.copper_accounting import attach_signal_escape_ownership
+    from kicraft.autoplacer.brain.copper_accounting import (
+        attach_signal_escape_ownership, signal_escape_geometry_receipt,
+    )
     _escape_ownership = attach_signal_escape_ownership(
         imported_copper, _signal_escape, _signal_finish
     )
@@ -2177,6 +2440,11 @@ def _stamp_trivial_leaf(
     validation["signal_pre_escape"] = _signal_escape
     validation["signal_finish"] = _signal_finish
     validation["signal_escape_ownership"] = _escape_ownership
+    if _escape_ownership["bound"]:
+        validation["signal_escape_geometry_receipt"] = {
+            **signal_escape_geometry_receipt(imported_copper),
+            "board_sha256": hashlib.sha256(routed_board.read_bytes()).hexdigest(),
+        }
     _require_signal_escape_ownership(validation, _escape_ownership, _signal_escape)
     _audit_interface_landings(routed_board, extraction, validation, cfg)
     _validate_leaf_current_contracts(routed_board, cfg, validation)

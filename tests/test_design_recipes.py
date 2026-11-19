@@ -24,9 +24,9 @@ from kicraft.server.stage_contracts import (
 
 def _selection(**parameters):
     return RecipeSelection(
-        recipe="rp2040-minimal@4",
+        recipe="rp2040-minimal@5",
         instance="main",
-        sheets={"mcu": "MCU", "io": "CASTELLATED IO"},
+        sheets={"mcu": "MCU", "io": "IO"},
         port_bindings={
             "vdd": "+3V3",
             "gnd": "GND",
@@ -38,11 +38,25 @@ def _selection(**parameters):
 
 
 def test_recipe_expansion_is_deterministic_and_provenanced():
-    first = expand_recipe(_selection())
-    second = expand_recipe(_selection())
+    selection = _selection(breakout_style="castellated")
+    first = expand_recipe(selection)
+    second = expand_recipe(selection)
     assert first == second
-    assert all(part.recipe_id == "rp2040-minimal@4" for part in first.parts)
-    assert [edge.side for edge in first.edge_interfaces] == ["left", "right"]
+    assert all(part.recipe_id == "rp2040-minimal@5" for part in first.parts)
+    assert [(edge.side, edge.pitch_mm, edge.behavior, len(edge.refs))
+            for edge in first.edge_interfaces] == [
+        ("left", 2.54, "castellated", 17), ("right", 2.54, "castellated", 17),
+    ]
+    refs = [ref for edge in first.edge_interfaces for ref in edge.refs]
+    assert refs == [part.ref for part in first.parts if part.recipe_role in {"cast_left", "cast_right"}]
+    assert all(
+        part.assembly is False and part.footprint == "castellated-pad-2p54:Castellated_Pad_2.54mm"
+        for part in first.parts if part.ref in refs
+    )
+    assert [(pin.ref, pin.pin, pin.owner, pin.owner_id) for pin in first.ownership.pins
+            if pin.ref in refs] == [
+        (ref, "1", "recipe", selection.recipe) for ref in refs
+    ]
 
     bom = BOM(
         parts=first.parts,
@@ -58,6 +72,100 @@ def test_recipe_expansion_is_deterministic_and_provenanced():
     assert any(
         offender.startswith("native_usb_programming_required:") for offender in access.offenders
     )
+
+
+def test_rp2040_v4_remains_expandable_only_as_a_pinned_choice():
+    from kicraft.design.recipes import recipe_summaries
+
+    (summary,) = [row for row in recipe_summaries() if row["family"] == "rp2040"]
+    assert summary["recipe"] == "rp2040-minimal@5"
+    assert summary["parameter_defaults"]["breakout_style"] == "none"
+    assert summary["allowed_parameters"]["breakout_style"] == ("none", "castellated")
+    assert not any(group["role"].startswith("cast_") for group in summary["owned_parts"])
+
+    old = expand_recipe(_selection().model_copy(update={"recipe": "rp2040-minimal@4"}))
+    explicit = expand_recipe(_selection(breakout_style="castellated"))
+    assert "breakout_style" not in old.parameters
+    assert old.edge_interfaces == explicit.edge_interfaces
+    assert old.connections == explicit.connections
+    assert old.no_connect_pins == explicit.no_connect_pins
+    assert [part.recipe_role for part in old.parts] == [part.recipe_role for part in explicit.parts]
+    assert all(part.recipe_id == "rp2040-minimal@4" for part in old.parts)
+
+
+def test_rp2040_integrated_swd_keeps_six_spi_i2c_allocations_and_the_complete_core():
+    from kicraft.design.recipes.resolver import resolve_architecture_recipes
+    from kicraft.eval.mcu_artifact_evidence import mcu_circuit_facts
+
+    expected = {
+        "SPI_MISO": ("2", "spi-miso"), "SPI_CS": ("3", "spi-cs"),
+        "SPI_SCLK": ("4", "spi-sclk"), "SPI_MOSI": ("5", "spi-mosi"),
+        "I2C_SDA": ("6", "i2c-sda"), "I2C_SCL": ("7", "i2c-scl"),
+    }
+    payload = {
+        "sheets": [{"name": "MCU", "stem": "MCU", "function": "RP2040 application core"}],
+        "mcu_present": True,
+        "rail_voltages": {"+3V3": 3.3, "GND": 0.0},
+        "power_nets": ["+3V3", "GND"],
+        "inter_sheet_nets": [],
+        "requirements": [{
+            "id": "processor", "sheet": "MCU", "role": "mcu_core",
+            "family": "rp2040", "exact_part": "RP2040",
+            "parameters": {"native_usb": False, "programming": "swd", "gpio_exposed": 6},
+            "ports": {"vdd": "+3V3", "gnd": "GND", **{net.lower(): net for net in expected}},
+            "interfaces": ["spi_controller", "i2c_controller"],
+        }],
+    }
+    result = resolve_architecture_recipes(payload, {"named_parts": ["RP2040"]})
+    assert not result.blocking
+    (selection,) = result.selections
+    assert selection.recipe == "rp2040-minimal@5"
+    assert selection.parameters["breakout_style"] == "none"
+    assert {row.net: (row.pin, row.capability) for row in selection.pin_allocations} == expected
+    expansion = expand_recipe(selection)
+    assert expand_recipe(selection) == expansion
+    assert expansion.edge_interfaces == []
+    assert all(not part.recipe_role.startswith("cast_") for part in expansion.parts)
+    assert all(not row["role"].startswith("cast_") for row in expansion.ownership.placement_constraints)
+    assert set(expansion.ownership.assertions) == {
+        "rp2040_bootsel_access", "rp2040_native_usb_programming", "rp2040_swd_recovery",
+    }
+
+    mcu = next(part for part in expansion.parts if part.recipe_role == "mcu")
+    by_pin = {(pin.ref, pin.pin): pin for pin in expansion.ownership.pins}
+    for net, (pin, _) in expected.items():
+        assert (by_pin[mcu.ref, pin].net, by_pin[mcu.ref, pin].owner) == (net, "allocator")
+    assert {by_pin[mcu.ref, pin].net for pin in ("8", "41", "46", "47")} == {None}
+    nets = {
+        (ep.ref, ep.pin): connection.net_name
+        for connection in expansion.connections for ep in connection.endpoints
+    }
+    refs = {part.recipe_role: part.ref for part in expansion.parts}
+    assert nets[mcu.ref, "20"] == nets[refs["crystal"], "1"] == nets[refs["xin_cap"], "1"]
+    assert nets[mcu.ref, "21"] == nets[refs["xout_resistor"], "1"]
+    assert nets[refs["xout_resistor"], "2"] == nets[refs["crystal"], "3"] == nets[refs["xout_cap"], "1"]
+    assert nets[mcu.ref, "21"] != nets[refs["crystal"], "3"]
+    assert {nets[refs[role], "2"] for role in ("crystal", "xin_cap", "xout_cap")} == {"GND"}
+    bom = BOM(parts=expansion.parts, connections=expansion.connections,
+              no_connect_pins=expansion.no_connect_pins, recipe_ownership=[expansion.ownership])
+    assert check_net_coverage(bom).ok
+    assert check_mcu_programming_access(bom).ok
+    assert mcu_circuit_facts([part.model_dump() for part in expansion.parts], {}, nets)[
+        "net_paths"
+    ]["rp2040_swd_recovery_complete_core"]
+
+
+def test_rp2040_integrated_direct_gpio_and_unbound_allocatable_pin():
+    selection = _selection(gpio_exposed=2)
+    selection = selection.model_copy(update={
+        "port_bindings": {**selection.port_bindings, "gpio0": "DIRECT_GPIO"},
+    })
+    expanded = expand_recipe(selection)
+    mcu, = [part for part in expanded.parts if part.recipe_role == "mcu"]
+    pins = {pin.pin: pin for pin in expanded.ownership.pins if pin.ref == mcu.ref}
+    assert (pins["2"].net, pins["2"].owner) == ("DIRECT_GPIO", "recipe")
+    assert (pins["3"].net, pins["3"].owner) == (None, "allocator")
+    assert (pins["4"].net, pins["4"].owner) == (None, "recipe")  # outside the GPIO limit
 
 
 def test_multiple_recipe_instances_allocate_disjoint_references():
@@ -333,6 +441,8 @@ def test_recipe_rejects_unknown_version_parameter_and_sheet_role():
         expand_recipe(_selection().model_copy(update={"recipe": "rp2040-minimal@99"}))
     with pytest.raises(ValueError, match="unknown parameters"):
         expand_recipe(_selection(arbitrary_part="x"))
+    with pytest.raises(ValueError, match="breakout_style"):
+        expand_recipe(_selection(breakout_style="edge_header"))
     with pytest.raises(ValueError, match="sheet roles mismatch"):
         expand_recipe(_selection().model_copy(update={"sheets": {"mcu": "MCU"}}))
 
@@ -344,7 +454,7 @@ def test_saved_rp2040_graph_requires_architecture_regeneration(version):
 
     old = f"rp2040-minimal@{version}"
     saved = _selection().model_copy(update={"recipe": old})
-    assert legacy_recipe_replacement(old) == "rp2040-minimal@4"
+    assert legacy_recipe_replacement(old) == "rp2040-minimal@5"
     with pytest.raises(ValueError, match="architecture regeneration"):
         migrate_recipe_selection(saved)
     with pytest.raises(ValueError, match="architecture regeneration"):
@@ -368,6 +478,7 @@ def test_rp2040_rejects_binding_unexposed_gpio():
 
 @pytest.mark.parametrize("recipe,parameters", [
     ("rp2040-minimal@4", {"native_usb": True, "programming": "native_usb"}),
+    ("rp2040-minimal@5", {"native_usb": True, "programming": "native_usb"}),
 ])
 @pytest.mark.parametrize("dm,dp", [("SHORT", "SHORT"), ("GND", "DP"), ("DM", "+3V3")])
 def test_rp2040_rejects_shorted_usb_pair_or_usb_to_supply(recipe, parameters, dm, dp):
@@ -381,9 +492,9 @@ def test_rp2040_rejects_shorted_usb_pair_or_usb_to_supply(recipe, parameters, dm
 
 
 
-def test_rp2040_v4_scopes_internal_nets_and_binds_power_ports():
+def test_rp2040_scopes_internal_nets_and_binds_power_ports():
     selection = RecipeSelection(
-        recipe="rp2040-minimal@4",
+        recipe="rp2040-minimal@5",
         instance="main",
         sheets={"mcu": "MCU", "io": "IO"},
         port_bindings={
@@ -827,20 +938,25 @@ def test_old_ldo_graph_requires_architecture_regeneration(old, new):
 def test_raw_legacy_recipe_ids_identify_artifacts_needing_regeneration():
     from kicraft.design.recipe_versions import is_legacy_recipe_id, legacy_recipe_replacement
 
-    assert legacy_recipe_replacement("rp2040-minimal@1") == "rp2040-minimal@4"
-    assert legacy_recipe_replacement("rp2040-minimal@2") == "rp2040-minimal@4"
-    assert legacy_recipe_replacement("rp2040-minimal@3") == "rp2040-minimal@4"
+    assert legacy_recipe_replacement("rp2040-minimal@1") == "rp2040-minimal@5"
+    assert legacy_recipe_replacement("rp2040-minimal@2") == "rp2040-minimal@5"
+    assert legacy_recipe_replacement("rp2040-minimal@3") == "rp2040-minimal@5"
     assert is_legacy_recipe_id("drv8833-dual-motor@1")
     assert is_legacy_recipe_id("tps54331-adjustable@1")
     assert is_legacy_recipe_id("tps54331-12v-1a@1")
     assert not is_legacy_recipe_id("rp2040-minimal@4")
+    assert not is_legacy_recipe_id("rp2040-minimal@5")
     assert not is_legacy_recipe_id({"recipe": "rp2040-minimal@2"})
 
 
 @pytest.mark.parametrize(("old", "new"), [
     ("esp32-c3-mini-1-minimal@1", "esp32-c3-mini-1-minimal@2"),
     ("esp32-c3-mini-1-h4x-minimal@1", "esp32-c3-mini-1-h4x-minimal@2"),
-    ("tps54331-adjustable@1", "tps54331-adjustable@2"),
+    ("tps54331-adjustable@1", "tps54331-adjustable@4"),
+    ("tps54331-adjustable@2", "tps54331-adjustable@4"),
+    ("tps54331-adjustable@3", "tps54331-adjustable@4"),
+    ("tps54331-3v3-shunt-controls@1", "tps54331-3v3-shunt-controls@3"),
+    ("tps54331-3v3-shunt-controls@2", "tps54331-3v3-shunt-controls@3"),
     ("tps54331-12v-1a@1", "tps54331-12v-1a@2"),
 ])
 def test_electrical_fix_versions_migrate_saved_selection_without_mutation(old, new):
@@ -857,6 +973,17 @@ def test_electrical_fix_versions_migrate_saved_selection_without_mutation(old, n
     assert expand_recipe(saved).selection.recipe == new
     with pytest.raises(ValueError, match="unknown parameters"):
         migrate_recipe_selection(saved.model_copy(update={"parameters": {"unexpected": 1}}))
+
+
+@pytest.mark.parametrize("old", ("tps54331-adjustable@3", "tps54331-3v3-shunt-controls@2"))
+def test_tps54331_sourcing_versions_invalidate_pinned_old_bom(old):
+    from kicraft.design.stage_state import legacy_recipe_resume_stage
+
+    saved = {"architecture": {"recipe_selections": []},
+             "bom": {"parts": [{"recipe_id": old}]}}
+    assert legacy_recipe_resume_stage(saved) == "bom"
+    assert saved["bom"]["parts"] == [{"recipe_id": old}]
+
 
 @pytest.mark.parametrize("old", ["drv8833-dual-motor@1", "drv8833-dual-motor@2", "drv8833-dual-motor@3", "drv8833-dual-motor@4", "drv8833-dual-motor@5"])
 @pytest.mark.parametrize("complete", [False, True])
@@ -1042,7 +1169,7 @@ def test_me6211_enable_binding_or_default_tracks_pin_three(binding, expected):
 
 def test_tps54331_external_enable_is_connected_without_local_shunt():
     selection = RecipeSelection(
-        recipe="tps54331-adjustable@2",
+        recipe="tps54331-adjustable@4",
         instance="buck",
         sheets={"power": "POWER"},
         port_bindings={"input": "VIN", "gnd": "GND", "output": "VOUT", "enable": "CTRL"},
@@ -3506,7 +3633,7 @@ def test_wave_b_power_recipes_own_every_symbol_pin():
 
 
 def test_tps54331_recipe_uses_a_freewheel_diode_and_floating_enable():
-    definition = get_recipe("tps54331-adjustable@2")
+    definition = get_recipe("tps54331-adjustable@4")
     expansion = expand_recipe(
         RecipeSelection(
             recipe=definition.recipe,
@@ -4489,7 +4616,8 @@ def test_direct_expansion_rejects_incomplete_disabled_or_aliased_auto_reset(enab
 
 
 
-def test_rp2040_family_default_requires_and_binds_a_native_usb_connector():
+@pytest.mark.parametrize("pinned", [False, True])
+def test_rp2040_family_default_requires_and_binds_a_native_usb_connector(pinned):
     from kicraft.design.recipes.resolver import resolve_architecture_recipes
 
     payload = {
@@ -4543,17 +4671,25 @@ def test_rp2040_family_default_requires_and_binds_a_native_usb_connector():
         ],
         "assumptions": [],
     }
+    if pinned:
+        payload["recipe_selections"] = [
+            _selection().model_copy(update={
+                "recipe": "rp2040-minimal@4", "sheets": {"mcu": "MCU", "io": "IO"},
+                "requirement_ids": ["mcu_core"],
+            }).model_dump()
+        ]
     result = resolve_architecture_recipes(payload)
     assert not result.blocking
     core = next(row for row in result.selections if row.requirement_ids == ["mcu_core"])
     connector = next(row for row in result.selections if row.requirement_ids == ["usb_connector"])
-    assert core.recipe == "rp2040-minimal@4"
+    assert core.recipe == ("rp2040-minimal@4" if pinned else "rp2040-minimal@5")
     assert core.port_bindings["usb_dm"] == "USB_D_N"
     assert core.port_bindings["usb_dp"] == "USB_D_P"
     # The RP2040 owns its 27-ohm MCU-side pair; the connector must not add another.
     assert connector.parameters["series_resistors"] is False
     expansion = expand_recipe(core)
-    assert all(part.recipe_role != "swd" for part in expansion.parts)
+    assert all(part.recipe_role != "swd_header" for part in expansion.parts)
+    assert len(expansion.edge_interfaces) == (2 if pinned else 0)
     assert {"24", "25"} <= {pin.pin for pin in expansion.no_connect_pins}
     payload["requirements"][1]["parameters"] = {"series_resistors": True}
     conflict = resolve_architecture_recipes(payload)
@@ -4650,7 +4786,7 @@ def test_rp2040_ch340c_mode_crosses_uart_and_uses_physical_swd_recovery():
 
 def test_rp2040_native_usb_keeps_uart_bridge_contacts_connected():
     core = RecipeSelection(
-        recipe="rp2040-minimal@4",
+        recipe="rp2040-minimal@5",
         instance="rp",
         sheets={"mcu": "MCU", "io": "IO"},
         parameters={"native_usb": True, "programming": "native_usb"},
@@ -4699,7 +4835,7 @@ def test_rp2040_native_usb_keeps_uart_bridge_contacts_connected():
 
 def test_rp2040_rejects_half_native_pair_and_conflicting_recovery_mode():
     base = {
-        "recipe": "rp2040-minimal@4",
+        "recipe": "rp2040-minimal@5",
         "instance": "rp",
         "sheets": {"mcu": "MCU", "io": "IO"},
         "port_bindings": {"vdd": "+3V3", "gnd": "GND"},
@@ -4962,6 +5098,7 @@ def test_recipe_castellation_edges_replace_the_synthetic_header_unit():
                 "role": "mcu_core",
                 "family": "rp2040",
                 "exact_part": "RP2040",
+                "parameters": {"breakout_style": "castellated"},
                 "ports": {
                     "vdd": "+3V3",
                     "gnd": "GND",
@@ -4985,6 +5122,7 @@ def test_recipe_castellation_edges_replace_the_synthetic_header_unit():
     resolved = apply_architecture_recipe_resolution(architecture)
 
     (selection,) = resolved.recipe_selections
+    assert selection.parameters["breakout_style"] == "castellated"
     assert selection.requirement_ids == ["rp2040", "rp2040_castellated_gpio"]
     assert selection.sheets["io"] == "CASTELLATED"
     assert resolved.unresolved_requirement_ids == []
@@ -5001,7 +5139,8 @@ def test_recipe_castellation_edges_replace_the_synthetic_header_unit():
     assert not any(part["ref"].startswith("J") for part in bom["parts"])
 
 
-def test_real_pin_header_is_not_consumed_by_matching_recipe_edges():
+@pytest.mark.parametrize("style", ["none", "castellated"])
+def test_real_pin_header_is_not_consumed_by_matching_recipe_edges(style):
     from kicraft.design.recipes.resolver import apply_architecture_recipe_resolution
     from kicraft.server.stage_work_units import plan_stage_work_units
 
@@ -5023,7 +5162,7 @@ def test_real_pin_header_is_not_consumed_by_matching_recipe_edges():
                 "role": "mcu_core",
                 "family": "rp2040",
                 "exact_part": "RP2040",
-                "parameters": {"native_usb": False, "programming": "swd"},
+                "parameters": {"native_usb": False, "programming": "swd", "breakout_style": style},
                 "ports": {"vdd": "+3V3", "gnd": "GND"},
                 "functional_blocks": ["RP2040_PROCESSOR", "CASTELLATED_GPIO"],
             },
@@ -6942,13 +7081,16 @@ def test_hub75_legacy_ownership_requires_upstream_regeneration():
 @pytest.mark.parametrize(("recipe", "dm_pin", "dp_pin"), [
     ("esp32-s3-wroom-1-n16r8-minimal@1", "13", "14"),
     ("esp32-s3-mini-1-minimal@1", "23", "24"),
+    ("rp2040-minimal@4", "46", "47"),
+    ("rp2040-minimal@5", "46", "47"),
 ])
 def test_usb_contract_proves_reviewed_chain_and_rejects_altered_wiring(recipe, dm_pin, dp_pin):
     from kicraft.design.synthesis.autoplacer import _usb_local_placement, usb_routing_contracts
 
     selections = [
         RecipeSelection(
-            recipe=recipe, instance="core", sheets={"mcu": "MCU"},
+            recipe=recipe, instance="core",
+            sheets={role: "MCU" for role in get_recipe(recipe).required_sheet_roles},
             port_bindings={"vdd": "+3V3", "gnd": "GND",
                            "usb_dm": "USB_DM", "usb_dp": "USB_DP"},
         ),

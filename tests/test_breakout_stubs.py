@@ -95,6 +95,91 @@ def test_via_at_end_adds_locked_via(tmp_path):
     assert len(vias) == 1 and vias[0].GetNetname() == "CC2"
 
 
+def test_escape_receipt_uses_native_nm_for_two_physical_copies_of_one_pad(tmp_path):
+    from kicraft.autoplacer.brain.copper_accounting import attach_signal_escape_ownership
+    from kicraft.autoplacer.routing_board import import_routed_copper
+
+    path = str(tmp_path / "same-pad.kicad_pcb")
+    _board(path, (5, 5), {"1": ("DATA", 3.585, 7.36), "2": ("DATA", 6.011666, 5.64)})
+    board = pcbnew.LoadBoard(path)
+    for pad in board.FindFootprintByReference("J1").Pads():
+        pad.SetNumber("1")
+    assert pcbnew.SaveBoard(path, board)
+
+    specs = [
+        BreakoutSpec(ref="J1", pad="1", near_xy=(3.585, 7.36),
+                     waypoints=[(3.585, 8.36 - 1e-15), (3.585, 8.7665 - 1e-15)], via_at_end=True),
+        BreakoutSpec(ref="J1", pad="1", near_xy=(6.011666, 5.64),
+                     waypoints=[(6.011666, 4.64), (6.011666, 4.2335 - 1e-15)], via_at_end=True),
+    ]
+    summary = add_breakout_stubs(path, specs, signal_escape_owner=True)
+    assert not summary["skipped"]
+    assert summary["stubs"] == summary["vias"] == 2
+    copper = import_routed_copper(path)
+    assert attach_signal_escape_ownership(copper, summary) == {"bound": 6, "unresolved_source_uuids": []}
+    assert len({v.escape_ownership["branch_id"] for v in copper["vias"]}) == 2
+
+    # Keep the same native ownership through the leaf centering, publication
+    # round serializer, and final parent stamp -- each re-creates PCB UUIDs.
+    import hashlib
+    import json
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from kicraft.autoplacer.brain.copper_accounting import (
+        attach_stamped_escape_ownership, signal_escape_geometry_receipt,
+    )
+    from kicraft.autoplacer.brain.leaf_geometry import (
+        copy_components_with_translation, copy_traces_with_translation, copy_vias_with_translation,
+    )
+    from kicraft.autoplacer.brain.types import Point, SubCircuitId
+    from kicraft.autoplacer.hardware.adapter import KiCadAdapter
+    from kicraft.autoplacer.routing_board import run_pcbnew_script_file
+    from kicraft.cli._compose_stamp import _PARENT_STAMP_SCRIPT_PATH
+    from kicraft.cli.solve_subcircuits import SolvedLeafSubcircuit
+
+    adapter = KiCadAdapter(path)
+    state = adapter.load()
+    delta = Point(90.085 - 1e-14, 91.74625)
+    state.components = copy_components_with_translation(state.components, delta)
+    state.traces = copy_traces_with_translation(copper["traces"], delta)
+    state.vias = copy_vias_with_translation(copper["vias"], delta)
+    state.board_outline = tuple(Point(p.x + delta.x, p.y + delta.y) for p in state.board_outline)
+    centered = tmp_path / "centered.kicad_pcb"
+    adapter.stamp_subcircuit_board(state, str(centered))
+    receipt = json.loads(Path(f"{centered}.escape_ownership.json").read_text())
+    digest = hashlib.sha256(centered.read_bytes()).hexdigest()
+    assert receipt["stamped_board_sha256"] == digest
+    assert attach_stamped_escape_ownership(import_routed_copper(str(centered)), receipt)["bound"] == 6
+    round_result = SimpleNamespace(score=None, routing={
+        "validation": {"signal_escape_geometry_receipt": dict(receipt, board_sha256=digest)},
+    })
+    leaf = SolvedLeafSubcircuit(
+        node=SimpleNamespace(definition=SimpleNamespace(id=SubCircuitId("leaf", "leaf.kicad_sch", "/leaf"))),
+        extraction=SimpleNamespace(interface_ports=[]), best_round=round_result,
+    )
+    layout = leaf.round_to_layout(round_result, routed_board_path_override=centered)
+    assert all(t.escape_ownership for t in [*layout.traces, *layout.vias])
+
+    parent = tmp_path / "parent.kicad_pcb"
+    owner_rows = signal_escape_geometry_receipt({"traces": state.traces, "vias": state.vias})
+    payload = tmp_path / "parent.json"
+    payload.write_text(json.dumps({
+        "pcb_path": str(centered), "output_path": str(parent),
+        "components": [{"ref": k, "x": c.pos.x, "y": c.pos.y, "rotation": c.rotation, "layer": int(c.layer)}
+                       for k, c in state.components.items()],
+        **owner_rows,
+    }))
+    run_pcbnew_script_file(_PARENT_STAMP_SCRIPT_PATH, str(payload))
+    parent_receipt = json.loads(Path(f"{parent}.escape_ownership.json").read_text())
+    assert parent_receipt["stamped_board_sha256"] == hashlib.sha256(parent.read_bytes()).hexdigest()
+    assert attach_stamped_escape_ownership(import_routed_copper(str(parent)), parent_receipt)["bound"] == 6
+
+    # A one-nanometre mismatch must still fail; this is not tolerant matching.
+    summary["owned_signal_escapes"][0]["items"][-1]["position_mm"][1] += 0.000001
+    assert len(attach_signal_escape_ownership(copper, summary)["unresolved_source_uuids"]) == 1
+
+
 def test_explicit_via_cannot_drill_same_net_smd_land(tmp_path):
     path = str(tmp_path / "same-net.kicad_pcb")
     _board(path, (5.0, 10.0), {

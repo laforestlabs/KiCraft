@@ -39,23 +39,26 @@ def _identity(value: object) -> str:
 def register_recipe(
     definition: RecipeDefinition,
     expand=None,
+    *,
+    selectable: bool = True,
 ) -> None:
-    """Register one immutable version and reject ambiguous exact selectors."""
+    """Register an immutable version; only selectable versions compete for identities."""
     if definition.recipe in _REGISTRY:
         raise ValueError(f"duplicate recipe {definition.recipe!r}")
     if not re.search(r"@[1-9][0-9]*$", definition.recipe):
         raise ValueError(f"recipe {definition.recipe!r} must end in an immutable @N version")
     selectors = {
         _identity(value) for value in (definition.exact_part, *definition.identity_aliases) if value
-    }
+    } if selectable else set()
     for selector in selectors:
         prior = _SELECTORS.get(selector)
         if prior is not None:
             raise ValueError(
                 f"recipe selector {selector!r} overlaps {prior!r} and {definition.recipe!r}"
             )
-    registered = RegisteredRecipe(definition=definition, expand=expand)
-    _REGISTRY[definition.recipe] = registered
+    _REGISTRY[definition.recipe] = RegisteredRecipe(
+        definition=definition, expand=expand, selectable=selectable
+    )
     for selector in selectors:
         _SELECTORS[selector] = definition.recipe
 
@@ -72,7 +75,8 @@ def get_recipe(recipe: str) -> RecipeDefinition:
 
 
 def registered_recipes() -> tuple[RegisteredRecipe, ...]:
-    return tuple(_REGISTRY[key] for key in sorted(_REGISTRY))
+    """Return active recipe choices; pinned-only versions remain available by exact ID."""
+    return tuple(_REGISTRY[key] for key in sorted(_REGISTRY) if _REGISTRY[key].selectable)
 
 
 def recipe_summaries(
@@ -93,6 +97,11 @@ def recipe_summaries(
             "allowed_parameters": definition.allowed_parameters,
             "external_interface_protocols": list(definition.external_interface_protocols),
             "external_ports": [port.model_dump() for port in definition.ports],
+            **({"recipe_owned_reset": {
+                "aliases": definition.local_reset_aliases,
+                "guidance": "The recipe includes a real reset button. Assign its reset "
+                            "obligation to this recipe owner; do not allocate an application GPIO.",
+            }} if definition.local_reset_aliases else {}),
             "owned_parts": [
                 {"role": part.role, "quantity": part.quantity, "value": part.value,
                  "mpn": part.mpn, "assembly": part.assembly}
@@ -275,6 +284,7 @@ def expand_static_definition(
                     mpn=group.mpn,
                     datasheet=group.datasheet,
                     sourcing_note=group.sourcing_note,
+                    accessories=group.accessories,
                     recipe_id=definition.recipe,
                     resolution_source="recipe",
                     resolution_id=definition.recipe,

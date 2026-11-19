@@ -17,6 +17,13 @@ from shapely.strtree import STRtree
 from .local_contract import _copper_graph, _filled_straight_bond, _ground_pad_vias, _ground_regions
 
 
+class IncompleteGroundForestError(ValueError):
+    """Native fill could not replace explicit ground routing for every pad."""
+
+    def __init__(self, net):
+        super().__init__(f"{net} ground pads have no complete native-filled witness forest")
+
+
 def _ground_pads(board, ref: str, pin: str, net: str) -> list:
     footprint = board.FindFootprintByReference(ref)
     pads = [] if footprint is None else [
@@ -524,6 +531,7 @@ def reserve_connected_ground(
     candidate plane edge is considered only when both contacts anchor in the
     same native-eroded component. Failed native proofs retain all alternate
     contacts; neither a search cap nor a guessed polygon shortcut qualifies.
+    No masks are added unless a complete forest was proved.
     """
     if not math.isfinite(width_mm) or width_mm <= 0:
         raise ValueError("invalid global ground witness width")
@@ -543,21 +551,21 @@ def reserve_connected_ground(
     graph, _, _ = _copper_graph(board, net)
     parents = {}
 
-    def find(node):
-        parents.setdefault(node, node)
+    def find(node, roots=parents):
+        roots.setdefault(node, node)
         root = node
-        while parents[root] != root:
-            root = parents[root]
-        while parents[node] != node:
-            next_node = parents[node]
-            parents[node] = root
+        while roots[root] != root:
+            root = roots[root]
+        while roots[node] != node:
+            next_node = roots[node]
+            roots[node] = root
             node = next_node
         return root
 
-    def union(a, b):
-        a, b = find(a), find(b)
+    def union(a, b, roots=parents):
+        a, b = find(a, roots), find(b, roots)
         if a != b:
-            parents[b] = a
+            roots[b] = a
 
     for node, edges in graph.items():
         for other, _, edge_width in edges:
@@ -595,34 +603,57 @@ def reserve_connected_ground(
         "" if contact[2] is None else contact[2].GetParentFootprint().GetReferenceAsString(),
         "" if contact[2] is None else contact[2].GetNumber(),
     ))
-    buckets = []
     pad_cache = {}
-    region_cache = {}
+    eligible_regions = []
+    possible = parents.copy()
+    # Join all contacts on each original island optimistically. If even this
+    # graph is split, searching eroded paths cannot join the physical pads.
+    # Use it only to reject: selecting a witness still needs the mesh below.
     for index, (layer, region) in enumerate(regions):
         components = _mesh(region, widths[index])
+        if not components:
+            continue
+        eligible = []
+        bounds = region.BBox()
+        for node, point, pad, contact_layer in contacts:
+            if contact_layer != layer:
+                continue
+            if pad is None:
+                position = pcbnew.VECTOR2I(*point)
+                if not bounds.Contains(position) or not region.Contains(position):
+                    continue
+            else:
+                if not bounds.Intersects(pad.GetBoundingBox()):
+                    continue
+                pad_shape = pcbnew.SHAPE_POLY_SET()
+                pad.TransformShapeToPolygon(pad_shape, layer, 0,
+                                            pcbnew.FromMM(0.001), pcbnew.ERROR_INSIDE)
+                contact = pcbnew.SHAPE_POLY_SET(region)
+                contact.BooleanIntersection(pad_shape)
+                if not contact.OutlineCount():
+                    continue
+                pad_cache[id(region), id(pad), layer] = (pad_shape, contact, {})
+            eligible.append((node, point, pad))
+            union(node, ("filled-region", index), possible)
+        eligible_regions.append((index, components, eligible))
+    if len({find(node, possible) for node in terminals}) > 1:
+        raise IncompleteGroundForestError(net)
+
+    buckets = []
+    region_cache = {}
+    for index, components, eligible in eligible_regions:
+        layer, region = regions[index]
         for component in components:
             shape = component[0]
             candidates = []
             deferred = []
-            for node, point, pad, contact_layer in contacts:
-                if contact_layer != layer:
-                    continue
+            for node, point, pad in eligible:
                 if pad is None:
                     if not _contains(shape, point):
                         deferred.append((node, point, pad))
                         continue
                 else:
-                    key = (id(region), id(pad), layer)
-                    cached = pad_cache.get(key)
-                    if cached is None:
-                        pad_shape = pcbnew.SHAPE_POLY_SET()
-                        pad.TransformShapeToPolygon(pad_shape, layer, 0,
-                                                    pcbnew.FromMM(0.001), pcbnew.ERROR_INSIDE)
-                        contact = pcbnew.SHAPE_POLY_SET(region)
-                        contact.BooleanIntersection(pad_shape)
-                        cached = (pad_shape, contact, {})
-                        pad_cache[key] = cached
-                    pad_shape = pcbnew.SHAPE_POLY_SET(cached[0])
+                    pad_shape = pcbnew.SHAPE_POLY_SET(pad_cache[id(region), id(pad), layer][0])
                     pad_shape.BooleanIntersection(shape)
                     if not pad_shape.OutlineCount() or not abs(pad_shape.Area()):
                         deferred.append((node, point, pad))
@@ -633,9 +664,8 @@ def reserve_connected_ground(
                     candidates.append((node, point, pad, anchor))
             buckets.append((index, component, candidates, deferred))
 
+    forest = []
     rejected = set()
-    zones, area = 0, 0.0
-    layers = {}
     # Expand back-face deferred contacts first; every front-only alternative
     # remains available if the currently proved contacts cannot join all pads.
     deferred_contacts = iter(
@@ -678,7 +708,7 @@ def reserve_connected_ground(
                     candidates.append((node, point, pad, anchor))
                     break
             else:
-                raise ValueError(f"connected {net} ground pads have no complete native-filled witness forest")
+                raise IncompleteGroundForestError(net)
             continue
         _, _, bucket_id, a, b = best
         index, component, candidates, _ = buckets[bucket_id]
@@ -688,18 +718,22 @@ def reserve_connected_ground(
         if witness is None:
             rejected.add((bucket_id, a, b))
             continue
+        forest.append((index, witness[0]))
+        union(first[0], second[0])
+
+    zones, area = 0, 0.0
+    layers = {}
+    for index, shape in forest:
         count, stamped_area = _stamp(
-            board, witness[0], zone_name, clearances[index], regions[index][0]
+            board, shape, zone_name, clearances[index], regions[index][0]
         )
         if not count:
-            rejected.add((bucket_id, a, b))
-            continue
+            raise ValueError("native ground witness produced no routing reservation")
         zones += count
         area += stamped_area
         layer_name = board.GetLayerName(regions[index][0])
         layer_stats = layers.setdefault(layer_name, {"zones": 0, "reservation_area_mm2": 0.0})
         layer_stats["zones"] += count
         layer_stats["reservation_area_mm2"] += stamped_area
-        union(first[0], second[0])
     return {"net": net, "pads": len(pads), "zones": zones,
             "reservation_area_mm2": area, "layers": layers}

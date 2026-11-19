@@ -886,6 +886,7 @@ class KiCadAdapter:
             except Exception:
                 return 0
 
+        escape_owners = {}
         for trace in state.traces:
             seg = pcbnew.PCB_TRACK(board)
             seg.SetStart(
@@ -906,6 +907,8 @@ class KiCadAdapter:
             if net_code > 0:
                 seg.SetNetCode(net_code)
             board.Add(seg)
+            if trace.escape_ownership:
+                escape_owners[seg.m_Uuid.AsString()] = (trace.net, trace.escape_ownership)
 
         for via in state.vias:
             track_via = pcbnew.PCB_VIA(board)
@@ -924,11 +927,17 @@ class KiCadAdapter:
             if net_code > 0:
                 track_via.SetNetCode(net_code)
             board.Add(track_via)
+            if via.escape_ownership:
+                escape_owners[track_via.m_Uuid.AsString()] = (via.net, via.escape_ownership)
 
         board.BuildConnectivity()
         out = output_path or self.pcb_path
         source_pro = os.path.splitext(self.pcb_path)[0] + ".kicad_pro"
         _atomic_save_board(board, out, source_pro_path=source_pro)
+        if escape_owners:
+            from kicraft.autoplacer.hardware.escape_receipt import write_escape_receipt
+
+            write_escape_receipt(out, board, escape_owners)
         print(f"Subcircuit board stamped to {out}")
 
     # ------ subprocess-safe stamping (default) ------
@@ -1009,6 +1018,7 @@ class KiCadAdapter:
                 "width": trace.width_mm,
                 "layer": "F.Cu" if trace.layer == Layer.FRONT else "B.Cu",
                 "net_name": trace.net or "",
+                "escape_ownership": trace.escape_ownership,
             })
 
         vias_json = []
@@ -1019,6 +1029,7 @@ class KiCadAdapter:
                 "size": via.size_mm,
                 "drill": via.drill_mm,
                 "net_name": via.net or "",
+                "escape_ownership": via.escape_ownership,
             })
 
         silkscreen_json = []

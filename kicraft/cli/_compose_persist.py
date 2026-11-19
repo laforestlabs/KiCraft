@@ -202,6 +202,7 @@ def _persist_parent_artifact(
         "score_total": state.score_total,
         "copper_verification": copper_verification if copper_verification else {},
         "validation": validation,
+        "qualified_geometry": state.qualified_geometry,
         "artifact_paths": {
             "artifact_dir": str(artifact_dir),
             "renders_dir": str(renders_dir),

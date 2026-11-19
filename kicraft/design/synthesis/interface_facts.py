@@ -1,11 +1,16 @@
-"""Provider-independent interface facts tied to recipe ownership and wiring.
+"""Provider-independent interface facts tied to deterministic ownership and wiring.
 
-Only facts proved by the selected reviewed recipe and the committed endpoints are
-returned.  In particular, unrelated design prose is not a source of ratings.
+Only facts proved by the selected recipes/lowerers and the committed endpoints
+are returned. Unrelated design prose is not a source of ratings.
 """
 from __future__ import annotations
 
-from kicraft.design.recipes.registry import get_recipe, expand_recipe
+import re
+
+from kicraft.design.lowering import requires_power_output_header, verified_lowering
+from kicraft.design.recipe_versions import RP2040_RECIPE_IDS
+from kicraft.design.recipes.registry import expand_recipe, get_recipe
+from kicraft.design.recipes.wave_b_power import TPS54331_3V3_SHUNT_CONTROLS
 
 
 def reviewed_interface_facts(state, project_root=None) -> list[dict]:
@@ -29,30 +34,25 @@ def reviewed_interface_facts(state, project_root=None) -> list[dict]:
         if key not in expansions:
             expansions[key] = expand_recipe(selection)
         canonical = expansions[key]
-        candidates = [p for p in canonical.parts if p.recipe_role == part.recipe_role]
-        if len(candidates) != 1 or part.ref not in owner.refs:
-            return False
-        expected_part = candidates[0]
-        if any(getattr(part, field) != getattr(expected_part, field)
-               for field in ("symbol", "footprint", "value", "mpn")):
-            return False
-        expected = [p for p in canonical.ownership.pins if p.ref == expected_part.ref]
-        if not expected:
+        if part.ref not in owner.refs:
             return False
         owned = {(p.ref, str(p.pin)): p for p in owner.pins}
-        for pin in expected:
-            identity = (part.ref, str(pin.pin))
-            record = owned.get(identity)
-            nets = actual.get(identity, set())
-            if (not record or record.owner != pin.owner or record.owner_id != pin.owner_id
-                    or record.net != pin.net):
-                return False
-            if pin.net is None:
-                if identity not in no_connects or nets:
-                    return False
-            elif nets != {pin.net}:
-                return False
-        return True
+        for expected_part in canonical.parts:
+            if expected_part.recipe_role != part.recipe_role or any(
+                getattr(part, field) != getattr(expected_part, field)
+                for field in ("symbol", "footprint", "value", "mpn")
+            ):
+                continue
+            expected = [p for p in canonical.ownership.pins if p.ref == expected_part.ref]
+            if expected and all(
+                (record := owned.get(identity := (part.ref, str(pin.pin)))) is not None
+                and (record.owner, record.owner_id, record.net) == (pin.owner, pin.owner_id, pin.net)
+                and actual.get(identity, set()) == (set() if pin.net is None else {pin.net})
+                and (identity in no_connects) == (pin.net is None)
+                for pin in expected
+            ):
+                return True
+        return False
 
     def verified_roles(owner, selection, definition, roles):
         for role in roles:
@@ -107,6 +107,15 @@ def reviewed_interface_facts(state, project_root=None) -> list[dict]:
         return [{"pin": pin, "text": text, "net": owned[pin]}
                 for pin, text in names if pin in owned]
 
+    def add_fact(ref, kind, lines, pins, source, *, notes=(), **extra):
+        label_id = f"required:{ref}:{kind}"
+        facts.append({
+            "ref": ref, "kind": kind, "title": lines[0], "lines": lines,
+            "pins": pins, "notes": list(notes), "source": source,
+            "required_label_ids": [label_id, *(f"{label_id}:pins:{p['pin']}" for p in pins)],
+            **extra,
+        })
+
     for part in bom.parts:
         key = (part.recipe_id, part.recipe_instance)
         owner, selection = owners.get(key), selections.get(key)
@@ -129,6 +138,22 @@ def reviewed_interface_facts(state, project_root=None) -> list[dict]:
                 continue
             kind, lines = "pd_power", [f"USB PD {voltage:g}V IN"]
             extra["voltage_v"] = voltage
+        elif recipe == "usb-c-5v-sink@1" and role == "connector":
+            returns = selection.port_bindings.get("gnd")
+            cc = {net for pin in ("A5", "B5") for net in actual.get((part.ref, pin), ())}
+            termination = {
+                net for ref in owner.refs if (rd := parts.get(ref)) is not None
+                and rd.recipe_role == "cc_pulldown" and rd.recipe_id == recipe
+                and rd.recipe_instance == selection.instance
+                and verified(owner, selection, rd, definition)
+                and actual.get((ref, "2")) == {returns}
+                for net in actual.get((ref, "1"), ())
+            }
+            rail = selection.port_bindings.get("vbus")
+            if len(cc) != 2 or termination != cc or arch.rail_voltages.get(rail) != 5.0:
+                continue
+            kind, lines = "usb_power", ["USB 5V IN"]
+            extra["voltage_v"] = 5.0
         elif recipe == "usb-c-usb2-device@1" and role == "connector":
             from .autoplacer import usb_routing_contracts
             try:
@@ -185,15 +210,159 @@ def reviewed_interface_facts(state, project_root=None) -> list[dict]:
         elif role in {"boot_button", "reset_button"} and recipe.startswith(("esp32-s3-wroom-1-", "esp32-s3-mini-1-")):
             kind = "boot" if role == "boot_button" else "reset"
             lines = [kind.upper()]
+        elif recipe in {"ch32v003f4p6-minimal@1", "ch32v003f4u6-minimal@1"}:
+            if not verified_roles(owner, selection, definition,
+                                  ("mcu", "program_header", "reset_button", "reset_pullup")):
+                continue
+            if role == "program_header":
+                kind, lines = "programming", ["WCH-LINK"]
+                names = [("1", "VDD"), ("2", "GND"), ("3", "SWIO"), ("4", "NRST")]
+            elif role == "reset_button":
+                kind, lines = "reset", ["RESET"]
+        elif recipe in RP2040_RECIPE_IDS:
+            if role == "bootsel":
+                if not verified_roles(owner, selection, definition, ("mcu", "flash", "bootsel_resistor")):
+                    continue
+                kind, lines = "boot", ["BOOTSEL"]
+            elif role in {"reset_button", "swd_header"}:
+                if not verified_roles(owner, selection, definition, ("mcu", "reset_button", "reset_pullup")):
+                    continue
+                if role == "reset_button":
+                    kind, lines = "reset", ["RESET"]
+                elif selection.parameters.get("programming") == "swd" and (
+                    selection.parameters.get("native_usb") is False
+                ):
+                    kind, lines = "programming", ["SWD"]
+                    names = [("1", "VTREF"), ("2", "GND"), ("3", "SWDIO"), ("4", "SWCLK"), ("5", "RUN")]
+                    notes = ["Contact 6 is intentionally not connected."]
+        elif recipe == TPS54331_3V3_SHUNT_CONTROLS.recipe and role in {"reset_button", "enable_jumper"}:
+            from .validation import verified_regulator_shunt_controls
+
+            reset = role == "reset_button"
+            matches = [req for req in arch.requirements if req.id in owner.requirement_ids
+                       and verified_regulator_shunt_controls(req, bom, reset=reset)]
+            if len(matches) != 1:
+                continue
+            kind, lines = ("reset", ["RESET"]) if reset else ("enable", ["FIT TO DISABLE"])
+        elif role == "enable_jumper" and recipe.startswith(("tps54331-", "tps61088-")):
+            target = "output_limiter" if recipe.startswith("tps61088-") else "converter"
+            if not verified_roles(owner, selection, definition, (target,)):
+                continue
+            kind, lines = "enable", ["FIT TO DISABLE"]
         if not kind:
             continue
         pins = pin_map(owner, part.ref, names)
         if len(pins) != len(names):
             continue
-        label_id = f"required:{part.ref}:{kind}"
-        ids = [label_id] + [f"{label_id}:pins:{p['pin']}" for p in pins]
-        facts.append({"ref": part.ref, "kind": kind, "title": lines[0], "lines": lines,
-                      "pins": pins, "required_label_ids": ids, "notes": notes,
-                      "source": {"recipe": recipe, "instance": selection.instance,
-                                 "requirement_ids": list(owner.requirement_ids)}, **extra})
+        add_fact(part.ref, kind, lines, pins,
+                 {"recipe": recipe, "instance": selection.instance,
+                  "requirement_ids": list(owner.requirement_ids)}, notes=notes, **extra)
+
+    def reviewed_gpio_contacts():
+        from .electrical_review import _pin_names
+
+        result: dict[str, set[tuple[str, str, str]]] = {}
+        for selection in arch.recipe_selections:
+            owner = owners.get((selection.recipe, selection.instance))
+            if (
+                owner is None or owner.port_bindings != selection.port_bindings
+                or owner.pin_allocations != selection.pin_allocations
+                or not (ground := selection.port_bindings.get("gnd"))
+                or not selection.pin_allocations
+            ):
+                continue
+            try:
+                definition = get_recipe(selection.recipe)
+            except ValueError:
+                continue
+            if not verified_roles(owner, selection, definition, ("mcu",)):
+                continue
+            mcu = next(parts[ref] for ref in owner.refs if ref in parts
+                       and parts[ref].recipe_role == "mcu"
+                       and parts[ref].recipe_id == selection.recipe
+                       and parts[ref].recipe_instance == selection.instance)
+            pin_names = _pin_names(mcu.symbol, project_root)
+            for allocation in selection.pin_allocations:
+                if (
+                    allocation.capability not in {"gpio", "input", "output"}
+                    or actual.get((mcu.ref, allocation.pin)) != {allocation.net}
+                ):
+                    continue
+                label = pin_names.get(allocation.pin, "")
+                # Only a simple native GPIO designator is legible as a pin label.
+                if not re.fullmatch(r"(?:GPIO\d{1,3}|P[A-Z]\d{1,2})", label):
+                    label = ""
+                result.setdefault(allocation.net, set()).add(
+                    (f"{mcu.ref}.{allocation.pin}", label, ground)
+                )
+        return result
+
+    gpio_contacts = None
+
+    connector_titles = {
+        "pin-header@1": ("header", "SIGNAL HEADER"),
+        "reviewed-jst-xh-connector@1": ("jst", "JST XH"),
+        "screw-terminal@1": ("terminal", "TERMINAL"),
+    }
+    for requirement in arch.requirements:
+        proof = verified_lowering(requirement, bom)
+        if proof is None:
+            continue
+        artifact, refs = proof
+        source = {"lowerer": artifact.lowerer_id, "instance": requirement.id,
+                  "requirement_ids": [requirement.id]}
+        for (role, index), ref in refs.items():
+            owned = {pin.pin: pin.net for pin in artifact.pins
+                     if (pin.role, pin.index) == (role, index)}
+            names = []
+            if requires_power_output_header(requirement):
+                from .validation import verified_power_output_header
+
+                if not verified_power_output_header(arch, bom, requirement):
+                    continue
+                kind, title = "power_output", "5V OUT"
+                names = [(pin, "5V" if arch.rail_voltages[net] == 5.0 else "GND")
+                         for pin, net in owned.items()]
+            elif artifact.lowerer_id in connector_titles and role == "connector" and owned:
+                kind, title = connector_titles[artifact.lowerer_id]
+                if requirement.role == "power_input":
+                    kind, title = "power_input", "POWER IN"
+                if kind == "jst":
+                    if gpio_contacts is None:
+                        gpio_contacts = reviewed_gpio_contacts()
+                    grounds = {ground for net in owned.values()
+                               for _, _, ground in gpio_contacts.get(net, ())}
+                    if grounds and (len(grounds) != 1 or not grounds <= set(owned.values())):
+                        continue  # a legacy GPIO carrier without its return is not an interface
+                for pin, net in owned.items():
+                    if net == "GND":
+                        names.append((pin, "GND"))
+                    elif net in arch.rail_voltages and arch.rail_voltages[net] > 0:
+                        names.append((pin, f"{arch.rail_voltages[net]:g}V"))
+                    elif (kind == "jst" and gpio_contacts is not None
+                          and len(rows := gpio_contacts.get(net, ())) == 1
+                          and (label := next(iter(rows))[1])):
+                        names.append((pin, label))
+                    elif re.fullmatch(r"[A-Za-z][A-Za-z0-9_+-]{0,7}", net):
+                        names.append((pin, net.upper()))
+                    elif re.fullmatch(r"[A-Za-z][A-Za-z0-9_+-]*", net):
+                        # Keep the exact connection name in the off-board pin
+                        # facts; the PCB can identify an otherwise long net by
+                        # its unambiguous physical contact number.
+                        names.append((pin, f"PIN {pin}"))
+            elif artifact.lowerer_id == "qwiic-i2c-connector@1" and role == "connector":
+                kind, title = "qwiic", "I2C / QWIIC"
+                if arch.rail_voltages.get(requirement.ports.get("vcc")) != 3.3:
+                    continue
+                names = [("1", "GND"), ("2", "3V3"), ("3", "SDA"), ("4", "SCL")]
+            elif artifact.lowerer_id == "switch-input@1" and role == "jumper":
+                kind, title = "enable", "FIT TO ENABLE"
+            elif artifact.lowerer_id == "switch-input@1" and role == "switch":
+                kind, title = "button", "BUTTON"
+            else:
+                continue
+            if (role == "connector" and not names) or any(pin not in owned for pin, _ in names):
+                continue
+            add_fact(ref, kind, [title],
+                     [{"pin": pin, "text": name, "net": owned[pin]} for pin, name in names], source)
     return facts

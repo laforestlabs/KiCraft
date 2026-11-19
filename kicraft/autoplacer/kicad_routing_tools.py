@@ -696,12 +696,22 @@ with open({str(summary_path)!r}, "w", encoding="utf-8") as out:
         summary_path.unlink(missing_ok=True)
 
 
+def _routing_plane_ground_nets(config: dict[str, Any]) -> tuple[str, ...]:
+    """Read the explicit ordinary grounds eligible for a native plane proof."""
+    names = config.get("routing_plane_ground_nets", ())
+    if not isinstance(names, (list, tuple, set, frozenset)) or any(
+        not isinstance(name, str) or not name.strip() for name in names
+    ):
+        raise ValueError("routing_plane_ground_nets requires a collection of exact net names")
+    return tuple(sorted(set(names)))
+
+
 def _stamp_local_ground_keepouts(
     board_path: Path, config: dict[str, Any], zone_name: str,
     *, router_clearance_mm: float, prepare_thermal: bool = True,
     deadline: float | None = None,
 ) -> dict[str, Any]:
-    """Keep parent interconnects out of contract-owned ground fill."""
+    """Protect required local returns and prove requested plane-connected grounds."""
     from kicraft.autoplacer.routing_board import run_pcbnew_script
 
     keys = (
@@ -715,6 +725,7 @@ def _stamp_local_ground_keepouts(
         "escape_via_size_mm", "escape_via_drill_mm",
     )
     cfg = {key: config[key] for key in keys if key in config}
+    ordinary_nets = _routing_plane_ground_nets(config) if prepare_thermal else ()
     summary_path = board_path.with_suffix(".ground-reservations.json")
     script = f"""
 import json
@@ -723,7 +734,9 @@ import pcbnew
 import sys
 sys.path.insert(0, {str(Path(__file__).resolve().parents[2])!r})
 from kicraft.autoplacer.brain.gnd_pour import pour_gnd_planes, add_gnd_pour_and_thermal_vias
-from kicraft.autoplacer.hardware.ground_reservations import reserve_connected_ground, reserve_local_ground_planes
+from kicraft.autoplacer.hardware.ground_reservations import (
+    IncompleteGroundForestError, reserve_connected_ground, reserve_local_ground_planes,
+)
 from kicraft.autoplacer.fab_profile import fab_floors
 cfg = json.loads({json.dumps(cfg)!r})
 path = {str(board_path)!r}
@@ -736,6 +749,7 @@ def restore_rules():
         else:
             sidecar.write_bytes(content)
 nets = {{spec["ground_return"]["net"] for spec in cfg.get("local_bypasses", []) if "ground_return" in spec}}
+nets.update({ordinary_nets!r})
 if {prepare_thermal!r} and cfg.get("thermal_requirements"):
     nets.add(cfg.get("gnd_zone_net", "GND"))
 for net in sorted(nets):
@@ -757,13 +771,19 @@ result = reserve_local_ground_planes(
     router_clearance_mm={router_clearance_mm!r},
 )
 if {prepare_thermal!r}:
-    result["connected_ground"] = [
-        reserve_connected_ground(
-            board, net, {zone_name!r}, width_mm=fab_floors(cfg)["track_mm"],
-            router_clearance_mm={router_clearance_mm!r},
-        )
-        for net in sorted(nets)
-    ]
+    result["connected_ground"] = connected_ground = []
+    for net in sorted(nets):
+        try:
+            witness = reserve_connected_ground(
+                board, net, {zone_name!r}, width_mm=fab_floors(cfg)["track_mm"],
+                router_clearance_mm={router_clearance_mm!r},
+            )
+        except IncompleteGroundForestError:
+            # Leave this net in the explicit routing worklist. Required local
+            # masks stay in place; no partial global masks were stamped.
+            continue
+        if witness["pads"]:
+            connected_ground.append(witness)
 if preparation is not None:
     result["ground_preparation"] = preparation
 board.Save(path)
@@ -1060,6 +1080,8 @@ def _width_groups(
     """Resolve class widths and validate each ground-last CLI selection."""
     config = config or {}
     ground_nets = set()
+    if config.get("routing_local_ground_reservations"):
+        ground_nets.update(_routing_plane_ground_nets(config))
     zone_net = config.get("gnd_zone_net", "GND")
     if isinstance(zone_net, str) and zone_net:
         ground_nets.add(zone_net)
@@ -1881,6 +1903,11 @@ def _route_krt_pass(
         # copper; new thermal VIPs belong to the qualified ground finisher.
         same_net_pad_clearance=floors["clearance"] if pad_via_keepouts else None,
     )
+    if input_copper["traces"] or input_copper["vias"]:
+        # Disable the CLI's stub optimization as well as input rip-up.
+        # Some native rescue paths ignore this option; the custody gate
+        # below must still reject any inherited layer/geometry mutation.
+        command.append("--no-stub-layer-swap")
     if usb_contract is not None:
         command[1] = str(root / "py_router" / "route_diff.py")
         command.extend([

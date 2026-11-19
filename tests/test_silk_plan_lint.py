@@ -5,6 +5,8 @@ board: anchors must exist in the BOM and every electrical claim must be
 corroborated by the design state. These tests pin that contract.
 """
 
+import pytest
+
 from kicraft.design.models import (
     Architecture,
     BOM,
@@ -352,3 +354,95 @@ def test_changed_led_owned_wiring_does_not_produce_numeric_fact():
                if any(ep.ref == led.ref and ep.pin == "2" for ep in c.endpoints))
     net.net_name = "UNREVIEWED_DATA"
     assert not any(f["kind"] == "led_output" for f in reviewed_interface_facts(state))
+
+
+def test_recipe_and_lowered_interfaces_supply_required_physical_labels():
+    from kicraft.design.lowering import lower_requirement
+    from kicraft.design.models import CircuitRequirement, RecipeSelection, SilkPlan
+    from kicraft.design.recipes import expand_selections
+    from kicraft.design.synthesis.silk_plan import required_labels, required_silk_defects
+
+    expansions = expand_selections([
+        RecipeSelection(recipe="ch32v003f4u6-minimal@1", instance="core",
+                        sheets={"mcu": "BOARD"}, port_bindings={"vdd": "VDD", "gnd": "GND"}),
+        RecipeSelection(recipe="usb-c-5v-sink@1", instance="usb",
+                        sheets={"power": "BOARD"}, port_bindings={"vbus": "VBUS", "gnd": "GND"}),
+    ])
+    connector = CircuitRequirement(
+        id="aux", sheet="BOARD", role="connector", family="qwiic-i2c-connector",
+        ports={"vcc": "VDD", "ground": "GND", "sda": "BOARD_SDA", "scl": "BOARD_SCL"},
+    )
+    artifact = lower_requirement(connector)
+    group, = artifact.groups
+    state = ConversationState(
+        architecture=Architecture(
+            sheets=[Sheet(name="BOARD", stem="BOARD", function="interfaces")],
+            requirements=[connector], recipe_selections=[row.selection for row in expansions],
+            rail_voltages={"VDD": 3.3, "VBUS": 5.0, "GND": 0},
+            power_nets=["VDD", "VBUS", "GND"], inter_sheet_nets=[],
+        ),
+        bom=BOM(
+            parts=[*[part for row in expansions for part in row.parts],
+                   BomPart(ref="J30", sheet="BOARD", value=group.value, symbol=group.symbol,
+                           footprint=group.footprint, mpn=group.mpn, resolution_source="lowerer",
+                           resolution_id=artifact.lowerer_id, lowering_role=group.role,
+                           lowering_index=0, lowering_requirement_id=connector.id)],
+            connections=[*[net for row in expansions for net in row.connections],
+                         *[NetConnection(net_name=pin.net, sheet="BOARD",
+                                         endpoints=[PinEndpoint(ref="J30", pin=pin.pin)])
+                           for pin in artifact.pins]],
+            no_connect_pins=[pin for row in expansions for pin in row.no_connect_pins],
+            recipe_ownership=[row.ownership for row in expansions],
+        ),
+    )
+    state.silk_plan = SilkPlan(labels=required_labels(state))
+    assert {label.text for label in state.silk_plan.labels if label.kind == "io"} == {
+        "RESET", "WCH-LINK", "USB 5V IN", "I2C / QWIIC",
+    }
+    assert not required_silk_defects(state)
+    assert "required silk required:J30:qwiic:pins:3: not placed" in required_silk_defects(
+        state, placed_ids=[]
+    )
+    changed = next(net for net in state.bom.connections
+                   if any(ep.ref == "J30" and ep.pin == "3" for ep in net.endpoints))
+    changed.net_name = "UNRELATED_SIGNAL"
+    assert "required silk J30: interface function not verified" in required_silk_defects(state)
+
+
+@pytest.mark.parametrize("recipe", ["rp2040-minimal@4", "rp2040-minimal@5"])
+def test_rp2040_swd_silk_requires_actual_run_and_bootsel_circuits(recipe):
+    from kicraft.design.models import RecipeSelection, SilkPlan
+    from kicraft.design.recipes import expand_recipe
+    from kicraft.design.synthesis.interface_facts import reviewed_interface_facts
+    from kicraft.design.synthesis.silk_plan import required_labels, required_silk_defects
+
+    selection = RecipeSelection(
+        recipe=recipe, instance="rp2040", sheets={"mcu": "BOARD", "io": "BOARD"},
+        parameters={"native_usb": False, "programming": "swd"},
+        port_bindings={"vdd": "+3V3", "gnd": "GND"},
+    )
+    expanded = expand_recipe(selection)
+    state = ConversationState(
+        architecture=Architecture(
+            sheets=[Sheet(name="BOARD", stem="BOARD", function="RP2040 controller")],
+            recipe_selections=[expanded.selection], rail_voltages={"+3V3": 3.3, "GND": 0},
+            power_nets=["+3V3", "GND"], inter_sheet_nets=[],
+        ),
+        bom=BOM(parts=expanded.parts, connections=expanded.connections,
+                no_connect_pins=expanded.no_connect_pins, recipe_ownership=[expanded.ownership]),
+    )
+    facts = {row["title"]: row for row in reviewed_interface_facts(state)}
+    assert set(facts) == {"BOOTSEL", "RESET", "SWD"}
+    assert [(pin["pin"], pin["text"]) for pin in facts["SWD"]["pins"]] == [
+        ("1", "VTREF"), ("2", "GND"), ("3", "SWDIO"), ("4", "SWCLK"), ("5", "RUN"),
+    ]
+    state.silk_plan = SilkPlan(labels=required_labels(state))
+    assert not required_silk_defects(state)
+
+    reset_ref = facts["RESET"]["ref"]
+    run = next(net for net in state.bom.connections
+               if any((ep.ref, str(ep.pin)) == (reset_ref, "1") for ep in net.endpoints))
+    run.endpoints = [ep for ep in run.endpoints if ep.ref != reset_ref]
+    defects = required_silk_defects(state)
+    assert f"required silk {reset_ref}: control function not verified" in defects
+    assert f"required silk {facts['SWD']['ref']}: interface function not verified" in defects

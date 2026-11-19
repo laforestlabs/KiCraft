@@ -568,6 +568,12 @@ def test_ground_last_uses_native_selection_and_preserves_class_widths(tmp_path):
     assert rb._width_groups(board, runtime, 0.25, 30, config) == [
         (0.5, ["PWR"]), (0.25, ["GND_SENSE", "SIG"]), (0.5, ["AGND", "GND"]),
     ]
+    assert rb._width_groups(board, runtime, 0.25, 30, {
+        "routing_local_ground_reservations": True,
+        "routing_plane_ground_nets": ["AGND"],
+    }) == [
+        (0.5, ["PWR"]), (0.25, ["GND_SENSE", "SIG"]), (0.5, ["AGND", "GND"]),
+    ]
     assert rb._width_groups(board, runtime, 0.25, 30, {"gnd_zone_net": ""}) == [
         (0.5, ["AGND", "GND", "PWR"]), (0.25, ["GND_SENSE", "SIG"]),
     ]
@@ -1468,8 +1474,9 @@ def test_global_ground_witness_rejects_physically_split_fill(tmp_path):
                                  width_mm=0.17, router_clearance_mm=0.17)
 
 
-@pytest.mark.parametrize("plane_proof", [True, False])
-def test_ground_connectivity_requires_actual_plane_proof_or_routing(tmp_path, plane_proof):
+@pytest.mark.parametrize("plane", ["connected", "disabled", "split"])
+@pytest.mark.parametrize("ordinary", [False, True], ids=["local-return", "ordinary-plane"])
+def test_ground_connectivity_requires_actual_plane_proof_or_routing(tmp_path, plane, ordinary):
     import hashlib
     import subprocess
 
@@ -1480,13 +1487,17 @@ def test_ground_connectivity_requires_actual_plane_proof_or_routing(tmp_path, pl
         pytest.skip("pinned KiCadRoutingTools runtime unavailable")
     source, output = tmp_path / "source.kicad_pcb", tmp_path / "output.kicad_pcb"
     board = pcbnew.NewBoard(str(source))
-    ground = pcbnew.NETINFO_ITEM(board, "GND")
+    net = "RETURN" if ordinary else "GND"
+    ground = pcbnew.NETINFO_ITEM(board, net)
     board.Add(ground)
     fp = pcbnew.FOOTPRINT(board)
     fp.SetReference("J1")
     board.Add(fp)
     mm = pcbnew.FromMM
-    for number, x in (("1", 5), ("2", 8)):
+    terminals = [("1", 5), ("2", 8)]
+    if plane == "split":
+        terminals.append(("3", 15))
+    for number, x in terminals:
         pad = pcbnew.PAD(fp)
         pad.SetNumber(number)
         pad.SetSize(pcbnew.VECTOR2I(mm(1), mm(1)))
@@ -1502,6 +1513,27 @@ def test_ground_connectivity_requires_actual_plane_proof_or_routing(tmp_path, pl
     stub.SetLayer(pcbnew.F_Cu)
     stub.SetNet(ground)
     board.Add(stub)
+    if plane == "split":
+        # Give the router a fixed access point beyond the local return mask.
+        access = pcbnew.PCB_TRACK(board)
+        access.SetStart(pcbnew.VECTOR2I(mm(8), mm(10)))
+        access.SetEnd(pcbnew.VECTOR2I(mm(9.5), mm(10)))
+        access.SetWidth(mm(0.25))
+        access.SetLayer(pcbnew.F_Cu)
+        access.SetNet(ground)
+        board.Add(access)
+        for layer in (pcbnew.F_Cu, pcbnew.B_Cu):
+            split = pcbnew.ZONE(board)
+            split.SetLayer(layer)
+            split.SetIsRuleArea(True)
+            split.SetDoNotAllowCopperPour(True)
+            split.SetDoNotAllowTracks(False)
+            split.SetDoNotAllowVias(False)
+            split.SetDoNotAllowPads(False)
+            split.Outline().NewOutline()
+            for x, y in ((11, 0), (13, 0), (13, 20), (11, 20)):
+                split.Outline().Append(mm(x), mm(y))
+            board.Add(split)
     corners = ((0, 0), (20, 0), (20, 20), (0, 20), (0, 0))
     for a, b in zip(corners, corners[1:]):
         edge = pcbnew.PCB_SHAPE(board)
@@ -1518,19 +1550,42 @@ def test_ground_connectivity_requires_actual_plane_proof_or_routing(tmp_path, pl
     result = rb.route_with_kicad_routing_tools(str(source), str(output), {
         "kicad_routing_tools_path": str(root), "kicad_routing_tools_python": str(python),
         "kicad_routing_tools_timeout_s": 60, "gnd_zone_net": "GND",
-        "routing_local_ground_reservations": plane_proof, "local_bypasses": [spec],
+        "routing_local_ground_reservations": plane != "disabled",
+        **({"routing_plane_ground_nets": {net}} if ordinary else {"local_bypasses": [spec]}),
     })
     finished = pcbnew.LoadBoard(str(output))
     assert any(
-        item.GetNetname() == "GND" and item.GetLayer() == pcbnew.F_Cu
+        item.GetNetname() == net and item.GetLayer() == pcbnew.F_Cu
         and item.GetWidth() == mm(0.25)
         and {(item.GetStart().x, item.GetStart().y), (item.GetEnd().x, item.GetEnd().y)}
             == {(mm(5), mm(10)), (mm(5.5), mm(10))}
         for item in finished.GetTracks() if isinstance(item, pcbnew.PCB_TRACK)
     )
-    if plane_proof:
+    assert result["plane_connected_ground_nets"] == ([net] if plane == "connected" else [])
+    assert bool(result["passes"]) == (plane != "connected")
+    poured_layers = {
+        zone.GetLayer() for zone in finished.Zones()
+        if not zone.GetIsRuleArea() and zone.GetNetname() == net
+    }
+    assert poured_layers == (
+        set() if plane == "disabled" else {pcbnew.F_Cu, pcbnew.B_Cu}
+    )
+    if plane != "disabled":
         plan = result["local_ground_reservation_plan"]
         assert hashlib.sha256(Path(plan["board_path"]).read_bytes()).hexdigest() == plan["sha256"]
+    if plane == "split":
+        staged = pcbnew.LoadBoard(plan["board_path"])
+        staged.BuildConnectivity()
+        assert staged.GetConnectivity().GetUnconnectedCount(False) == 1
+        reservations = result["local_ground_reservations"]
+        assert bool(reservations["zones"]) == (not ordinary)
+        assert reservations["connected_ground"] == []
+        assert any(
+            item.GetClass() == "PCB_TRACK" and item.GetNetname() == net
+            and min(item.GetStart().x, item.GetEnd().x) <= mm(12)
+            < max(item.GetStart().x, item.GetEnd().x)
+            for item in finished.GetTracks()
+        )
     report = tmp_path / "drc.json"
     subprocess.run(["kicad-cli", "pcb", "drc", "--format", "json",
                     "--output", str(report), str(output)], check=True, capture_output=True)
@@ -2262,3 +2317,65 @@ def test_real_strict_cleanup_emits_exact_removed_copper(tmp_path, monkeypatch):
     assert [(o["start"], o["end"]) for o in state.values()] == [([0.0, 0.0], [10.0, 0.0])]
     assert len(board.segments) == 1 and board.segments[0] is live
     assert not any(r.get("gap") for r in records)
+
+
+def test_native_route_preserves_inherited_opposite_face_launch(tmp_path):
+    pcbnew = pytest.importorskip("pcbnew")
+    root = Path(os.environ.get("KICRAFT_KICAD_ROUTING_TOOLS_PATH", "/home/kicraft/KiCadRoutingTools"))
+    python = Path(os.environ.get("KICRAFT_KICAD_ROUTING_TOOLS_PYTHON", "/home/kicraft/krt-venv/bin/python"))
+    if not (root / "py_router/kicad_parser.py").is_file() or not python.is_file():
+        pytest.skip("pinned KiCadRoutingTools runtime unavailable")
+    source, output = tmp_path / "source.kicad_pcb", tmp_path / "output.kicad_pcb"
+    board = pcbnew.NewBoard(str(source))
+    point = lambda x, y: pcbnew.VECTOR2I(pcbnew.FromMM(x), pcbnew.FromMM(y))
+    net = pcbnew.NETINFO_ITEM(board, "DATA")
+    board.Add(net)
+    for ref, x in (("U1", 5), ("J1", 20)):
+        fp = pcbnew.FOOTPRINT(board)
+        fp.SetReference(ref)
+        board.Add(fp)
+        pad = pcbnew.PAD(fp)
+        pad.SetNumber("1")
+        pad.SetSize(point(1, 1))
+        pad.SetPosition(point(x, 10))
+        pad.SetAttribute(pcbnew.PAD_ATTRIB_SMD)
+        pad.SetLayerSet(pcbnew.PAD.SMDMask())
+        pad.SetNet(net)
+        fp.Add(pad)
+    outline = pcbnew.PCB_SHAPE(board)
+    outline.SetShape(pcbnew.SHAPE_T_RECT)
+    outline.SetStart(point(0, 0))
+    outline.SetEnd(point(25, 20))
+    outline.SetLayer(pcbnew.Edge_Cuts)
+    board.Add(outline)
+    for start, end, layer in (((5, 10), (7, 10), pcbnew.F_Cu), ((7, 10), (9, 10), pcbnew.B_Cu)):
+        track = pcbnew.PCB_TRACK(board)
+        track.SetStart(point(*start))
+        track.SetEnd(point(*end))
+        track.SetWidth(pcbnew.FromMM(0.2))
+        track.SetLayer(layer)
+        track.SetNet(net)
+        board.Add(track)
+    via = pcbnew.PCB_VIA(board)
+    via.SetPosition(point(7, 10))
+    via.SetLayerPair(pcbnew.F_Cu, pcbnew.B_Cu)
+    via.SetWidth(pcbnew.FromMM(0.6))
+    via.SetDrill(pcbnew.FromMM(0.3))
+    via.SetNet(net)
+    board.Add(via)
+    assert pcbnew.SaveBoard(str(source), board)
+    _write_project(source)
+    result = rb.route_with_kicad_routing_tools(str(source), str(output), {
+        "kicad_routing_tools_path": str(root), "kicad_routing_tools_python": str(python),
+        "kicad_routing_tools_timeout_s": 60, "kicad_routing_tools_max_ripup": 0,
+    })
+    assert result["preserved_existing_copper"]
+    final = pcbnew.LoadBoard(str(output))
+    assert any(
+        item.GetClass() == "PCB_TRACK" and item.GetLayer() == pcbnew.B_Cu
+        and {(item.GetStart().x, item.GetStart().y), (item.GetEnd().x, item.GetEnd().y)}
+        == {(pcbnew.FromMM(7), pcbnew.FromMM(10)), (pcbnew.FromMM(9), pcbnew.FromMM(10))}
+        for item in final.GetTracks()
+    )
+    final.BuildConnectivity()
+    assert final.GetConnectivity().GetUnconnectedCount(False) == 0

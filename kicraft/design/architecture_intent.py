@@ -31,6 +31,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .lowering import (
+    DEFAULT_MOMENTARY_BUTTON,
     _stated_contact_count,
     RegisteredLowerer,
     lowerer_contract_diagnostic,
@@ -38,6 +39,7 @@ from .lowering import (
     lowerer_port_direction,
     lowerer_supports_external_interface,
     registered_lowerers,
+    requires_power_output_header,
 )
 from .models import (
     SHEET_NAME_RE,
@@ -48,16 +50,20 @@ from .models import (
     CircuitRole,
     DeclaredInterfaceClaim,
     DeclaredInterfacePort,
+    QuantitativeObligation,
     RequirementObligation,
     InterSheetNet,
     Sheet,
+    PowerOutputHeaderContract,
     SheetPin,
     is_power_or_ground_name,
     obligation_requires_requirement_owner,
 )
+from .recipe_versions import RP2040_RECIPE_IDS
 from .recipes.models import RegisteredRecipe
-from .recipes.pin_allocator import FIXED_INTERFACES
+from .recipes.pin_allocator import FIXED_INTERFACES, allocatable_capability_counts, canonical_fixed_i2c_port
 from kicraft.form_factors import get_template
+from .recipes.wave_b_power import TPS54331_3V3_SHUNT_CONTROLS
 from .recipes.registry import registered_recipes
 from .recipes.resolver import (
     _PORT_ALIASES,
@@ -190,7 +196,7 @@ _NATIVE_USB_MCU_RECIPES = frozenset(
         "esp32-s3-wroom-1-n16r8-minimal@1",
         "esp32-c3-mini-1-minimal@2",
         "esp32-c3-mini-1-h4x-minimal@2",
-        "rp2040-minimal@4",
+        *RP2040_RECIPE_IDS,
     }
 )
 # Recipes whose own expansion carries the MCU-specific series pair, so the
@@ -203,7 +209,7 @@ _MCU_OWNED_USB_SERIES_RECIPES = frozenset(
         "esp32-s3-wroom-1-n16r8-minimal@1",
         "esp32-c3-mini-1-minimal@2",
         "esp32-c3-mini-1-h4x-minimal@2",
-        "rp2040-minimal@4",
+        *RP2040_RECIPE_IDS,
     }
 )
 _HEADER_FAMILY = "pin-header"
@@ -712,6 +718,136 @@ def _reference_port(catalog: _Catalog) -> str | None:
     return qualified[0] if len(qualified) == 1 else None
 
 
+def _regulator_reset_obligation(obligation: RequirementObligation) -> bool:
+    from .part_identity import canonical_physical_features
+
+    return (
+        obligation.kind == "adjustability"
+        and obligation.parameter.strip().casefold() == "regulator-reset"
+        and "momentary-button" in canonical_physical_features(obligation.mechanism)
+    )
+
+
+def _adopt_regulator_reset(payload: dict, functional_spec: object | None) -> None:
+    """Assign typed reset to a compatible, unambiguously selected local controller."""
+    from .models import AdjustabilityObligation
+    from .part_identity import canonical_physical_features
+
+    resets = [
+        obligation for row in payload.get("obligations") or ()
+        if isinstance(row, dict) and row.get("kind") == "adjustability"
+        and _regulator_reset_obligation(obligation := AdjustabilityObligation.model_validate(row))
+    ]
+    if len(resets) != 1:
+        return
+    reset_id = resets[0].original_obligation_id
+    rows = [row for row in payload.get("requirements") or () if isinstance(row, dict)]
+    owners = [row for row in rows if reset_id in (row.get("obligation_ids") or ())]
+    if len(owners) > 1:
+        return
+    variant = TPS54331_3V3_SHUNT_CONTROLS
+    rails = (payload.get("power") or {}).get("rails") or {}
+    allowable_families = {"tps54331-adjustable", variant.family}
+    candidates = []
+    for target in rows:
+        if (
+            target.get("role") != "regulator" or target.get("family") not in allowable_families
+            or str(target.get("exact_part") or "").casefold() not in {"", "tps54331ddar"}
+            or "enable" in _referenced_ports(payload, target["id"])
+            or any("enable" in (target.get(key) or {})
+                   for key in ("supply_bindings", "reference_bindings"))
+            or (target.get("parameters") or {}).get("reset_control") is False
+            or (owners and owners[0].get("role") == "regulator" and target is not owners[0])
+        ):
+            continue
+        source = rails.get(target.get("supply"))
+        outputs = [rail for rail in rails.values() if isinstance(rail, dict)
+                   and rail.get("from") == f"{target['id']}.output"]
+        low, high = variant.ports[0].supply_voltage_range_v
+        if (
+            isinstance(source, dict) and source.get("from")
+            and type(source.get("voltage")) in (int, float) and low <= source["voltage"] <= high
+            and len(outputs) == 1 and outputs[0].get("voltage") == 3.3
+        ):
+            candidates.append(target)
+    if len(candidates) != 1:
+        return
+    target = candidates[0]
+    control = owners[0] if owners and owners[0] is not target else None
+    if control is not None:
+        physical = {row["original_obligation_id"] for row in payload["obligations"]
+                    if row.get("kind") == "physical"
+                    and "momentary-button" in canonical_physical_features(row.get("component_class", ""))}
+        if (
+            control.get("role") != "user_io" or control.get("family") != "switch-input"
+            or _referenced_ports(payload, control["id"])
+            or str(control.get("exact_part") or "").casefold() not in {"", "kmr232ngulclfs"}
+            or any(control.get(key) for key in (
+                "supply", "supply_bindings", "reference_bindings", "declared_ports",
+                "parameters", "interfaces", "programming", "standard_stacking_role",
+            ))
+            or set(control.get("obligation_ids") or ()) - {reset_id} - physical
+        ):
+            return
+    blocks = functional_spec.get("blocks", ()) if isinstance(functional_spec, Mapping) else (
+        getattr(functional_spec, "blocks", ()) or ()
+    )
+    names = []
+    for row in blocks:
+        fields = row if isinstance(row, Mapping) else row.model_dump()
+        if reset_id in (fields.get("obligation_ids") or ()):
+            names.append(fields["name"])
+    target.update(
+        family=variant.family,
+        parameters={**(target.get("parameters") or {}), "reset_control": True},
+        obligation_ids=list(dict.fromkeys([
+            *(target.get("obligation_ids") or ()), reset_id, *((control or {}).get("obligation_ids") or ()),
+        ])),
+        functional_blocks=list(dict.fromkeys([
+            *(target.get("functional_blocks") or ()),
+            *((control or {}).get("functional_blocks") or ()), *names,
+        ])),
+    )
+    if control is not None:
+        payload["requirements"].remove(control)
+        if not any(row.get("sheet") == control.get("sheet") for row in payload["requirements"]):
+            payload["sheets"] = [row for row in payload.get("sheets") or ()
+                                 if row.get("name") != control.get("sheet") or row.get("from_library")]
+
+
+def power_output_source_return_port(
+    requirement: CircuitRequirement, port: str, *, catalog: _Catalog | None = None,
+) -> str | None:
+    """The published return for a reviewed DC supply output or entry contact."""
+    if catalog is None:
+        row = IntentRequirement(
+            id=requirement.id, sheet=requirement.sheet, role=requirement.role,
+            family=requirement.family, exact_part=requirement.exact_part,
+        )
+        lowerers = {family: lowerer for lowerer in registered_lowerers() for family in lowerer.families}
+        catalog = _catalog(row, registered_recipes(), lowerers)
+    if catalog is None:
+        return None
+    direction = catalog.directions.get(port)
+    if catalog.lowerer is not None:
+        direction = lowerer_port_direction(catalog.lowerer, port)
+    if requirement.role == "power_input":
+        if (
+            catalog.lowerer is not None
+            and catalog.lowerer.lowerer_id in {"pin-header@1", "screw-terminal@1"}
+        ):
+            return {"pin1": "pin2", "p1": "p2", "positive": "negative"}.get(port)
+        if catalog.recipe is not None and port == "vbus" and direction == "power":
+            return _reference_port(catalog)
+    if requirement.role == "regulator" or (
+        catalog.lowerer is not None
+        and catalog.lowerer.lowerer_id == "fused-power-distribution@1"
+    ):
+        if direction == "output" or (direction == "power" and port == "output"):
+            return _reference_port(catalog)
+    return None
+
+
 def _token(value) -> str:
     """Casefolded, punctuation-free token, for family comparisons."""
     return re.sub(r"[^a-z0-9]", "", str(value).lower())
@@ -748,6 +884,91 @@ def _referenced_ports(payload: dict, requirement_id: str) -> set[str]:
     )
     ports.update(str(key) for key in (requirement or {}).get("ties") or {})
     return ports
+
+
+def _signal_references(signal: dict) -> tuple:
+    peers = signal.get("to")
+    return (signal.get("from"), *(peers if isinstance(peers, list) else [peers]))
+
+
+def _adopt_recipe_reset(payload: dict) -> None:
+    """Assign a matched reset request to the recipe that already builds it."""
+    from kicraft.design.part_identity import canonical_physical_features, quantity_subject_binds
+
+    rows = [row for row in payload.get("requirements") or () if isinstance(row, dict)]
+    signals = [row for row in payload.get("signals") or () if isinstance(row, dict)]
+    by_id = {row.get("id"): row for row in rows}
+    if len(by_id) != len(rows):
+        return
+    obligations = {row.get("original_obligation_id"): row
+                   for row in payload.get("obligations") or () if isinstance(row, dict)}
+    recipes = registered_recipes()
+    for target in rows:
+        if target.get("role") != "mcu_core" or not target.get("sheet"):
+            continue
+        catalog = _catalog(IntentRequirement.model_validate(target), recipes, {})
+        if catalog is None or catalog.recipe is None:
+            continue
+        definition = catalog.recipe.definition
+        aliases = {f"{target['id']}.{alias}" for alias in definition.local_reset_aliases}
+        touching = [signal for signal in signals if aliases.intersection(_signal_references(signal))]
+        if len(touching) != 1:
+            continue
+        signal = touching[0]
+        refs = _signal_references(signal)
+        switches = [
+            row for ref in refs if isinstance(ref, str) and ref.endswith(".signal")
+            if (row := by_id.get(ref.rsplit(".", 1)[0])) is not None
+            and row.get("family") == "switch-input" and row.get("role") == "user_io"
+        ]
+        if len(refs) != 2 or len(switches) != 1 or signal.get("start") is not None:
+            continue
+        switch = switches[0]
+        if (
+            _referenced_ports(payload, switch["id"]) != {"signal"}
+            or sum(f"{switch['id']}.signal" in _signal_references(row) for row in signals) != 1
+            or any(switch.get(key) for key in (
+                "ties", "supply_bindings", "reference_bindings", "interfaces",
+                "programming", "declared_ports", "standard_stacking_role",
+            ))
+            or target.get("reference_bindings") or signal.get("rails")
+            or switch.get("supply") not in (None, target.get("supply"))
+        ):
+            continue
+        group = next(group for group in definition.parts if group.role == "reset_button")
+        if switch.get("exact_part") and switch["exact_part"].casefold() != (group.mpn or "").casefold():
+            continue
+        params = switch.get("parameters") or {}
+        rail = ((payload.get("power") or {}).get("rails") or {}).get(target.get("supply")) or {}
+        if (
+            params.keys() - {"active_level", "pull_policy", "resistance", "voltage"}
+            or params.get("active_level", "low") != "low"
+            or params.get("pull_policy", "external") != "external"
+            or params.get("resistance", "10k") != "10k"
+            or ("voltage" in params and params["voltage"] != rail.get("voltage"))
+        ):
+            continue
+        ids = switch.get("obligation_ids") or []
+        if any(
+            not (
+                row.get("kind") == "physical"
+                and "momentary-button" in canonical_physical_features(row.get("component_class", ""))
+                or row.get("kind") == "quantity" and row.get("minimum") == 1
+                and quantity_subject_binds(row.get("subject", ""), "momentary-button")
+            )
+            for identifier in ids for row in (obligations.get(identifier, {}),)
+        ):
+            continue
+        for key in ("functional_blocks", "obligation_ids"):
+            target[key] = list(dict.fromkeys([*(target.get(key) or []), *(switch.get(key) or [])]))
+        payload["requirements"].remove(switch)
+        payload["signals"].remove(signal)
+        switch_sheet = switch.get("sheet")
+        if not any(row.get("sheet") == switch_sheet for row in payload["requirements"]):
+            payload["sheets"] = [
+                row for row in payload.get("sheets") or ()
+                if row.get("name") != switch_sheet or row.get("from_library")
+            ]
 
 
 def _lowerer_families() -> frozenset[str]:
@@ -912,7 +1133,7 @@ def _recipe_owns_enable_shunt(definition) -> bool:
     if (
         definition.parameter_defaults.get("enable_control") is not False
         or True not in definition.allowed_parameters.get("enable_control", ())
-        or not any(port.name == "enable" for port in definition.ports)
+        or not any(port.name == "gnd" for port in definition.ports)
         or not any(group.role == "enable_jumper" for group in definition.parts)
     ):
         return False
@@ -941,6 +1162,7 @@ def _adopt_authored_enable_headers(payload: dict) -> None:
     grounded-off state; a maximum pin voltage alone is not enough to infer that.
     """
     from kicraft.design.part_identity import canonical_physical_features, class_key
+    from kicraft.design.recipes.wave_b_power import enable_control_drive_range
 
     requirements = [row for row in payload.get("requirements") or [] if isinstance(row, dict)]
     obligations = {
@@ -955,13 +1177,6 @@ def _adopt_authored_enable_headers(payload: dict) -> None:
         definition.family: definition
         for registered in registered_recipes()
         if (definition := registered.definition).family
-    }
-    # Recommended input envelope and maximum guaranteed EN high threshold,
-    # respectively: TI TLV62569 datasheet §§6.3, 6.5 and Diodes AP63203
-    # datasheet recommended operating conditions and electrical characteristics.
-    high_true = {
-        "tlv62569dbvr": (2.5, 5.5, 1.2),
-        "ap63203wu-7": (3.8, 32.0, 1.23),
     }
 
     def endpoints(signal: dict) -> list[str]:
@@ -1055,7 +1270,7 @@ def _adopt_authored_enable_headers(payload: dict) -> None:
             )
         ):
             continue
-        envelope = high_true.get(str(definition.exact_part or "").casefold())
+        envelope = enable_control_drive_range(definition.recipe)
         supply = str(target.get("supply") or "")
         rail = rails.get(supply)
         if not envelope or not isinstance(rail, dict):
@@ -1064,7 +1279,6 @@ def _adopt_authored_enable_headers(payload: dict) -> None:
         if (
             type(voltage) not in (int, float)
             or not envelope[0] <= voltage <= envelope[1]
-            or voltage < envelope[2]
             or not source
             or source.startswith(f"{target_id}.")
         ):
@@ -1087,15 +1301,15 @@ def _adopt_authored_enable_headers(payload: dict) -> None:
 
 
 def _complete_enable_jumper_requirements(payload: dict) -> dict:
-    """Complete an unowned enable jumper using one unambiguous reviewed converter.
+    """Complete an unwired enable jumper using one unambiguous reviewed converter.
 
-    Recipe-owned sink shunts retain their complete internal bias network. Other
-    converters use a high-true shunt only from a sourced rail within their EN limit.
-    Explicit controls, voltage-selection jumpers and ambiguous targets are not rewritten.
+    Retain recipe-owned sink shunts and only derive separate drive where the
+    selected recipe documents safe high and low states. Existing signal
+    connections, voltage selectors and ambiguous targets are not rewritten.
     """
     from kicraft.design.part_identity import canonical_physical_features, class_key
     from kicraft.design.recipes.registry import registered_recipes
-    from kicraft.design.recipes.wave_b_power import enable_control_max_voltage
+    from kicraft.design.recipes.wave_b_power import enable_control_drive_range
 
     requirements = [
         row for row in payload.get("requirements") or [] if isinstance(row, dict)
@@ -1107,12 +1321,8 @@ def _complete_enable_jumper_requirements(payload: dict) -> dict:
     signals = [row for row in payload.get("signals") or [] if isinstance(row, dict)]
     if not requirements or not obligations or not isinstance(rails, dict):
         return payload
-    owned = {
-        str(identifier)
-        for requirement in requirements
-        for identifier in requirement.get("obligation_ids") or []
-    }
     requirement_ids = {str(requirement.get("id") or "") for requirement in requirements}
+    assigned_targets: set[str] = set()
     definitions = {
         definition.family: definition
         for registered in registered_recipes()
@@ -1120,15 +1330,10 @@ def _complete_enable_jumper_requirements(payload: dict) -> dict:
     }
 
     def _enable_is_explicit(requirement_id: str, requirement: dict) -> bool:
-        if str((requirement.get("ties") or {}).get("enable") or "").strip():
-            return True
-        prefix = f"{requirement_id}.enable"
-        for signal in signals:
-            peers = signal.get("to")
-            references = [signal.get("from"), *(peers if isinstance(peers, list) else [peers])]
-            if any(str(reference or "") == prefix for reference in references):
-                return True
-        return False
+        return "enable" in _referenced_ports(payload, requirement_id) or any(
+            "enable" in (requirement.get(key) or {})
+            for key in ("supply_bindings", "reference_bindings")
+        )
 
     for obligation in obligations:
         if (
@@ -1140,25 +1345,66 @@ def _complete_enable_jumper_requirements(payload: dict) -> dict:
         ):
             continue
         obligation_id = str(obligation.get("original_obligation_id") or "")
-        if not obligation_id or obligation_id in requirement_ids:
+        if not obligation_id:
+            continue
+        existing = [
+            row for row in requirements if obligation_id in (row.get("obligation_ids") or [])
+            and row.get("family") == "switch-input"
+        ]
+        if len(existing) > 1:
+            continue
+        control = existing[0] if existing else None
+        if control is None and obligation_id in requirement_ids:
+            continue
+        control_params = (control or {}).get("parameters") or {}
+        if control is not None and (
+            _referenced_ports(payload, control["id"])
+            or str(control.get("exact_part") or "").casefold() not in {"", "tsw-102-07-g-s"}
+            or any(control.get(key) for key in (
+                "supply_bindings", "reference_bindings", "declared_ports", "interfaces",
+                "programming", "standard_stacking_role",
+            ))
+            or control_params.get("pull_policy", "external") != "external"
+            or control_params.keys() - {"voltage", "pull_policy", "active_level", "resistance"}
+        ):
             continue
         candidates = []
         for requirement in requirements:
-            definition = definitions.get(str(requirement.get("family") or ""))
-            if definition is None or not any(port.name == "enable" for port in definition.ports):
+            if requirement.get("id") in assigned_targets:
                 continue
-            maximum = enable_control_max_voltage(definition.recipe)
+            definition = definitions.get(str(requirement.get("family") or ""))
+            if definition is None:
+                continue
             owns_shunt = _recipe_owns_enable_shunt(definition)
-            supply = str(requirement.get("supply") or "")
-            rail = rails.get(supply)
+            if not owns_shunt and not any(port.name == "enable" for port in definition.ports):
+                continue
             if (
-                maximum is None
-                or not isinstance(rail, dict)
-                or not rail.get("from")
-                or not isinstance(rail.get("voltage"), (int, float))
-                or not 0 < rail["voltage"]
-                or (not owns_shunt and rail["voltage"] > maximum)
+                requirement.get("exact_part") and str(requirement["exact_part"]).casefold() not in {
+                    str(definition.exact_part or "").casefold(),
+                    *(str(part.mpn or "").casefold() for part in definition.parts
+                      if part.role == "converter"),
+                }
+            ):
+                continue
+            supply = (
+                str((control or {}).get("supply") or "") if not owns_shunt else ""
+            ) or str(requirement.get("supply") or "")
+            rail = rails.get(supply)
+            envelope = enable_control_drive_range(definition.recipe)
+            source = str(rail.get("from") or "") if isinstance(rail, dict) else ""
+            voltage = rail.get("voltage") if isinstance(rail, dict) else None
+            if (
+                not source or type(voltage) not in (int, float) or voltage <= 0
+                or source.startswith(f"{requirement.get('id')}.")
                 or _enable_is_explicit(str(requirement.get("id") or ""), requirement)
+                or (not owns_shunt and (
+                    envelope is None or not envelope[0] <= voltage <= envelope[1]
+                    or control_params.get("voltage", voltage) != voltage
+                    or control_params.get("active_level", "high") != "high"
+                ))
+                or (owns_shunt and control is not None and (
+                    control.get("exact_part") or control.get("supply") or control_params
+                ))
             ):
                 continue
             candidates.append((requirement, supply, owns_shunt))
@@ -1176,13 +1422,21 @@ def _complete_enable_jumper_requirements(payload: dict) -> dict:
             None,
         ) if physical_id != obligation_id else None
         movable = {obligation_id, *([physical_id] if physical else [])}
+        if control is not None:
+            for identifier in control.get("obligation_ids") or ():
+                physical = next((row for row in obligations if row.get("original_obligation_id")
+                                 == identifier and row.get("kind") == "physical"), None)
+                if physical and "jumper" in canonical_physical_features(
+                    str(physical.get("component_class") or "")
+                ):
+                    movable.add(identifier)
+            if set(control.get("obligation_ids") or ()) - movable:
+                continue
         if any(
-            requirement is not target
+            requirement is not target and requirement is not control
             and movable.intersection(requirement.get("obligation_ids") or [])
             for requirement in requirements
         ):
-            continue
-        if obligation_id in owned and obligation_id not in (target.get("obligation_ids") or []):
             continue
         if owns_shunt:
             target["parameters"] = {
@@ -1192,7 +1446,18 @@ def _complete_enable_jumper_requirements(payload: dict) -> dict:
             target["obligation_ids"] = list(dict.fromkeys([
                 *(target.get("obligation_ids") or []), *sorted(movable),
             ]))
-            owned.add(obligation_id)
+            assigned_targets.add(target["id"])
+            if control is not None:
+                target["functional_blocks"] = list(dict.fromkeys([
+                    *(target.get("functional_blocks") or []), *(control.get("functional_blocks") or []),
+                ]))
+                requirements.remove(control)
+                control_sheet = control.get("sheet")
+                if not any(row.get("sheet") == control_sheet for row in requirements):
+                    payload["sheets"] = [
+                        row for row in payload.get("sheets") or ()
+                        if row.get("name") != control_sheet or row.get("from_library")
+                    ]
             continue
         target_id = str(target["id"])
         signal_name = f"{target_id.upper()}_ENABLE_JUMPER"
@@ -1202,27 +1467,26 @@ def _complete_enable_jumper_requirements(payload: dict) -> dict:
             identifier for identifier in target.get("obligation_ids") or []
             if identifier not in movable
         ]
-        requirements.append(
-            {
-                "id": obligation_id,
-                "sheet": target["sheet"],
-                "role": "user_io",
-                "family": "switch-input",
-                "parameters": {"pull_policy": "external", "active_level": "high"},
-                "supply": control_rail,
+        if control is None:
+            control = {
+                "id": obligation_id, "sheet": target["sheet"],
+                "role": "user_io", "family": "switch-input",
                 "functional_blocks": list(target.get("functional_blocks") or []),
-                "obligation_ids": sorted(movable),
             }
-        )
+            requirements.append(control)
+        control.update({
+            "parameters": {**control_params, "pull_policy": "external", "active_level": "high"},
+            "supply": control_rail, "obligation_ids": sorted(movable),
+        })
         signals.append(
             {
                 "name": signal_name,
-                "from": f"{obligation_id}.signal",
+                "from": f"{control['id']}.signal",
                 "to": f"{target_id}.enable",
             }
         )
-        owned.add(obligation_id)
-        requirement_ids.add(obligation_id)
+        assigned_targets.add(target_id)
+        requirement_ids.add(control["id"])
     payload["requirements"] = requirements
     payload["signals"] = signals
     return payload
@@ -1305,7 +1569,8 @@ def _adopt_carrier_families(payload: dict) -> dict:
             # The committed physical class and explicit identity contact map own this
             # carrier. Do not relabel a generic header as an analog-output assembly,
             # erase rows/gender, or reinterpret a logical key as a different pad.
-            requirement["family"] = "pin-header"
+            if family.casefold() in {"analog-output-header", "analog_output_header"}:
+                requirement["family"] = "pin-header"
             continue
         if family.casefold() not in lowerers:
             # A requirement that names a reviewed part *class* instead of the lowerer family that
@@ -1367,7 +1632,29 @@ def _adopt_carrier_families(payload: dict) -> dict:
                 if obligation.get("kind") != "physical" or role != "connector":
                     continue
                 component_class = str(obligation.get("component_class") or "")
-                contacts = _required_carrier_contacts(payload, requirement)
+                # A count such as "JST connector pins" retains the carrier
+                # class even when the physical obligation says only "connector".
+                # This is a typed obligation on this owner, not brief matching.
+                counts = [
+                    QuantitativeObligation.model_validate(row)
+                    for row in _physical_obligations(requirement)
+                    if row.get("kind") == "quantitative"
+                ]
+                jst_width = _stated_contact_count([
+                    row for row in counts
+                    if canonical_physical_features(
+                        str(row.quantity).casefold().strip()
+                        .removesuffix(" pins").removesuffix(" contacts").removesuffix(" positions")
+                    ) & {"jst-connector", "jst-xh-connector"}
+                ])
+                if (
+                    jst_width and canonical_physical_features(component_class) <= {"connector"}
+                    and family in {"pin-header", "pin_header", "header", "generic-header"}
+                    and record is None
+                ):
+                    component_class = "jst-xh-connector"
+                contacts = max(_required_carrier_contacts(payload, requirement),
+                               _stated_contact_count(counts))
                 carrier = _carrier_record_for_contacts(component_class, contacts)
                 if carrier is None:
                     # A generic connector has no safe default width without all of the contact
@@ -1686,6 +1973,121 @@ def _complete_pd_power_paths(intent: ArchitectureIntent) -> ArchitectureIntent:
     })
 
 
+def _complete_ordinary_buttons(payload: dict, intent: object | None) -> None:
+    """Instantiate the published button circuit for typed, ordinary user inputs."""
+    from .part_identity import canonical_physical_features, reviewed_part, reviewed_record_realizes_class
+    from .sourcing_policy import part_number_named
+
+    if intent is None:
+        return  # cannot distinguish a user pin from a proposed exact choice
+    upstream = intent if isinstance(intent, Mapping) else intent.model_dump()
+    named = list(upstream.get("named_parts") or ())
+    statements = [upstream.get("goal", ""), *(upstream.get("constraints") or ())]
+    hardware_words = {
+        "package", "footprint", "mount", "through", "tht", "smd", "smt", "panel",
+        "actuation", "force", "latching", "pole", "throw", "sealed", "height", "pitch",
+        "dimensions", "normally", "life", "travel", "mechanical", "contact", "contacts",
+    }
+    control_words = {
+        "button", "buttons", "pushbutton", "pushbuttons", "switch", "switches", "momentary", "tactile",
+    }
+    for statement in statements:
+        tokens = _name_tokens(str(statement))
+        if (
+            tokens & hardware_words and tokens & control_words
+            or tokens & {"package", "footprint", "tht", "smd", "smt", "sealed"}
+            and not tokens & {"led", "connector", "regulator", "capacitor", "resistor"}
+        ):
+            return  # package/mechanical intent is not permission to choose a default
+    if any((part := reviewed_part(str(name))) and "momentary-button" in part.physical_features
+           for name in named):
+        return
+    obligations = {row.get("original_obligation_id"): row for row in payload.get("obligations") or ()
+                   if isinstance(row, dict)}
+    rails = (payload.get("power") or {}).get("rails") or {}
+    signals = [row for row in payload.get("signals") or () if isinstance(row, dict)]
+    default = reviewed_part(DEFAULT_MOMENTARY_BUTTON)
+    if default is None:
+        return
+    text = " ".join(str(row) for row in statements)
+    for row in payload.get("requirements") or ():
+        if not isinstance(row, dict) or row.get("role") != "user_io":
+            continue
+        family = str(row.get("family") or "")
+        if family != "switch-input" and canonical_physical_features(family) != {"momentary-button"}:
+            continue
+        owned = [obligations.get(identifier, {}) for identifier in row.get("obligation_ids") or ()]
+        physical = [item["component_class"] for item in owned if item.get("kind") == "physical"]
+        if (
+            not any(canonical_physical_features(feature) == {"momentary-button"} for feature in physical)
+            or any(not reviewed_record_realizes_class(default, feature) for feature in physical)
+            or any(
+                item.get("kind") not in {"physical", "quantity", "quantitative"}
+                or (item.get("kind") == "quantitative" and
+                    str(item.get("unit", "")).casefold() not in {"signal", "signals", "channel", "channels"})
+                for item in owned
+            )
+        ):
+            continue
+        identifier = str(row.get("id") or "")
+        exact = str(row.get("exact_part") or "")
+        if (
+            not identifier or (exact and part_number_named(exact, exact, named, text))
+            or any(row.get(key) for key in ("declared_ports", "interfaces", "programming",
+                                            "standard_stacking_role"))
+            or _referenced_ports(payload, identifier) - {"signal", "vdd", "gnd"}
+            or set(row.get("supply_bindings") or ()) - {"vdd"}
+            or set(row.get("reference_bindings") or ()) - {"gnd"}
+        ):
+            continue
+        params = row.get("parameters") or {}
+        if (
+            params.keys() - {"voltage", "active_level", "pull_policy", "resistance"}
+            or params.get("pull_policy", "external") != "external"
+            or params.get("active_level", "low") not in {"low", "high"}
+        ):
+            continue
+        ref = f"{identifier}.signal"
+        linked = [signal for signal in signals if ref in _signal_references(signal)]
+        if len(linked) != 1 or not any(
+            isinstance(peer, str) and peer != ref and not peer.startswith(f"{identifier}.")
+            for peer in _signal_references(linked[0])
+        ):
+            continue
+        fixed_supplies = {net for net in (row.get("supply"), (row.get("supply_bindings") or {}).get("vdd"),
+                                         (row.get("ties") or {}).get("vdd")) if net is not None}
+        for signal in signals:
+            references = _signal_references(signal)
+            if f"{identifier}.vdd" not in references:
+                continue
+            explicit = {
+                net for net, rail in rails.items()
+                if isinstance(rail, dict) and rail.get("from") in references
+            }
+            if len(explicit) != 1:
+                fixed_supplies.add("")  # keep this unowned supply for the normal connection checks
+            else:
+                fixed_supplies.update(explicit)
+        exposure = set(linked[0].get("rails") or ())
+        if len(fixed_supplies) > 1:
+            continue
+        candidates = {
+            net for net, rail in rails.items() if isinstance(rail, dict) and rail.get("from")
+            and type(rail.get("voltage")) in (int, float) and 1.8 <= rail["voltage"] <= 5.5
+            and params.get("voltage", rail["voltage"]) == rail["voltage"]
+            and (net in fixed_supplies if fixed_supplies else not exposure or net in exposure)
+        }
+        if len(candidates) != 1:
+            continue
+        supply = next(iter(candidates))
+        row.update(family="switch-input", exact_part=None, supply=supply)
+        if exact and exact.casefold() != DEFAULT_MOMENTARY_BUTTON.casefold():
+            payload.setdefault("assumptions", []).append(
+                f"{identifier}: unconstrained momentary input uses the reviewed "
+                f"{DEFAULT_MOMENTARY_BUTTON} circuit on {supply} instead of the draft's {exact} (derived)"
+            )
+
+
 def complete_architecture_payload(
     payload: dict, *, intent: object | None = None, functional_spec: object | None = None,
 ) -> dict:
@@ -1712,8 +2114,11 @@ def complete_architecture_payload(
     # and authored controls. The producer acts only on one unowned, unambiguous safe jumper fact.
     _complete_explicit_input_sources(payload)
     _complete_driver_logic_supplies(payload)
+    _adopt_recipe_reset(payload)
+    _adopt_regulator_reset(payload, functional_spec)
     _adopt_authored_enable_headers(payload)
     _complete_enable_jumper_requirements(payload)
+    _complete_ordinary_buttons(payload, intent)
     _adopt_carrier_families(payload)
     _complete_terminal_returns(payload)
     requirements = [row for row in payload.get("requirements") or [] if isinstance(row, dict)]
@@ -1988,6 +2393,10 @@ def _catalog(
     """One requirement's port vocabulary: curated recipe, lowerer family, or declared interface."""
     matches = list(_family_recipes(requirement.family, recipes))
     selected = _recipe_for_exact(requirement.exact_part, recipes)
+    if len(matches) == 1 and matches[0].definition.family == TPS54331_3V3_SHUNT_CONTROLS.family and (
+        not requirement.exact_part or requirement.exact_part.casefold() == "tps54331ddar"
+    ):
+        selected = matches[0]
     if selected is not None and selected not in matches:
         matches.append(selected)
     if selected is None and matches:
@@ -2016,14 +2425,6 @@ def _catalog(
                 for port in definition.ports
                 if port.default_tie is not None
             },
-        )
-    # A reviewed JST carrier has the draft's own pin-by-pin interface. Treat that interface as
-    # authoritative during architecture binding so an exact part can be checked against its real
-    # contact count; the deterministic JST lowerer still owns the emitted part once nets exist.
-    if requirement.family in {"jst-connector", "jst-xh-connector"} and requirement.declared_ports:
-        return _Catalog(
-            directions={port.key: port.direction for port in requirement.declared_ports},
-            source="declared",
         )
     if requirement.family in lowerers:
         lowerer = lowerers[requirement.family]
@@ -2057,8 +2458,21 @@ def _resolve_port(
     requirement: IntentRequirement, catalog: _Catalog, name: str
 ) -> tuple[str, str] | None:
     """The canonical (port key, direction) `name` denotes on this requirement, or None."""
+    if catalog.recipe is not None:
+        name = canonical_fixed_i2c_port(catalog.recipe.definition, name)
+    if catalog.recipe is not None and name in catalog.recipe.definition.local_reset_aliases:
+        return None  # a recipe-owned reset is never an allocatable application GPIO
     if catalog.lowerer is not None:
         name = lowerer_canonical_port_name(catalog.lowerer, name)
+        if catalog.lowerer.lowerer_id == "reviewed-jst-xh-connector@1":
+            claim = next((port for port in requirement.declared_ports if port.key == name), None)
+            if claim is not None and claim.pin is not None:
+                exact_contact = f"pin{claim.pin}"
+                if lowerer_port_direction(catalog.lowerer, exact_contact) is None:
+                    return None
+                if lowerer_port_direction(catalog.lowerer, name) is not None and name != exact_contact:
+                    return None
+                return exact_contact, claim.direction
     direction = _direction(catalog, requirement, name)
     if direction is not None:
         return name, direction
@@ -2204,13 +2618,15 @@ def _append_data_logger_storage(
         return intent, "Data-logger storage needs one declared MCU reference domain."
     signals = list(intent.signals)
     matched: dict[str, int] = {}
-    for mcu_port, storage_port in (("i2c_sda", "sda"), ("i2c_scl", "scl")):
+    for aliases, capability in FIXED_INTERFACES["i2c_controller"]:
+        storage_port = capability.removeprefix("i2c-")
+        references = {f"{mcu.id}.{alias}" for alias in aliases}
         hits = [
             index for index, signal in enumerate(signals)
-            if f"{mcu.id}.{mcu_port}" in (signal.from_ref, *signal.peers())
+            if references.intersection((signal.from_ref, *signal.peers()))
         ]
         if not hits or len({signals[index].name for index in hits}) != 1:
-            return intent, f"Data-logger storage needs one unambiguous existing {mcu_port} bus."
+            return intent, f"Data-logger storage needs one unambiguous existing i2c_{storage_port} bus."
         matched[storage_port] = hits[0]
     if len({signals[index].name for index in matched.values()}) != 2:
         return intent, "Data-logger I2C data and clock must be distinct nets."
@@ -2830,6 +3246,7 @@ def derive_architecture(
 
     # Connectors that expose a rail rather than draw from it (`supply` on a connector family).
     connector_rails: dict[str, str] = {}
+    rail_source_contacts: dict[str, tuple[str, str]] = {}
     for net, rail in intent.power.rails.items():
         if rail.from_ref is None:
             continue
@@ -2837,6 +3254,7 @@ def derive_architecture(
         if source is None:
             continue
         _bind(source.requirement.id, source.port, net, "output", context=f"rail {net!r}")
+        rail_source_contacts[net] = (source.requirement.id, source.port)
 
     for requirement_id, requirement in requirements.items():
         row = models_by_id[requirement_id]
@@ -3930,6 +4348,11 @@ def derive_architecture(
     # pin the family (or the model's declared interface) documents for it, when the design has
     # not already claimed that pin for something else.
     for requirement_id, rail in connector_rails.items():
+        if requires_power_output_header(requirements[requirement_id]):
+            continue  # the protocol derives the return from this rail's source below
+        catalog = catalogs[requirement_id]
+        if catalog.lowerer is not None and catalog.lowerer.lowerer_id == "reviewed-jst-xh-connector@1":
+            continue  # XH carriers publish contact numbers, not a signal/power pin order.
         if not any(bound == GND_NET for bound in bindings.get(requirement_id, {}).values()):
             _bind(
                 requirement_id,
@@ -3948,6 +4371,76 @@ def derive_architecture(
             "input",
             context="connector supply",
         )
+
+    # A Qwiic contact exposes the supply of its actual bus. Another equal-
+    # voltage rail, an isolated return or partial bus wiring is not evidence.
+    qwiic = "qwiic-i2c-connector@1"
+    i2c_keys = tuple(aliases for aliases, _ in FIXED_INTERFACES["i2c_controller"])
+    for connector_id, catalog in sorted(catalogs.items()):
+        if catalog.lowerer is None or catalog.lowerer.lowerer_id != qwiic:
+            continue
+        bound = bindings[connector_id]
+        sda, scl = bound.get("sda"), bound.get("scl")
+        if (
+            "vcc" in bound or not sda or not scl or sda == scl
+            or {sda, scl} & (rail_names | {GND_NET})
+        ):
+            continue
+        domains: set[tuple[str, str]] = set()
+        accessory_supplies: set[str] = set()
+        for peer_id, peer in bindings.items():
+            if peer_id == connector_id or (sda not in peer.values() and scl not in peer.values()):
+                continue
+            peer_catalog = catalogs[peer_id]
+            if any(
+                {peer[key] for key in aliases if key in peer} != {net}
+                for aliases, net in zip(i2c_keys, (sda, scl), strict=True)
+            ):
+                break
+            if peer_catalog.lowerer is not None:
+                peer_lowerer = peer_catalog.lowerer.lowerer_id
+                if peer_lowerer == qwiic and peer.get("ground") == bound.get("ground"):
+                    if "vcc" in peer:
+                        accessory_supplies.add(peer["vcc"])
+                    continue
+                if peer_lowerer == "i2c-pullups@1" and "vdd" in peer:
+                    accessory_supplies.add(peer["vdd"])
+                    continue
+                break
+            if peer_catalog.recipe is None:
+                break
+            supplies = {
+                peer.get(port) for port in peer_catalog.directions if _supply_port_name(port)
+            }
+            references = {
+                peer.get(port) for port in peer_catalog.directions if _reference_port_name(port)
+            }
+            if len(supplies) != 1 or len(references) != 1:
+                break
+            (supply,), (reference,) = supplies, references
+            if supply is None or reference is None:
+                break
+            domains.add((supply, reference))
+        else:
+            if len(domains) != 1:
+                continue
+            (rail, ground), = domains
+            source = rail_source_contacts.get(rail)
+            if (
+                source is None or intent.power.rails[rail].voltage != 3.3
+                or ground != bound.get("ground") or accessory_supplies - {rail}
+            ):
+                continue
+            source_id, source_port = source
+            return_port = power_output_source_return_port(
+                requirements[source_id], source_port, catalog=catalogs[source_id],
+            )
+            if return_port is None or bindings[source_id].get(return_port) != ground:
+                continue
+            _bind(connector_id, "vcc", rail, "input", context="published Qwiic bus supply")
+            derived_notes.append(
+                f"{connector_id}: Qwiic bus carries {rail} and its shared {ground} return (derived)"
+            )
 
     # A lowerer publishes the contacts its own build code needs. Bind the ones the design's own
     # rails and references already answer before the contract check reads the port set: a published
@@ -3978,6 +4471,213 @@ def derive_architecture(
                     context="published reference port",
                 )
 
+    # A reviewed XH carrier can carry any contact assignment. For directly
+    # exposed MCU signals, the actual controller return must be on a contact;
+    # the number of spare contacts alone cannot establish its pinout.
+    for connector_id, catalog in sorted(catalogs.items()):
+        if catalog.lowerer is None or catalog.lowerer.lowerer_id != "reviewed-jst-xh-connector@1":
+            continue
+        bound = bindings[connector_id]
+        contacts = set(bound.values())
+        requested_supply = connector_rails.get(connector_id)
+        if requested_supply is not None and requested_supply not in contacts:
+            _fail(
+                "jst_supply_contact_missing",
+                f"JST connector {connector_id!r} declares supply {requested_supply!r}; bind it "
+                "to its actual numbered contact. JST XH does not define a power pin order.",
+                requirement_id=connector_id, sheet=requirements[connector_id].sheet,
+            )
+        signals_exposed = contacts - rail_names - {GND_NET}
+        if not signals_exposed:
+            continue
+        references = {
+            bindings[owner_id].get(_reference_port(owner_catalog))
+            for owner_id, owner_catalog in catalogs.items()
+            if requirements[owner_id].role == "mcu_core"
+            and any(
+                net in signals_exposed
+                and _allows_application_port(owner_catalog, models_by_id[owner_id], port)
+                for port, net in bindings[owner_id].items()
+            )
+        }
+        if references and (None in references or len(references) != 1 or not references <= contacts):
+            _fail(
+                "jst_gpio_reference_missing",
+                f"JST connector {connector_id!r} exposes MCU signals without their common "
+                "reference. Bind the actual controller return to an explicit numbered contact; "
+                "unused contacts may remain open. JST XH does not define a return pin order.",
+                requirement_id=connector_id, sheet=requirements[connector_id].sheet,
+                evidence=[f"contacts={bound!r}", f"controller_returns={sorted(map(str, references))}"],
+            )
+
+    power_output_header_contracts: list[PowerOutputHeaderContract] = []
+    output_headers = [row for row in requirements.values() if requires_power_output_header(row)]
+    if output_headers:
+        supply_sources: dict[str, list[tuple[str, str, str, str | None]]] = {}
+        for owner_id, catalog in catalogs.items():
+            owner = requirements[owner_id]
+            for port, rail in bindings[owner_id].items():
+                if rail not in intent.power.rails or intent.power.rails[rail].voltage != 5.0:
+                    continue
+                reference_port = power_output_source_return_port(owner, port, catalog=catalog)
+                if reference_port is not None:
+                    supply_sources.setdefault(rail, []).append(
+                        (owner_id, port, reference_port, bindings[owner_id].get(reference_port))
+                    )
+        for header in output_headers:
+            catalog = catalogs[header.id]
+            if catalog.lowerer is None or catalog.lowerer.lowerer_id != "pin-header@1":
+                continue  # the external-interface gate already reports the wrong construction
+            authored = bindings[header.id]
+            requested_supply = connector_rails.get(header.id)
+            candidates = []
+            for rail, sources in supply_sources.items():
+                if len(sources) != 1 or (requested_supply is not None and rail != requested_supply):
+                    continue
+                owner_id, port, reference_port, ground = sources[0]
+                if (
+                    rail_source_contacts.get(rail) != (owner_id, port)
+                    or header.id == owner_id or ground is None
+                    or (ground != GND_NET and not (
+                        ground in intent.power.rails and intent.power.rails[ground].voltage == 0
+                    ))
+                    or not set(authored.values()) <= {rail, ground}
+                ):
+                    continue
+                candidates.append(PowerOutputHeaderContract(
+                    header_requirement=header.id, source_requirement=owner_id,
+                    source_port=port, source_return_port=reference_port, rail=rail, ground=ground,
+                ))
+            if (
+                header.role != "connector" or len(candidates) != 1
+                or not authored.keys() <= {"pin1", "pin2"}
+                or len(set(authored.values())) != len(authored)
+            ):
+                _fail(
+                    "power_output_header_contract",
+                    "A 5 V/GND output header requires exactly two contacts and a uniquely "
+                    "sourced 5 V rail with its actual return. Select this header's rail "
+                    "explicitly when more than one is available.",
+                    requirement_id=header.id, sheet=header.sheet,
+                    evidence=[f"ports={authored!r}", f"candidate_rails={[row.rail for row in candidates]}"],
+                )
+                continue
+            contract = candidates[0]
+            for contact, net in zip(
+                (pin for pin in ("pin1", "pin2") if pin not in authored),
+                (net for net in (contract.rail, contract.ground) if net not in authored.values()),
+                strict=True,
+            ):
+                _bind(header.id, contact, net, "input" if net == contract.rail else "bidirectional",
+                      context="published 5 V output header")
+            power_output_header_contracts.append(contract)
+
+    # An authored four-wire SPI bus is not a usable off-board interface without
+    # its reference. Recognize it from the reviewed controller's published
+    # capability ports, not from requirement ids, net names or sheet prose.
+    from kicraft.design.part_identity import reviewed_part
+
+    explicit_spi_controllers = []
+    interface = FIXED_INTERFACES["spi_controller"]
+    spi_buses = []
+    for owner_id, owner_catalog in catalogs.items():
+        if owner_catalog.recipe is None or requirements[owner_id].role != "mcu_core":
+            continue
+        controller = requirements[owner_id]
+        definition = owner_catalog.recipe.definition
+        capabilities = allocatable_capability_counts(definition.allocatable_pins)
+        if "spi_controller" in controller.interfaces and all(
+            capability in capabilities for _, capability in interface
+        ):
+            explicit_spi_controllers.append((owner_id, owner_catalog, definition))
+        members = [
+            {bindings[owner_id][key] for key in names if key in bindings[owner_id]}
+            for names, _capability in interface
+        ]
+        ground = bindings[owner_id].get("gnd")
+        if ground and all(len(member) == 1 for member in members):
+            nets = set().union(*members)
+            if len(nets) == len(members) and ground not in nets:
+                spi_buses.append((nets, ground))
+    for requirement_id, catalog in sorted(catalogs.items()):
+        requirement = requirements[requirement_id]
+        if (
+            catalog.lowerer is None or catalog.lowerer.lowerer_id != "pin-header@1"
+            or requirement.role != "connector" or requirement.standard_stacking_role
+        ):
+            continue
+        bound = bindings[requirement_id]
+        if requirement.family in {"spi-header", "spi_header"} and not bound:
+            model = models_by_id.get(requirement_id)
+            if len(explicit_spi_controllers) != 1 or (model and model.declared_ports):
+                _fail(
+                    "spi_header_target_missing",
+                    "Bind this SPI header to a specific reviewed SPI controller, "
+                    "or select exactly one controller's spi_controller interface.",
+                    requirement_id=requirement_id, sheet=requirement.sheet,
+                )
+                continue
+            owner_id, owner_catalog, definition = explicit_spi_controllers[0]
+            controller_ports = bindings[owner_id]
+            ground = controller_ports.get("gnd")
+            used_nets = {_net_identity(net) for net in (*endpoints, *rail_names)}
+            contacts = []
+            for aliases, capability in interface:
+                existing = [key for key in aliases if key in controller_ports]
+                fixed = [key for key in aliases if key in (definition.fixed_port_pins or {})]
+                key = next(iter(existing or fixed), aliases[0])
+                canonical_port = _resolve_port(models_by_id[owner_id], owner_catalog, key)
+                suffix = capability.removeprefix("spi-")
+                net = controller_ports.get(key) or f"{owner_id}_SPI_{suffix}".upper().replace("-", "_")
+                if (
+                    canonical_port is None or len({controller_ports[key] for key in existing}) > 1
+                    or (key not in controller_ports and _net_identity(net) in used_nets)
+                ):
+                    break
+                contacts.append((*canonical_port, net))
+            if (
+                len(contacts) != len(interface) or not ground
+                or len({net for _, _, net in contacts} | {ground}) != len(interface) + 1
+            ):
+                _fail(
+                    "spi_header_target_missing",
+                    "The selected SPI controller does not supply an unambiguous bus and return.",
+                    requirement_id=requirement_id, sheet=requirement.sheet,
+                )
+                continue
+            for index, (port, direction, net) in enumerate(contacts, 1):
+                _bind(owner_id, port, net, direction, context="published SPI header")
+                _bind(requirement_id, f"pin{index}", net, _SINK_DIRECTION[direction],
+                      context="published SPI header")
+            spi_buses.append(({net for _, _, net in contacts}, ground))
+            derived_notes.append(f"{requirement_id}: instantiated the published SPI contact order "
+                                 f"for {owner_id} (derived)")
+        nets = set(bound.values())
+        references = {ground for members, ground in spi_buses if members <= nets}
+        if len(references) != 1 or references <= nets:
+            continue
+        ground = next(iter(references))
+        stated = _stated_contact_count(requirement.obligations)
+        record = reviewed_part(requirement.exact_part or "")
+        exact_width = len(record.contacts) if record else 0
+        model = models_by_id.get(requirement_id)
+        declared = {port.key for port in model.declared_ports} if model is not None else set()
+        used = bound.keys() | declared
+        if exact_width or stated:
+            port = next((key for index in range(1, (exact_width or stated) + 1)
+                         if (key := f"pin{index}") not in used), None)
+        else:
+            port = _next_pin(requirement_id)
+        if port is None:
+            _fail(
+                "spi_header_reference_missing",
+                f"SPI header {requirement_id!r} has no available contact for return {ground!r}; "
+                "select an adequate carrier or bind the return explicitly.",
+                requirement_id=requirement_id, sheet=requirement.sheet,
+            )
+            continue
+        _bind(requirement_id, port, ground, "bidirectional", context="SPI header reference")
+        derived_notes.append(f"{requirement_id}.{port}: SPI controller return {ground} (derived)")
 
     # The writer binds consumer-side analog_out_<n> ports, supply and return.
     # Sensor nodes, return aliases and conditioned_<n> are compiler-owned.
@@ -4101,6 +4801,24 @@ def derive_architecture(
                     f"{requirement_id}.{conditioned}: shares {bound[output]} with "
                     f"{output} (analog conditioner topology) (derived)"
                 )
+
+    fixed_addresses: dict[tuple[str, str, int], list[str]] = {}
+    for requirement_id, catalog in catalogs.items():
+        if catalog.lowerer is None or (address := catalog.lowerer.fixed_i2c_address) is None:
+            continue
+        bound = bindings[requirement_id]
+        if (sda := bound.get("sda")) and (scl := bound.get("scl")):
+            fixed_addresses.setdefault((sda, scl, address), []).append(requirement_id)
+    for (sda, scl, address), owners in sorted(fixed_addresses.items()):
+        if len(owners) > 1:
+            _fail(
+                "fixed_i2c_address_collision",
+                f"{', '.join(sorted(owners))} share fixed I2C address {address:#04x} "
+                f"on {sda}/{scl}. Preserve the channel count using independent buses "
+                "or a reviewed topology with independent addresses or analog channels.",
+                evidence=sorted(owners),
+            )
+
     # A port the reviewed recipe requires and nothing wired is a missing design statement, not
     # a bookkeeping slip: the part cannot work without it. Name it here, once, instead of
     # letting the part reach BOM expansion and fail on a port binding mismatch.
@@ -4110,12 +4828,23 @@ def derive_architecture(
     from kicraft.design.part_identity import canonical_physical_features, class_key
 
     for requirement_id, requirement in sorted(requirements.items()):
-        if requirement.family != "switch-input" or not any(
+        if requirement.family != "switch-input":
+            continue
+        jumper = any(
             obligation.kind == "adjustability"
             and "jumper" in canonical_physical_features(class_key(obligation.mechanism))
             for obligation in requirement.obligations
+        )
+        node = bindings[requirement_id].get("signal")
+        if not jumper and node and not any(
+            owner != requirement_id and node in ports.values()
+            for owner, ports in bindings.items()
         ):
-            continue
+            _fail(
+                "switch_signal_target_missing",
+                f"switch {requirement_id!r} has no controlled input or exposed signal contact",
+                requirement_id=requirement_id, sheet=requirement.sheet,
+            )
         control_net = bindings.get(requirement_id, {}).get("vdd")
         rail = intent.power.rails.get(control_net) if control_net else None
         stated = requirement.parameters.get("voltage")
@@ -4124,14 +4853,14 @@ def derive_architecture(
             or rail is None or rail.from_ref is None or stated != rail.voltage
         ):
             _fail(
-                "unsafe_enable_jumper_control",
-                f"jumper {requirement_id!r} voltage must match its sourced control rail",
+                "unsafe_enable_jumper_control" if jumper else "switch_supply_voltage_mismatch",
+                f"switch {requirement_id!r} voltage must match its sourced control rail",
                 requirement_id=requirement_id, sheet=requirement.sheet,
                 evidence=[f"declared_voltage={stated!r}",
                           f"control_voltage={getattr(rail, 'voltage', None)!r}"],
             )
             continue
-        if stated is None and rail is not None and rail.from_ref and 0 < rail.voltage <= 5.5:
+        if stated is None and rail is not None and rail.from_ref and rail.voltage > 0:
             requirements[requirement_id] = requirement.model_copy(update={
                 "parameters": {**requirement.parameters, "voltage": rail.voltage},
             })
@@ -4177,9 +4906,23 @@ def derive_architecture(
     # sourced logic rail inside that exact recipe's reviewed EN limit. This leaves an ordinary
     # switch-input free for buttons while refusing a raw 18/24 V rail or an invented target.
     from kicraft.design.part_identity import canonical_physical_features, class_key
-    from kicraft.design.recipes.wave_b_power import enable_control_max_voltage
+    from kicraft.design.recipes.wave_b_power import enable_control_drive_range
 
     for requirement_id, requirement in sorted(requirements.items()):
+        if any(_regulator_reset_obligation(row) for row in requirement.obligations):
+            catalog = catalogs[requirement_id]
+            if (
+                catalog.recipe is None
+                or catalog.recipe.definition.recipe != TPS54331_3V3_SHUNT_CONTROLS.recipe
+                or requirement.parameters.get("reset_control") is not True
+            ):
+                _fail(
+                    "regulator_reset_unrealized",
+                    "Regulator reset must hold the converter off and release it to restart. "
+                    "Choose a compatible recipe-owned momentary inhibit circuit; a generic "
+                    "button, spare output contact or GPIO does not reset a regulator.",
+                    requirement_id=requirement_id, sheet=requirement.sheet,
+                )
         mechanisms = {
             feature
             for obligation in requirement.obligations
@@ -4234,22 +4977,27 @@ def derive_architecture(
             continue
         target_id, target_catalog = targets[0]
         recipe = target_catalog.recipe.definition.recipe if target_catalog.recipe is not None else ""
-        maximum = enable_control_max_voltage(recipe)
+        envelope = enable_control_drive_range(recipe)
         rail = intent.power.rails.get(control_rail) if control_rail else None
+        peers = {
+            (owner_id, port) for owner_id, ports in bindings.items()
+            for port, net in ports.items() if net == signal
+        }
         if (
             requirement.parameters.get("active_level") != "high"
             or rail is None
             or rail.from_ref is None
             or str(rail.from_ref).startswith(f"{target_id}.")
-            or rail.voltage <= 0
-            or maximum is None
-            or rail.voltage > maximum
+            or envelope is None or not envelope[0] <= rail.voltage <= envelope[1]
+            or bound.get("gnd") != bindings[target_id].get("gnd")
+            or peers != {(requirement_id, "signal"), (target_id, "enable")}
         ):
             _fail(
                 "unsafe_enable_jumper_control",
                 (
                     f"jumper {requirement_id!r} must drive {target_id!r}.enable high from a "
-                    "sourced rail within that recipe's reviewed EN limit"
+                    "sourced rail within that recipe's reviewed EN limits, with a common "
+                    "return and no other drivers"
                 ),
                 requirement_id=requirement_id,
                 sheet=requirement.sheet,
@@ -4257,7 +5005,7 @@ def derive_architecture(
                     f"target_recipe={recipe or '(none)'}",
                     f"control_rail={control_rail!r}",
                     f"control_voltage={getattr(rail, 'voltage', None)!r}",
-                    f"enable_max_voltage={maximum!r}",
+                    f"enable_drive_range={envelope!r}",
                 ],
             )
 
@@ -4446,6 +5194,7 @@ def derive_architecture(
             for row in advisories
         ],
         requirements=final_requirements,
+        power_output_header_contracts=power_output_header_contracts,
         obligations=list(intent.obligations),
         declared_interfaces=declared,
     )

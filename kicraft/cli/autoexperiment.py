@@ -353,6 +353,15 @@ def _accepted_leaf_artifacts(project_dir: Path) -> list[dict[str, Any]]:
             continue
 
         validation = solved_layout.get("validation", {})
+        reuse = metadata.get("qualified_reuse") or {}
+        if reuse.get("status") in {"reused", "published", "already_published"}:
+            from kicraft.leaf_library.qualification import verify_installed_instance
+
+            try:
+                verify_installed_instance(artifact_dir, reuse)
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                print(f"  rejected qualified leaf: {artifact_dir.name} ({exc})")
+                continue
         if _leaf_gate_accepted(validation, solved_layout):
             accepted.append(
                 {
@@ -621,6 +630,7 @@ def _auto_pin_best_leaves(project_dir: Path, *, allow_incomplete: bool = False) 
         )
 
     experiments_dir = project_dir / ".experiments"
+    current_pins = pins_module.read_pins(experiments_dir)["pinned_leaves"]
     artifacts = _all_leaf_artifacts(project_dir)
 
     pinned = 0
@@ -630,6 +640,30 @@ def _auto_pin_best_leaves(project_dir: Path, *, allow_incomplete: bool = False) 
     for art in artifacts:
         artifact_dir = Path(art["artifact_dir"])
         leaf_key = artifact_dir.name
+        existing_pin = current_pins.get(leaf_key, {})
+        if str(existing_pin.get("source", "")).startswith("qualified:"):
+            # The independently checked import is not a local search round.
+            # Preserve its exact immutable snapshot; never reinterpret it
+            # as an empty round or as a solver pass with a synthetic score.
+            from kicraft.leaf_library.qualification import verify_installed_instance
+
+            try:
+                snapshot = pins_module._round_snapshot_files(artifact_dir, existing_pin.get("round", ""))
+                if not snapshot:
+                    raise ValueError("qualified snapshot is incomplete")
+                reuse = _load_json(snapshot["metadata.json"])["qualified_reuse"]
+                if (reuse["status"] not in {"reused", "published", "already_published"}
+                    or existing_pin["source"] != f"qualified:{reuse['entry']}"):
+                    raise ValueError("qualified pin and snapshot identities differ")
+                verify_installed_instance(artifact_dir, reuse, snapshot_id=existing_pin["round"])
+                verify_installed_instance(artifact_dir, reuse)
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                if pins_module.unpin_leaf(experiments_dir, leaf_key):
+                    cleared += 1
+                print(f"  cleared obsolete or invalid qualified pin: {leaf_key} ({exc})")
+            else:
+                pinned += 1
+                continue
 
         # Some leaves may finish without debug.json -- e.g. when
         # legality repair fails partway and the per-round trace is
@@ -3159,7 +3193,7 @@ def main(argv: list[str] | None = None, *, history=None) -> int:
                 planned_leaf_paths, reused, list(plan.only)
             )
             print(f"[leaf-convergence] reused {len(reused)} accepted leaf(s); "
-                  f"solving {len(solve_selectors)} unresolved: {', '.join(solve_selectors)}")
+                  f"resolving {len(solve_selectors)} unresolved: {', '.join(solve_selectors)}")
 
         solve_cmd = _build_solve_cmd(
             schematic=schematic,
@@ -3214,7 +3248,7 @@ def main(argv: list[str] | None = None, *, history=None) -> int:
             # pinned-leaf set from a prior --leaves-only run).
             print(
                 f"[round {round_num}] "
-                f"{'all leaves qualified' if skip_converged_solve else '--parents-only'}: "
+                f"{'all leaves accepted' if skip_converged_solve else '--parents-only'}: "
                 f"skipping leaf solve, using existing leaf artifacts on disk"
             )
         else:
@@ -3320,6 +3354,17 @@ def main(argv: list[str] | None = None, *, history=None) -> int:
                 prior_snapshots=prior_snapshots,
             )
         leaf_timing_summary = _extract_leaf_timing_summary(solve_payload)
+        reuse_decisions = solve_payload.get("qualified_reuse", {})
+        if reuse_decisions:
+            leaf_timing_summary["qualified_reuse"] = reuse_decisions
+            for result in solve_payload.get("results", []):
+                solved = result.get("solved", {})
+                decision = reuse_decisions.get(solved.get("instance_path"), {})
+                if decision:
+                    print(f"  [qualified-leaf] {solved.get('sheet_name')}: {decision['status']} "
+                          f"{decision.get('entry') or decision.get('reason', '')}")
+        if solve_payload.get("qualified_catalogue"):
+            leaf_timing_summary["qualified_catalogue"] = solve_payload["qualified_catalogue"]
 
         all_leafs = _all_leaf_artifacts(project_dir)
         accepted_leafs = _accepted_leaf_artifacts(project_dir)
@@ -3485,6 +3530,20 @@ def main(argv: list[str] | None = None, *, history=None) -> int:
                 cwd=project_dir,
                 **({"env": history.child_env()} if history else {}),
             )
+            parent_execution = round_dir / "parent_execution.json"
+            _write_json(parent_execution, {
+                "schema_version": 1,
+                "stage": "parent_compose_route",
+                "exit_code": parent_route_rc,
+                "command": parent_route_cmd,
+                "stdout": parent_route_stdout,
+                "stderr": parent_route_stderr,
+            })
+            if parent_route_rc != 0:
+                detail = parent_route_stderr.strip().splitlines() or parent_route_stdout.strip().splitlines()
+                print(f"  [parent] failed (rc={parent_route_rc}); complete evidence: {parent_execution}")
+                if detail:
+                    print(f"  [parent] {detail[-1]}")
             parent_route_elapsed_s = _record_timing(
                 round_timing_breakdown,
                 "parent_route_total",
@@ -3875,7 +3934,7 @@ def main(argv: list[str] | None = None, *, history=None) -> int:
             and planned_leaf_paths
             and planned_leaf_paths <= _reusable_leaf_paths(project_dir, convergence_units)
         ):
-            print("[leaf-convergence] all required leaves qualified; stopping leaf cohorts")
+            print("[leaf-convergence] all required leaves accepted; stopping leaf cohorts")
             break
 
     phase = "done"

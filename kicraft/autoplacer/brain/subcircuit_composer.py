@@ -216,6 +216,9 @@ class LeafBlockerSet:
     # nesting allowance in ``can_overlap_sparse``; see
     # docs/plans/shaped-compose-leaf-nesting.md.
     interior_free_rects: tuple[tuple[Point, Point], ...] = ()
+    # Native geometry excludes reserved label lanes present in component_rects.
+    component_edge_rects: dict[str, tuple[Point, Point]] = field(default_factory=dict)
+    component_pad_rects: dict[str, tuple[Point, Point]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -236,6 +239,7 @@ class AttachmentConstraint:
     barrel_overhang: bool = False
     anchor_kind: Literal["body", "antenna"] = "body"
     antenna_intent: AntennaEdgeIntent | None = None
+    edge_pad_clearance_mm: float = 0.0
 
 
 @dataclass(slots=True)
@@ -420,6 +424,10 @@ def derive_attachment_constraints(
                 barrel_overhang=barrel_overhang,
                 anchor_kind="antenna" if antenna_intent is not None else "body",
                 antenna_intent=antenna_intent,
+                edge_pad_clearance_mm=(
+                    max(0.0, float(cfg.get("connector_edge_pad_clearance_mm", 0.2)))
+                    if is_conn and target == "edge" else 0.0
+                ),
             )
         )
         constraint = constraints[-1]
@@ -862,6 +870,25 @@ def _compute_local_anchor_offset(
             anchor.y = edge_marker.y if edge_marker is not None else bbox_min.y
         elif side == "bottom":
             anchor.y = edge_marker.y if edge_marker is not None else bbox_max.y
+
+    # A mouth can have hold-down pads as far out as the housing (JST SH).
+    # Align the bank on an attainable board cut, not an ideal overhang that
+    # the final copper-containment pass would push outward for every member.
+    if (blocker_set is not None and edge_marker is None
+            and constraint.edge_pad_clearance_mm > 0 and constraint.ref in blocker_set.component_pad_rects):
+        lo, hi = _transform_rect(
+            blocker_set.component_pad_rects[constraint.ref], Point(0.0, 0.0), rotation_deg,
+        )
+        offset = (constraint.edge_pad_clearance_mm + constraint.outward_overhang_mm
+                  - constraint.inward_keep_in_mm)
+        if constraint.value == "left":
+            anchor.x = min(anchor.x, lo.x - offset)
+        elif constraint.value == "right":
+            anchor.x = max(anchor.x, hi.x + offset)
+        elif constraint.value == "top":
+            anchor.y = min(anchor.y, lo.y - offset)
+        elif constraint.value == "bottom":
+            anchor.y = max(anchor.y, hi.y + offset)
 
     return anchor
 
@@ -1762,7 +1789,7 @@ def _constraint_local_rect(
     rotation_deg: float,
 ) -> tuple[Point, Point]:
     if blocker_set is not None:
-        rect = blocker_set.component_rects.get(ref)
+        rect = blocker_set.component_edge_rects.get(ref) or blocker_set.component_rects.get(ref)
         if rect is not None:
             return _transform_rect(rect, Point(0.0, 0.0), rotation_deg)
     return _component_local_bbox(transformed.transformed_components[ref])
@@ -2014,6 +2041,7 @@ def _extract_blockers_from_pcb(
         pcbnew.B_Cu: back_tht_pads,
     }
     component_rects: dict[str, tuple[Point, Point]] = {}
+    component_pad_rects: dict[str, tuple[Point, Point]] = {}
     component_sides: dict[str, str] = {}
     edge_reference_points: dict[str, Point] = {}
     connector_pad_edge_anchors: dict[str, Point] = {}
@@ -2149,6 +2177,8 @@ def _extract_blockers_from_pcb(
         # barrel_overhang False, the clamp rejected the marker anchor, and the
         # outline grew out to the barrel tip -- burying the mouth on-board).
         if ref.startswith("J") and pad_lo is not None:
+            assert pad_hi is not None
+            component_pad_rects[ref] = (pad_lo, pad_hi)
             barrel_anchor = _connector_barrel_edge_anchor(
                 court_min, court_max, pad_lo, pad_hi, edge_marker=edge_marker
             )
@@ -2184,8 +2214,8 @@ def _extract_blockers_from_pcb(
         return tuple(_rebase_rect(rect) for rect in rects)
     # Layout component envelopes include any compiler-owned silk lane.  The
     # native courtyard alone cannot represent that reserved, empty space.
-    local_component_rects = {ref: _rebase_rect(rect)
-                             for ref, rect in component_rects.items()}
+    local_edge_rects = {ref: _rebase_rect(rect) for ref, rect in component_rects.items()}
+    local_component_rects = dict(local_edge_rects)
     for ref, component in artifact.layout.components.items():
         if ref not in local_component_rects:
             continue
@@ -2208,6 +2238,8 @@ def _extract_blockers_from_pcb(
         front_tht_pads=_rebase_rects(_coalesce_rects(front_tht_pads)),
         back_tht_pads=_rebase_rects(_coalesce_rects(back_tht_pads)),
         component_rects=local_component_rects,
+        component_edge_rects=local_edge_rects,
+        component_pad_rects={ref: _rebase_rect(rect) for ref, rect in component_pad_rects.items()},
         component_sides=dict(component_sides),
         edge_reference_points={
             ref: Point(point.x - shift_x, point.y - shift_y)

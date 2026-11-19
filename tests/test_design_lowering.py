@@ -3094,7 +3094,6 @@ def test_rgb_indicator_internal_nodes_are_unique_per_requirement():
     ("exact_part", "ports", "missing"),
     [
         (None, {"pin1": "SIGNAL"}, {"pin2"}),
-        ("B4B-XH-A(LF)(SN)", {"pin1": "A", "pin2": "B", "pin3": "+5V"}, {"pin4"}),
     ],
 )
 def test_jst_repair_identifies_missing_real_contacts_without_changing_part(exact_part, ports, missing):
@@ -3113,3 +3112,15 @@ def test_jst_repair_identifies_missing_real_contacts_without_changing_part(exact
     assert {(pin.pin, pin.net) for pin in artifact.pins} == {
         (name.removeprefix("pin"), net) for name, net in repaired.ports.items()
     }
+
+
+def test_fixed_jst_carrier_preserves_declared_wires_and_marks_spare_contact_nc():
+    request = _requirement(
+        "jst-xh-connector", ports={"pin1": "A", "pin2": "B", "pin3": "+5V"},
+    ).model_copy(update={"exact_part": "B4B-XH-A(LF)(SN)"})
+    artifact = lower_requirement(request)
+    assert artifact.groups[0].mpn == "B4B-XH-A(LF)(SN)"
+    assert {(pin.pin, pin.net) for pin in artifact.pins} == {
+        ("1", "A"), ("2", "B"), ("3", "+5V"),
+    }
+    assert {pin.pin for pin in artifact.no_connects} == {"4"}

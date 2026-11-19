@@ -106,6 +106,9 @@ class PromoteRequest:
     # install time.
     autoplacer_fragment: dict = field(default_factory=dict)
 
+    # Independently produced qualification evidence, included in the payload hash.
+    qualification: dict | None = None
+
 
 def _parse_hierarchical_labels(sch_text: str) -> list[HierarchicalLabel]:
     labels: list[HierarchicalLabel] = []
@@ -199,13 +202,8 @@ def extract_leaf(
 ) -> Path:
     """Build a leaf directory under ``target_library_dir``.
 
-    Stages the complete leaf before installation. An existing version is
-    backed up and restored if the final rename fails; a failed restoration
-    leaves that backup on disk for recovery.
-
-    Refuses to overwrite an existing leaf directory with the same name
-    and version; the caller (GUI) is responsible for bumping the patch
-    version when re-promoting.
+    Stages a complete immutable version before atomic installation. Concurrent
+    publishers serialize the final rename; an existing version is never replaced.
 
     Returns the final leaf directory path.
     """
@@ -227,19 +225,12 @@ def extract_leaf(
             f"leaf schematic not found: {sch_path}"
         )
 
-    target_dir = Path(target_library_dir) / req.name
+    from .manifest import LEAF_NAME_RE, SEMVER_RE
+    if not LEAF_NAME_RE.fullmatch(req.name) or not SEMVER_RE.fullmatch(req.version):
+        raise ValueError("invalid leaf name or version")
+    target_dir = Path(target_library_dir) / f"{req.name}@{req.version}"
     if target_dir.exists():
-        # Match-version refusal: caller should bump version.
-        from .manifest import load_manifest as _load
-        try:
-            existing = _load(target_dir)
-        except Exception:
-            existing = None
-        if existing is not None and existing.version == req.version:
-            raise FileExistsError(
-                f"leaf {req.name}@{req.version} already exists at {target_dir} "
-                f"-- bump the version and retry"
-            )
+        raise FileExistsError(f"immutable leaf {req.name}@{req.version} already exists")
 
     target_library_dir = Path(target_library_dir)
     target_library_dir.mkdir(parents=True, exist_ok=True)
@@ -269,6 +260,12 @@ def extract_leaf(
             + "\n",
             encoding="utf-8",
         )
+
+        if req.qualification is not None:
+            (staging / "qualification.json").write_text(
+                json.dumps(req.qualification, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
 
         # Renders
         if render:
@@ -327,31 +324,43 @@ def extract_leaf(
         manifest = manifest.model_copy(update={"content_hash": real_hash})
         dump_manifest(manifest, staging)
 
-        # Keep the previous version recoverable until the new version is in
-        # place. A failed final rename must not destroy the installed leaf.
-        import os as _os
-        backup_root = None
-        backup = None
-        if target_dir.exists():
-            backup_root = Path(tempfile.mkdtemp(
-                dir=target_library_dir, prefix=f".{req.name}.backup."
-            ))
-            backup = backup_root / req.name
+        # Keep the lock outside the payload. Readers see either no entry or the
+        # complete version, and concurrent writers cannot replace one another.
+        import fcntl
+        import os
+
+        with (target_library_dir / ".publish.lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            legacy_dir = target_library_dir / req.name
+            if legacy_dir.is_dir():
+                from .manifest import load_manifest
+
+                # Never shadow an already published legacy identity.
+                legacy = load_manifest(legacy_dir)
+                if legacy.version == req.version:
+                    raise FileExistsError(
+                        f"immutable legacy leaf {req.name}@{req.version} already exists"
+                    )
+            if target_dir.exists():
+                raise FileExistsError(
+                    f"immutable leaf {req.name}@{req.version} already exists"
+                )
+            for path in staging.rglob("*"):
+                if path.is_file():
+                    with path.open("rb") as payload:
+                        os.fsync(payload.fileno())
+            for directory in [*(p for p in staging.rglob("*") if p.is_dir()), staging]:
+                payload_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.fsync(payload_fd)
+                finally:
+                    os.close(payload_fd)
+            os.replace(staging, target_dir)
+            directory_fd = os.open(target_library_dir, os.O_RDONLY | os.O_DIRECTORY)
             try:
-                _os.replace(target_dir, backup)
-            except BaseException:
-                backup_root.rmdir()
-                raise
-        try:
-            _os.replace(staging, target_dir)
-        except BaseException:
-            if backup is not None:
-                # If restoration itself fails, leave the backup on disk.
-                _os.replace(backup, target_dir)
-                backup_root.rmdir()
-            raise
-        if backup_root is not None:
-            shutil.rmtree(backup_root)
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
 
     log.info("promoted leaf %s@%s to %s", req.name, req.version, target_dir)
     return target_dir

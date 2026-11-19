@@ -211,10 +211,10 @@ def _pad_contains(shape, hole, point, margin=0):
     return shape.Collide(p, margin) and not (hole and hole.Collide(p, hole_margin))
 
 
-def _copper_graph(board, net):
-    """Return (adjacency, pads-by-ref/pin, pad nodes) for one physical net."""
+def _copper_graph(board, net, *, copper=None):
+    """Return adjacency and pad nodes; optionally prove a read-only copper subset."""
     tracks, vias, pads = [], [], []
-    for item in board.GetTracks():
+    for item in board.GetTracks() if copper is None else copper:
         if item.GetNetname() != net:
             continue
         if isinstance(item, pcbnew.PCB_VIA):

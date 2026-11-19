@@ -108,7 +108,7 @@ def _shape_stroke_boxes(shape) -> list[tuple[float, float, float, float]]:
     return []
 
 
-def _collect_obstacles(board) -> dict[str, list]:
+def _collect_obstacles(board, *, include_references: bool = True) -> dict[str, list]:
     """Per-side (F/B) mm boxes silk text must not touch.
 
     Courtyards + pads (through-hole pads block both sides) + every existing
@@ -149,7 +149,10 @@ def _collect_obstacles(board) -> dict[str, list]:
                 _add("B", pad.GetBoundingBox())
             else:
                 _add(side, pad.GetBoundingBox())
-        for item in list(fp.GraphicalItems()) + [fp.Reference(), fp.Value()]:
+        fields = [fp.Value()]
+        if include_references:
+            fields.append(fp.Reference())
+        for item in list(fp.GraphicalItems()) + fields:
             try:
                 if not getattr(item, "IsVisible", lambda: True)():
                     continue
@@ -190,7 +193,9 @@ class _Placer:
         self.board = board
         self.poly = _outline_poly(board)
         self.board_box = poly_bbox(self.poly)
-        self.obstacles = _collect_obstacles(board)
+        self.obstacles = _collect_obstacles(board, include_references=not any(
+            label.get("required") for label in payload.get("labels") or []
+        ))
         self.clearance = float(payload.get("clearance_mm", 0.25))
         self.edge_margin = float(payload.get("edge_margin_mm", 0.5))
         self.placed: list[dict] = []
@@ -223,6 +228,7 @@ class _Placer:
             "x_mm": round(tx, 3),
             "y_mm": round(ty, 3),
             "height_mm": height,
+            "rotation_deg": txt.GetTextAngle().AsDegrees(),
             "layer": "F.SilkS" if side == "F" else "B.SilkS",
         })
 
@@ -253,7 +259,7 @@ class _Placer:
                         return True
         return False
 
-    def _wrap_lines(self, lines: list[dict]) -> list[dict]:
+    def _wrap_lines(self, lines: list[dict], *, force: bool = False) -> list[dict]:
         """Split any line wider than ~60% of the board at the most central
         space, so long attribution lines can fit narrow boards."""
         board_w = self.board_box[2] - self.board_box[0]
@@ -262,7 +268,7 @@ class _Placer:
             text = ln["text"]
             # Rough stroke-font width estimate: ~0.95 * height per char.
             est_w = len(text) * float(ln["height_mm"]) * 0.95
-            if est_w > board_w * 0.6 and " " in text.strip():
+            if (force or est_w > board_w * 0.6) and " " in text.strip():
                 mid = len(text) // 2
                 spaces = [i for i, c in enumerate(text) if c == " "]
                 cut = min(spaces, key=lambda i: abs(i - mid))
@@ -341,14 +347,22 @@ class _Placer:
         layer = pcbnew.B_SilkS if side == "B" else pcbnew.F_SilkS
 
         heights = [float(h) for h in (label.get("heights_mm") or [1.0, 0.9, 0.8])]
-        for h in heights:
-            txt = _make_text(self.board, label["text"], h, layer, mirrored)
-            w, th, ox, oy = self._measure(txt)
-            for tx, ty in self._label_candidates(fp, w, th, label.get("prefer")):
-                box = (tx, ty, tx + w, ty + th)
-                if self._spot_ok(side, box):
-                    self._commit(txt, side, tx, ty, ox, oy, label_id, h)
-                    return
+        texts = [label["text"]]
+        if "\n" not in texts[0]:
+            wrapped = "\n".join(line["text"] for line in self._wrap_lines(
+                [{"text": texts[0], "height_mm": min(heights)}], force=True,
+            ))
+            if wrapped != texts[0]:
+                texts.append(wrapped)
+        for text in texts:
+            for h in heights:
+                txt = _make_text(self.board, text, h, layer, mirrored)
+                w, th, ox, oy = self._measure(txt)
+                for tx, ty in self._label_candidates(fp, w, th, label.get("prefer")):
+                    box = (tx, ty, tx + w, ty + th)
+                    if self._spot_ok(side, box):
+                        self._commit(txt, side, tx, ty, ox, oy, label_id, h)
+                        return
         # Priority-1 labels degrade to "anywhere free on the board" before
         # dropping: a DIP table across the board still beats no table. The
         # anchored pass already failed, so sweep candidates (fp=None), front
@@ -387,12 +401,20 @@ class _Placer:
             self.dropped.append({"id": label_id, "reason": "no pads"})
             return
 
-        centers = [_mm_box(p.GetBoundingBox()) for p in pads.values()]
-        centroid_x = sum((b[0] + b[2]) / 2 for b in centers) / len(centers)
-        centroid_y = sum((b[1] + b[3]) / 2 for b in centers) / len(centers)
+        centers = {number: _mm_box(p.GetBoundingBox()) for number, p in pads.items()}
+        centroid_x = sum((b[0] + b[2]) / 2 for b in centers.values()) / len(centers)
+        centroid_y = sum((b[1] + b[3]) / 2 for b in centers.values()) / len(centers)
 
         heights = [float(h) for h in (label.get("heights_mm") or [0.8])]
-        for entry in label.get("pins") or []:
+        def inner_first(entry):
+            bounds = centers.get(str(entry.get("pin") or "").strip())
+            if bounds is None:
+                return float("inf")
+            return (((bounds[0] + bounds[2]) / 2 - centroid_x) ** 2
+                    + ((bounds[1] + bounds[3]) / 2 - centroid_y) ** 2)
+
+        # Interior contacts have fewer unambiguous outward directions.
+        for entry in sorted(label.get("pins") or [], key=inner_first):
             pin = str(entry.get("pin") or "").strip()
             text = str(entry.get("text") or "").strip()
             pad = pads.get(pin)
@@ -403,7 +425,7 @@ class _Placer:
                 )
                 continue
 
-            pb = _mm_box(pad.GetBoundingBox())
+            pb = centers[pin]
             cx = (pb[0] + pb[2]) / 2
             cy = (pb[1] + pb[3]) / 2
             dx = cx - centroid_x
@@ -420,22 +442,39 @@ class _Placer:
                                  if d != dominant]
 
             placed = False
-            for h in heights:
-                txt = _make_text(self.board, text, h, layer, mirrored)
-                w, th, ox, oy = self._measure(txt)
-                for tx, ty in self._pin_candidates(pb, cx, cy, w, th, dirs):
-                    box = (tx, ty, tx + w, ty + th)
-                    if label.get("required"):
-                        # Clamping an off-board candidate must not move a
-                        # pin legend to an unrelated part of the connector.
-                        dx = max(pb[0] - box[2], box[0] - pb[2], 0.0)
-                        dy = max(pb[1] - box[3], box[1] - pb[3], 0.0)
-                        if dx * dx + dy * dy > 4.5 * 4.5:
+            # Composition rotates reserved text lanes with the component.
+            # Keep the full contact name: try both orthogonal text axes under
+            # identical locality, nearest-contact and physical-clearance rules.
+            for angle in (0, 90):
+                for h in heights:
+                    txt = _make_text(self.board, text, h, layer, mirrored)
+                    txt.SetTextAngle(pcbnew.EDA_ANGLE(angle, pcbnew.DEGREES_T))
+                    w, th, ox, oy = self._measure(txt)
+                    for tx, ty in self._pin_candidates(pb, cx, cy, w, th, dirs):
+                        box = (tx, ty, tx + w, ty + th)
+                        if label.get("required"):
+                            # Clamping an off-board candidate must not move a
+                            # pin legend to an unrelated part of the connector.
+                            dx = max(pb[0] - box[2], box[0] - pb[2], 0.0)
+                            dy = max(pb[1] - box[3], box[1] - pb[3], 0.0)
+                            if dx * dx + dy * dy > 4.5 * 4.5:
+                                continue
+                        # Include unlabelled/NC contacts when checking ambiguity.
+                        tx_center, ty_center = tx + w / 2, ty + th / 2
+                        own_distance = (tx_center - cx) ** 2 + (ty_center - cy) ** 2
+                        if any(
+                            (tx_center - (other[0] + other[2]) / 2) ** 2
+                            + (ty_center - (other[1] + other[3]) / 2) ** 2
+                            <= own_distance + 1e-9
+                            for number, other in centers.items() if number != pin
+                        ):
                             continue
-                    if self._spot_ok(side, box):
-                        self._commit(txt, side, tx, ty, ox, oy,
-                                     f"{label_id}:{pin}", h)
-                        placed = True
+                        if self._spot_ok(side, box):
+                            self._commit(txt, side, tx, ty, ox, oy,
+                                         f"{label_id}:{pin}", h)
+                            placed = True
+                            break
+                    if placed:
                         break
                 if placed:
                     break
@@ -467,6 +506,24 @@ class _Placer:
                     ty = pb[1] - gap - h
                     for tx in (cx - w / 2, pb[0], pb[2] - w):
                         yield self._clamped(tx, ty, w, h)
+
+        # Cardinal alignments can miss a real diagonal slot.
+        yield from self._nearby_candidates(pb, w, h, 4.5)
+
+    def _nearby_candidates(self, anchor, w: float, h: float, distance: float):
+        """Nearest-first bounded search, never a whole-board fallback."""
+        cx = (anchor[0] + anchor[2]) / 2
+        cy = (anchor[1] + anchor[3]) / 2
+        nearby = []
+        for ty in _steps(anchor[1] - distance - h, anchor[3] + distance, 0.25):
+            for tx in _steps(anchor[0] - distance - w, anchor[2] + distance, 0.25):
+                dx = max(anchor[0] - (tx + w), tx - anchor[2], 0.0)
+                dy = max(anchor[1] - (ty + h), ty - anchor[3], 0.0)
+                if dx * dx + dy * dy <= distance * distance:
+                    nearby.append((tx, ty))
+        yield from sorted(nearby, key=lambda point:
+                          (point[0] + w / 2 - cx) ** 2
+                          + (point[1] + h / 2 - cy) ** 2)
 
     def _label_candidates(self, fp, w: float, h: float, prefer: str | None):
         """Candidate bbox top-lefts: rings around the anchor courtyard on the
@@ -514,6 +571,8 @@ class _Placer:
                     for tx in (cx - w / 2, court[0], court[2] - w):
                         yield self._clamped(tx, ty, w, h)
 
+        yield from self._nearby_candidates(court, w, h, 7.0)
+
 
 def _steps(lo: float, hi: float, step: float):
     n = int((hi - lo) / step)
@@ -531,9 +590,8 @@ def main(argv: list[str]) -> int:
     board = pcbnew.LoadBoard(payload["pcb_path"])
     placer = _Placer(board, payload)
 
-    # Functional labels FIRST (largest first within a priority tier — the
-    # DIP table is the hardest rectangle to pack and the most valuable),
-    # then the legend, which has its own degrade path down to back silk.
+    # Pack constrained contact labels before flexible functional titles.
+    # Within each class, large rectangles go first; attribution goes last.
     def _size_key(lb: dict) -> float:
         lines = str(lb.get("text", "")).split("\n")
         return -(len(lines) * max((len(ln) for ln in lines), default=0))
@@ -541,13 +599,27 @@ def main(argv: list[str]) -> int:
     labels = sorted(
         payload.get("labels") or [],
         key=lambda lb: (not bool(lb.get("required")), int(lb.get("priority", 2)),
-                        _size_key(lb), str(lb.get("id", ""))),
+                        lb.get("kind") != "pinout", _size_key(lb), str(lb.get("id", ""))),
     )
-    for label in labels:
-        if label.get("kind") == "pinout":
-            placer.place_pinout(label)
-        else:
-            placer.place_label(label)
+    has_required = any(label.get("required") for label in labels)
+    reference_designators = {}
+    for required_phase in (True, False):
+        if not required_phase and has_required:
+            if placer.placed:
+                # Required functions own their slots. Retain unplaceable refs
+                # on Fab for assembly, using the existing native legalizer.
+                from kicraft.autoplacer.hardware.silk_refdes import legalize_refdes
+                reference_designators = legalize_refdes(
+                    board, {"refdes_courtyard_margin_mm": placer.clearance},
+                )
+            placer.obstacles = _collect_obstacles(board)
+        for label in labels:
+            if bool(label.get("required")) != required_phase:
+                continue
+            if label.get("kind") == "pinout":
+                placer.place_pinout(label)
+            else:
+                placer.place_label(label)
 
     legend = payload.get("legend") or {}
     lines = legend.get("lines") or []
@@ -569,7 +641,8 @@ def main(argv: list[str]) -> int:
     required_missing = sorted(set(expected) - placed)
     with open(payload["result_path"], "w") as f:
         json.dump({"placed": placer.placed, "dropped": placer.dropped,
-                   "required_expected": expected, "required_missing": required_missing}, f, indent=1)
+                   "required_expected": expected, "required_missing": required_missing,
+                   "reference_designators": reference_designators}, f, indent=1)
 
     board.Save(payload.get("output_path") or payload["pcb_path"])
     # Success sentinel (matches routing_board._PCBNEW_OK_SENTINEL) so a

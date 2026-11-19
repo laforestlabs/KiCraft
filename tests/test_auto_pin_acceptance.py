@@ -221,3 +221,25 @@ def test_selected_raw_drc_does_not_manufacture_acceptance(tmp_path, raw_count):
         }
 
 
+
+def test_obsolete_qualified_pin_does_not_override_fresh_local_round(tmp_path, capsys):
+    leaf = _leaf_fixture(tmp_path, [_round(35, 84.3, 0)])
+    experiments = tmp_path / ".experiments"
+    pin = "qualified-old"
+    saved = {
+        "qualification.json": json.dumps({"contract": {"method": "kicraft-independent-design-qualification@1"}}),
+        "solved_layout.json": json.dumps({"validation": {"leaf_acceptance_result": {"accepted": True}}}),
+        "metadata.json": json.dumps({
+            "qualified_reuse": {"status": "reused", "entry": "old@1.0.0"},
+        }),
+        "leaf_routed.kicad_pcb": "(kicad_pcb obsolete)",
+    }
+    for name, contents in saved.items():
+        (leaf / f"round_{pin}_{name}").write_text(contents)
+    pins.pin_leaf(experiments, leaf.name, pin, source="qualified:old@1.0.0")
+    _auto_pin_best_leaves(tmp_path)
+    assert pins.is_pinned(experiments, leaf.name) == 35
+    assert (leaf / "leaf_routed.kicad_pcb").read_text() == "(kicad_pcb round 0035)"
+    assert "needs requalification" in capsys.readouterr().out
+    for name, contents in saved.items():
+        assert (leaf / f"round_{pin}_{name}").read_text() == contents

@@ -8,9 +8,13 @@ instead of treating a matching product-family label as construction evidence.
 from __future__ import annotations
 import re
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import lru_cache
 from typing import Mapping
+
+TPS54331_DDA_NATIVE_BUNDLE = "tps54331-dda-no-vip"
+TPS54331_DDA_NATIVE_SYMBOL = f"{TPS54331_DDA_NATIVE_BUNDLE}:TPS54331DDAR"
+TPS54331_DDA_NATIVE_LAND = f"{TPS54331_DDA_NATIVE_BUNDLE}:TI_TPS54331_DDA_PowerPAD_NoVIP"
 
 
 @dataclass(frozen=True)
@@ -1936,6 +1940,9 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
                 "float_enables": True,
                 "on_threshold_max_v": 1.35,
                 "absolute_max_voltage_v": 6.0,
+                # SLVS839H §6.1 gives 100 uA as the larger absolute EN
+                # current limit; use either sign as a conservative bias bound.
+                "bias_current_bound_a": 0.0001,
             },
             "artifact_requirements": {
                 "input_bypass": {
@@ -4236,6 +4243,16 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
     ),
 )
 
+# The ordering code and electrical ratings are identical. Keep the original
+# imported pair recognizable for old artifacts; prefer the explicitly
+# reviewed standard-fab land for new selections.
+_TPS54331_DDA_NATIVE_RECORD = replace(
+    next(record for record in REVIEWED_PARTS if record.identity == "tps54331ddar"),
+    bundle=TPS54331_DDA_NATIVE_BUNDLE,
+    symbol=TPS54331_DDA_NATIVE_SYMBOL,
+    footprint=TPS54331_DDA_NATIVE_LAND,
+)
+
 
 # ------------------------------------------------------------- researched records
 # A demanded class the vendored records cannot answer is researched once and stored as data
@@ -4372,6 +4389,7 @@ def reviewed_inventory() -> tuple[ReviewedPart, ...]:
     own ``is_portable_candidate`` test where a real part is required.
     """
     return (
+        _TPS54331_DDA_NATIVE_RECORD,
         *REVIEWED_PARTS,
         *_STANDARD_LIBRARY_PARTS,
         *_STOCK_COMMON_PARTS,

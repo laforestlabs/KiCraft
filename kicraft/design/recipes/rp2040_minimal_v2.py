@@ -1,5 +1,7 @@
 """RP2040 minimal recipe on the composable port and ownership contract."""
 
+from kicraft.design.recipe_versions import RP2040_ACTIVE_RECIPE, RP2040_PINNED_RECIPE
+
 from .models import (
     RecipeComponentGroup as Group,
     RecipeAllocatablePin as AllocatablePin,
@@ -31,9 +33,10 @@ _INTERNAL_NETS = (
     "swdio",
     "swclk",
 )
-_NATIVE_USB_PINS = ("46", "47")
+RP2040_USB_PINS = ("46", "47")
 _SWD_PINS = ("24", "25")
 _UART_PINS = {"uart_tx": "2", "uart_rx": "3"}
+_CASTELLATION_ROLES = frozenset({"cast_left", "cast_right"})
 
 
 RP2040_MINIMAL_V3: RecipeDefinition = RP2040_CORE.model_copy(
@@ -151,7 +154,7 @@ RP2040_MINIMAL_V3: RecipeDefinition = RP2040_CORE.model_copy(
 )
 
 RP2040_MINIMAL_V4: RecipeDefinition = RP2040_MINIMAL_V3.model_copy(update={
-    "recipe": "rp2040-minimal@4",
+    "recipe": RP2040_PINNED_RECIPE,
     "allocatable_pins": tuple(
         AllocatablePin(
             role="mcu", pin=pin.pin, gpio=int(pin.net[4:]),
@@ -170,9 +173,30 @@ RP2040_MINIMAL_V4: RecipeDefinition = RP2040_MINIMAL_V3.model_copy(update={
     "fixed_port_pins": _UART_PINS,
 })
 
+_RP2040_MINIMAL_V5_CASTELLATED = RP2040_MINIMAL_V4.model_copy(update={
+    "recipe": RP2040_ACTIVE_RECIPE,
+    "parameter_defaults": {**RP2040_MINIMAL_V4.parameter_defaults, "breakout_style": "none"},
+    "allowed_parameters": {
+        **RP2040_MINIMAL_V4.allowed_parameters,
+        "breakout_style": ("none", "castellated"),
+    },
+})
+
+RP2040_MINIMAL_V5: RecipeDefinition = _RP2040_MINIMAL_V5_CASTELLATED.model_copy(update={
+    "parts": tuple(part for part in RP2040_MINIMAL_V4.parts if part.role not in _CASTELLATION_ROLES),
+    "pins": tuple(pin for pin in RP2040_MINIMAL_V4.pins if pin.role not in _CASTELLATION_ROLES),
+    "edges": (),
+})
+
+
+def _gpio_index(net):
+    return int(net[4:]) if net.startswith("gpio") and net[4:].isdigit() else None
+
 
 def effective_rp2040_definition(definition, parameters, bindings):
-    """Apply exposed-pad and UART reservations consistently before allocation and expansion."""
+    """Select the physical boundary and reserve the same GPIOs for allocation and expansion."""
+    if definition.recipe == RP2040_ACTIVE_RECIPE and parameters["breakout_style"] == "castellated":
+        definition = _RP2040_MINIMAL_V5_CASTELLATED
     exposed = parameters["gpio_exposed"]
     if type(exposed) is not int or not 0 <= exposed <= 30:
         raise ValueError(f"recipe {definition.recipe} gpio_exposed must be an integer from 0 to 30")
@@ -195,24 +219,24 @@ def effective_rp2040_definition(definition, parameters, bindings):
 
 def expand_rp2040_minimal(resolved):
     """Materialize either native USB recovery or a physically complete SWD recovery path."""
-    from .registry import expand_static_definition
+    from .registry import expand_static_definition, get_recipe
 
-    definition = effective_rp2040_definition(
-        RP2040_MINIMAL_V4, resolved.parameters, resolved.selection.port_bindings
-    )
-    exposed = resolved.parameters["gpio_exposed"]
     bindings = resolved.selection.port_bindings
+    definition = effective_rp2040_definition(
+        get_recipe(resolved.selection.recipe), resolved.parameters, bindings
+    )
+    castellated = bool(definition.edges)
+    exposed = resolved.parameters["gpio_exposed"]
     unavailable = sorted(
         name for name in bindings
-        if name.startswith("gpio") and name[4:].isdigit() and int(name[4:]) >= exposed
+        if (gpio := _gpio_index(name)) is not None and gpio >= exposed
     )
     if unavailable:
         raise ValueError(f"recipe {definition.recipe} binds unexposed GPIOs: {unavailable}")
     if exposed < 30:
         removed = [
             pin for pin in definition.pins
-            if pin.net.startswith("gpio") and pin.net[4:].isdigit()
-            and int(pin.net[4:]) >= exposed
+            if (gpio := _gpio_index(pin.net)) is not None and gpio >= exposed
         ]
         definition = definition.model_copy(update={
             "pins": tuple(pin for pin in definition.pins if pin not in removed),
@@ -247,13 +271,13 @@ def expand_rp2040_minimal(resolved):
                 ),
                 "no_connects": (
                     *definition.no_connects,
-                    NoConnect(role="cast_left", index=2, pin="1"),
-                    NoConnect(role="cast_left", index=3, pin="1"),
+                    *(NoConnect(role="cast_left", index=index, pin="1")
+                      for index in (2, 3) if castellated),
                 ),
             }
         )
-    # The allocator owns selected MCU pads; the existing exposed castellation
-    # remains recipe-owned and must follow the very same conductor.
+    # The allocator owns selected MCU pads. In castellated mode the duplicate
+    # contact remains recipe-owned and follows the same conductor.
     allocations = {
         allocation.pin: allocation.net for allocation in resolved.selection.pin_allocations
     }
@@ -264,9 +288,12 @@ def expand_rp2040_minimal(resolved):
     definition = definition.model_copy(update={
         "pins": tuple(
             pin.model_copy(update={"net": gpio_nets[pin.net]})
-            if pin.role in {"cast_left", "cast_right"} and pin.net in gpio_nets else pin
+            if pin.role in _CASTELLATION_ROLES and pin.net in gpio_nets else pin
             for pin in definition.pins
             if not (pin.role == "mcu" and pin.pin in allocations)
+            # Without a breakout, an unbound GPIO isn't connected to anything.
+            # Keep it allocatable and let the allocator own the unused pad's NC.
+            and (castellated or _gpio_index(pin.net) is None or pin.net in bindings)
         ),
     })
     if native_usb:
@@ -276,7 +303,7 @@ def expand_rp2040_minimal(resolved):
             )
         # Raspberry Pi hardware guide §2.4.1 requires 27-ohm termination at
         # the MCU, not the generic USB receptacle's 22-ohm pair.
-        raw_usb = dict(zip(_NATIVE_USB_PINS, ("usb_dm_raw", "usb_dp_raw")))
+        raw_usb = dict(zip(RP2040_USB_PINS, ("usb_dm_raw", "usb_dp_raw")))
         definition = definition.model_copy(update={
             "internal_nets": (*definition.internal_nets, *raw_usb.values()),
             "parts": (
@@ -311,7 +338,7 @@ def expand_rp2040_minimal(resolved):
         pin
         for pin in definition.pins
         if not (
-            (pin.role == "mcu" and pin.pin in _NATIVE_USB_PINS)
+            (pin.role == "mcu" and pin.pin in RP2040_USB_PINS)
             or (pin.role == "cast_right" and pin.index in {15, 16})
         )
     ]
@@ -335,8 +362,8 @@ def expand_rp2040_minimal(resolved):
         (
             NoConnect(role="mcu", pin="46"),
             NoConnect(role="mcu", pin="47"),
-            NoConnect(role="cast_right", index=15, pin="1"),
-            NoConnect(role="cast_right", index=16, pin="1"),
+            *(NoConnect(role="cast_right", index=index, pin="1")
+              for index in (15, 16) if castellated),
             NoConnect(role="swd_header", pin="6"),
         )
     )

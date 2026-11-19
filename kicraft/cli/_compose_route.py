@@ -4,6 +4,7 @@ Split out of ``compose_subcircuits.py`` (Lever 2.5); re-exported there.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -94,6 +95,14 @@ def _route_parent_board(
             "validation": {},
             "routing_stats": {},
         }
+    from kicraft.autoplacer.brain.escape_cleanup import prune_router_spurs
+
+    qualified_private_nets = {
+        net for block in state.qualified_geometry for net in block["internal_nets"]
+    }
+    routing_stats["router_spur_cleanup"] = prune_router_spurs(
+        stamped_pcb, routed_pcb, cfg, protected_nets=qualified_private_nets,
+    )
     cfg = dict(cfg)
     plan = routing_stats.get("local_ground_reservation_plan")
     if plan is not None:
@@ -123,7 +132,7 @@ def _route_parent_board(
         from kicraft.autoplacer.brain.gnd_pour import add_gnd_pour_and_thermal_vias
 
         if thermal_requirements and any(
-            float(r.get("outer_copper_oz", 0)) != 2.0
+            float(r.get("outer_copper_oz", 0)) not in {1.0, 2.0}
             or set(r.get("ground_layers", ())) != {"F.Cu", "B.Cu"}
             or not r.get("connected_ground_spreading")
             for r in thermal_requirements
@@ -248,6 +257,12 @@ def _route_parent_board(
         if any(group["missing_count"] for group in custody.values()):
             raise RuntimeError(f"ground finishing lost routed copper: {custody}")
 
+    # Native refill can expose router-born terminal spurs that were not
+    # reported before finishing. Keep the same original stamp boundary.
+    post_route_repairs["router_spur_cleanup"] = prune_router_spurs(
+        stamped_pcb, routed_pcb, cfg, protected_nets=qualified_private_nets,
+    )
+
     # Root parent has no interface anchors -- skip anchor validation.
     # Anchor completeness is a leaf-level gate, not a parent-level gate.
     validation = validate_routed_board(
@@ -303,6 +318,8 @@ def _route_parent_board(
         from kicraft.autoplacer.brain.copper_accounting import attach_stamped_escape_ownership
 
         ownership = json.loads(ownership_path.read_text())
+        if ownership.get("stamped_board_sha256") != hashlib.sha256(stamped_pcb.read_bytes()).hexdigest():
+            raise ValueError("signal escape ownership receipt does not bind the parent stamp")
         validation["signal_escape_ownership"] = attach_stamped_escape_ownership(copper, ownership)
         routed_ownership_path = Path(str(routed_pcb) + ".escape_ownership.json")
         validation["signal_escape_ownership"]["receipt_path"] = str(routed_ownership_path)
@@ -314,13 +331,15 @@ def _route_parent_board(
         validation["ground_finish_custody"] = custody
         if thermal_requirements:
             from kicraft.autoplacer.brain.gnd_pour import audit_thermal_ground
-            from kicraft.pcb_layers import set_two_ounce_outer_stackup
+            from kicraft.autoplacer.fab_profile import requires_two_ounce
 
             validation["thermal_ground"] = audit_thermal_ground(
                 str(routed_pcb), thermal_requirements, str(gnd_net)
             )
             validation["thermal_finish_custody"] = custody
-            set_two_ounce_outer_stackup(routed_pcb)
+            if requires_two_ounce(cfg):
+                from kicraft.pcb_layers import set_two_ounce_outer_stackup
+                set_two_ounce_outer_stackup(routed_pcb)
 
     # A parent must close every net. Unlike a leaf -- whose interface ports are
     # legitimately open, so validate_routed_board waives unconnected -- unrouted
@@ -369,10 +388,27 @@ def _route_parent_board(
             validation["courtyard_overlaps"] = [o.to_dict() for o in (measured or [])]
 
     if ownership_path.is_file():
-        import hashlib
-
+        ownership["prune_terminal_tracks"] = True
+        ownership["require_native_drc"] = True
+        ownership["interface_net_names"] = sorted(state.interconnect_net_names)
+        ownership["boundary_landing_constraints"] = {
+            key: jsonable_config_value(cfg[key]) for key in
+            ("power_nets", "local_bypasses", "usb_routing_contracts", "fab_capability")
+            if key in cfg
+        }
         ownership["routed_board_sha256"] = hashlib.sha256(routed_pcb.read_bytes()).hexdigest()
         routed_ownership_path.write_text(json.dumps(ownership, indent=2, sort_keys=True) + "\n")
+
+    if state.qualified_geometry:
+        from kicraft.leaf_library.qualification import check_composed_geometry
+
+        preservation = check_composed_geometry(routed_pcb, state.qualified_geometry)
+        validation["qualified_block_preservation"] = preservation
+        if not preservation["accepted"]:
+            validation["accepted"] = False
+            validation.setdefault("rejection_reasons", []).append("qualified_block_geometry_invalidated")
+        for instance in preservation["instances"]:
+            print(f"[qualified-leaf] composed {instance['entry']} {instance['instance_path']}: {instance['status']}")
 
     return {
         "failed": False,

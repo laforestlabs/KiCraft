@@ -1,4 +1,4 @@
-"""Reviewed wire-entry ("opening") datum for stock horizontal screw terminals.
+"""Reviewed mating-opening datums for directional connector footprints.
 
 A 90-degree screw terminal's wire mouth is the face the wires enter from. The
 placer must aim that face at the board edge, and the fab gate must verify it,
@@ -190,6 +190,20 @@ for _measured_name, _measured_entry in (
 ):
     _REVIEWED_OPENINGS[_measured_name] = (90.0, _measured_entry)
 
+# JST eSH drawing, "Header / Side entry type":
+# https://www.jst-mfg.com/product/pdf/eng/eSH.pdf
+# In this exact C160404 land pattern the contact solder tails are at -Y
+# and the hold-down tabs are at +Y. The matching vendored model (2.54 mm
+# per VRML unit, model +Y is PCB -Y) confirms the tabs at the two ends
+# of the open housing wall, 2.475 mm toward PCB +Y. The contact row is
+# on the opposite side. Use the actual mating face, not asymmetry of
+# the courtyard relative to the pads (the tabs extend beyond the face).
+# This is a mating direction only: the PCB must support the tabs extending
+# beyond the opening. JST does not declare the opening to be a "PCB Edge".
+_REVIEWED_MATING_FACES = {
+    "CONN-SMD_4P-P1.00_SM04B-SRSS-TB-LF-SN": (90.0, (0.0, 2.475)),
+}
+
 
 def _bare_name(footprint_name: str) -> str:
     """``"Lib:Name"`` -> ``"Name"``; already-bare names pass through."""
@@ -200,7 +214,8 @@ def reviewed_connector_opening(
     footprint_name: str,
 ) -> tuple[float, tuple[float, float]] | None:
     """Reviewed ``(local opening deg, marker point mm)``, or None if unreviewed."""
-    return _REVIEWED_OPENINGS.get(_bare_name(footprint_name))
+    name = _bare_name(footprint_name)
+    return _REVIEWED_MATING_FACES.get(name) or _REVIEWED_OPENINGS.get(name)
 
 
 def is_horizontal_terminal(footprint_name: str) -> bool:
@@ -226,9 +241,11 @@ def is_horizontal_terminal(footprint_name: str) -> bool:
 # XFCN drawing PM254V-11-XX-H85 rev A1: reviewed vertical female 1xN
 # variants C541849/C541851/C46595973. These exact physical identities
 # mate along Z; an unknown lookalike or horizontal variant stays unverified.
-_REVIEWED_BOARD_NORMAL_HEADERS = frozenset(
-    f"XFCN_PM254V_11_{count:02d}_H85" for count in (2, 4, 8)
-)
+_REVIEWED_BOARD_NORMAL_HEADERS = frozenset({
+    *(f"XFCN_PM254V_11_{count:02d}_H85" for count in (2, 4, 8)),
+    # JST eXH.pdf: exact 4-position standard top-entry through-hole header.
+    "JST_XH_B4B-XH-A_1x04_P2.50mm_Vertical",
+})
 
 
 def is_board_normal_header(footprint_name: str) -> bool:
@@ -317,7 +334,7 @@ def annotate_connector_opening(
     or one that is not in the loader's canonical frame. Never writes to a
     system library and never touches pads or the 3D model.
     """
-    entry = reviewed_connector_opening(footprint_name)
+    entry = _REVIEWED_OPENINGS.get(_bare_name(footprint_name))
     if entry is None:
         return False
     if fp.GetLayer() != pcbnew_mod.F_Cu:

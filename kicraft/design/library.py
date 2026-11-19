@@ -26,54 +26,29 @@ class ArchitectureLibraryError(ValueError):
 
 
 def _load_library_leaves() -> list:
-    """Best-effort load of the leaf library; logs but never raises."""
-    try:
-        from kicraft.leaf_library import LeafLibrary
-        loaded, broken = LeafLibrary.from_env().load_all()
-        if broken:
-            logger.warning(
-                "skipping %d broken library leaves: %s",
-                len(broken),
-                [b.dir.name for b in broken],
-            )
-        return loaded
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("could not load leaf library: %s", exc)
-        return []
+    """Load available assets without disguising catalogue failures as misses."""
+    from kicraft.leaf_library import LeafLibrary
+
+    loaded, broken = LeafLibrary.from_env().load_all()
+    for entry in broken:
+        logger.warning("library asset excluded at %s: %s", entry.dir, entry.reason)
+    return loaded
 
 
 def _format_available_leaves_block(loaded_leaves: list) -> str | None:
-    """Render the "Available leaves" block the architecture stage sees.
-
-    ``None`` if the library is empty -- callers should suppress the
-    heading entirely in that case.
-    """
+    """Explain deterministic resolution, never invite description-only selection."""
     if not loaded_leaves:
         return None
-    lines: list[str] = ["## Available leaves\n"]
-    lines.append(
-        "If one of these is a good match for a sheet you would otherwise "
-        "design from scratch, set `Sheet.from_library = '<name>@<version>'` "
-        "and `Sheet.library_instance = N` (1 for the first instance, 2 for "
-        "the second, etc., if you reuse the same leaf multiple times). For "
-        "each instance, choose a DISTINCT `Sheet.name` and `Sheet.stem` "
-        "(e.g. `CHARGER` and `CHARGER_2`). The leaf's hierarchical-label "
-        "interface MUST match the architecture's `inter_sheet_nets` for "
-        "that sheet exactly (same names + directions). Use the leaf's "
-        "label names verbatim. If no leaf is a good match, design the "
-        "sheet from scratch.\n"
+    return (
+        "## Automatic qualified subcircuit reuse\n\n"
+        "The deterministic build resolves qualified electrical/physical assets "
+        "from complete circuit ownership, interfaces, operating points and fabrication "
+        "rules. Do not select a sheet by descriptive similarity or set from_library "
+        "or library_instance. Declare the complete functional requirements and "
+        "connections; the build records compatibility decisions and qualifies "
+        "missing supported blocks automatically. A legacy library entry is not "
+        "qualification evidence.\n"
     )
-    for leaf in loaded_leaves:
-        m = leaf.manifest
-        lines.append(f"### {m.name}@{m.version}\n")
-        lines.append(f"**What it does**: {m.description}\n")
-        lines.append("**Interface (hierarchical labels)**:")
-        for lbl in m.interface.hierarchical_labels:
-            lines.append(f"- {lbl.name} ({lbl.direction})")
-        lines.append("")
-        if m.watch_out_for:
-            lines.append(f"**Watch out for**: {m.watch_out_for}\n")
-    return "\n".join(lines)
 
 
 def _validate_library_picks(

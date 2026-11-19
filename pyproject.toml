@@ -115,7 +115,7 @@ cleanup-routing = "kicraft.cli.cleanup_routing:main"
 kicraft = "kicraft.design.cli_app:main"
 kicraft-stage-debug = "kicraft.server.stage_driver:main"
 
-# Leaf library (read-only — promotion is GUI-driven)
+# Leaf library inspection (qualified assets publish automatically during builds)
 kicraft-leaf = "kicraft.cli.leaf:main"
 
 # Inspection

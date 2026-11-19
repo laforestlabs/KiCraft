@@ -273,6 +273,127 @@ def materialize_sibling(
     return sib_metadata
 
 
+def materialize_qualified_leaf(
+    leaf, entry: dict, request: dict, node, state, project_dir: Path, cfg: dict,
+    *, publication: dict | None = None,
+) -> dict:
+    """Install certified geometry onto the caller's already-synthesized circuit."""
+    import tempfile
+
+    import pcbnew
+
+    from kicraft.autoplacer.brain.subcircuit_artifacts import (
+        build_anchor_validation, resolve_artifact_paths, serialize_interface_anchor,
+        serialize_interface_port, serialize_silkscreen,
+    )
+    from kicraft.autoplacer.brain.subcircuit_instances import _layout_from_artifact_payload
+    from kicraft.autoplacer.brain.subcircuit_solver import (
+        _build_leaf_silkscreen, _compute_component_bbox, infer_interface_anchors,
+    )
+    from kicraft.fsutil import atomic_write_text
+    from kicraft.leaf_library.installer import install_qualified_snapshot
+    from kicraft.leaf_library.qualification import (
+        QualificationError, _copper_keys, _digest, _geometry_translation, _native_copper,
+        _native_pad_inventory, _read, _require, _require_layout_graph, _sha,
+    )
+
+    contract = entry["contract"]
+    struct = _leaf_structure(node, state)
+    if struct is None:
+        raise QualificationError("target does not contain native component geometry")
+    _, target_components = struct
+    refs = request["ref_map"]
+    nets = request["net_map"]
+    _require_layout_graph({"components": target_components}, contract, refs, nets)
+    ref_map = {canonical: actual for actual, canonical in refs.items()}
+    net_map = {canonical: actual for actual, canonical in nets.items()}
+    _require(len(ref_map) == len(refs) and len(net_map) == len(nets), "target mapping is not bijective")
+    source = _read(leaf.dir / "solved_layout.json")
+    identity = _sibling_identity(node)
+    layout = remap_solved_layout(source, ref_map, net_map, identity)
+    layout.pop("replicated_from", None)  # no donor inside this project
+    paths = resolve_artifact_paths(project_dir, node.id).to_dict()
+    artifact_dir = Path(paths["artifact_dir"])
+    paths["mini_pcb"] = str(artifact_dir / "leaf_routed.kicad_pcb")
+    decision = {
+        "status": "reused", "entry": leaf.slug, "identity": entry["identity"],
+        "content_hash": leaf.manifest.content_hash, "local_solve_performed": False,
+        "independent_drc": entry["evidence"]["independent_drc"],
+        "ref_map": ref_map, "net_map": net_map,
+        "internal_nets": sorted(set(nets) - set(request["boundary"])),
+    }
+    if publication is not None:
+        decision.update(publication, local_solve_performed=True)
+    meta = _read(leaf.dir / "metadata.json")
+    meta.update(identity)
+    meta.update(
+        project_dir=str(project_dir), schematic_path=str(project_dir / node.id.sheet_file),
+        artifact_paths=paths, component_refs=list(layout["components"]), qualified_reuse=decision,
+        internal_nets=decision["internal_nets"], external_nets=request["boundary"],
+    )
+    layout.update(project_dir=str(project_dir), artifact_paths=paths, qualified_reuse=decision)
+    debug_path = Path(paths["debug_json"])
+    debug = _read(debug_path) if publication is not None else {}
+    imported = _layout_from_artifact_payload(meta, {}, layout)
+    ports = list(node.definition.ports)
+    _require(all(port.net_name in nets or port.name in nets for port in ports),
+             "current physical port is outside the qualified block interface")
+    anchors = infer_interface_anchors(ports, imported.components)
+    anchor_validation = build_anchor_validation(ports, anchors)
+    _require(anchor_validation["all_required_ports_anchored"], "qualified layout cannot anchor target interface")
+    layout["ports"] = meta["interface_ports"] = [serialize_interface_port(port) for port in ports]
+    layout["interface_anchors"] = [serialize_interface_anchor(anchor) for anchor in anchors]
+    layout["anchor_validation"] = anchor_validation
+    layout["silkscreen"] = serialize_silkscreen(_build_leaf_silkscreen(
+        imported.components, _compute_component_bbox(imported.components, imported.traces, imported.vias), None, cfg,
+    ))
+    layout["validation"] = {
+        "accepted": True,
+        "leaf_acceptance_result": {"accepted": True, "rejection_reasons": [],
+                                   "evidence": "independent_design_qualification"},
+        "qualification_evidence": entry["evidence"],
+    }
+
+    native = pcbnew.LoadBoard(str(leaf.dir / "leaf_routed.kicad_pcb"))
+    expected_pads = _native_pad_inventory(native, ref_map, net_map)
+    # Snapshot old names before writing any net code: a target may use a
+    # canonical-looking name already present within the source entry.
+    named_items = []
+    for fp in native.GetFootprints():
+        fp.SetReference(ref_map[fp.GetReference()])
+        named_items.extend((item, item.GetNetname()) for item in fp.Pads() if item.GetNetname())
+    named_items.extend((item, item.GetNetname()) for item in native.GetTracks())
+    codes = {}
+    for actual in net_map.values():
+        net = native.FindNet(actual)
+        if net is None:
+            net = pcbnew.NETINFO_ITEM(native, actual)
+            native.Add(net)
+        codes[actual] = net.GetNetCode()
+    for item, canonical in named_items:
+        item.SetNetCode(codes[net_map[canonical]])
+    snapshot_id = "qualified-" + leaf.manifest.content_hash.removeprefix("sha256:")[:16]
+    with tempfile.TemporaryDirectory(prefix="kicraft-qualified-import-") as tmp:
+        pcb = Path(tmp) / "leaf_routed.kicad_pcb"
+        _require(pcbnew.SaveBoard(str(pcb), native), "could not save remapped native board")
+        instance = pcbnew.LoadBoard(str(pcb))
+        dx, dy = _geometry_translation(instance, layout, {r: r for r in layout["components"]})
+        _require(_copper_keys(_native_copper(instance, {n: n for n in nets})) == _copper_keys(layout, dx=dx, dy=dy),
+                 "instance installation altered internal routed geometry")
+        _require(_native_pad_inventory(instance, {r: r for r in refs}, {n: n for n in nets}) == expected_pads,
+                 "instance installation altered native pad connectivity or geometry")
+        decision["installed_pcb_sha256"] = _sha(pcb)
+        decision["installed_geometry_sha256"] = _digest({k: layout[k] for k in ("components", "traces", "vias")})
+        install_qualified_snapshot(
+            leaf, project_dir=project_dir, leaf_key=artifact_dir.name, snapshot_id=snapshot_id,
+            pcb_source=pcb, layout=layout, metadata=meta,
+        )
+    debug.update(identity, qualified_reuse=decision)
+    debug.setdefault("extra", {})["canonical_solved_layout"] = layout
+    atomic_write_text(debug_path, json.dumps(debug, indent=2, sort_keys=True) + "\n")
+    return meta
+
+
 def finalize_leaf_replication(project_dir: str | Path) -> int:
     """Re-materialize every replicated sibling from its representative's PINNED
     artifact. Call AFTER per-leaf pinning (``_auto_pin_best_leaves``).

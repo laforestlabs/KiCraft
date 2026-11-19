@@ -20,6 +20,7 @@ from pathlib import Path
 import pcbnew
 
 from kicraft.autoplacer.hardware._pad_nets import propagate_pad_nets
+from kicraft.autoplacer.hardware.escape_receipt import write_escape_receipt
 from kicraft.autoplacer.hardware.silk_geometry import (
     bbox_inside_poly,
     find_shift_into_poly,
@@ -196,6 +197,7 @@ def main(argv: list[str]) -> int:
         except Exception:
             return 0
 
+    _escape_owners = {}
     for _t in _traces:
         _s = pcbnew.PCB_TRACK(board)
         _s.SetStart(
@@ -214,6 +216,8 @@ def main(argv: list[str]) -> int:
         if _nc > 0:
             _s.SetNetCode(_nc)
         board.Add(_s)
+        if owner := _t.get("escape_ownership"):
+            _escape_owners[_s.m_Uuid.AsString()] = (_t["net_name"], owner)
 
     for _v in _vias:
         _tv = pcbnew.PCB_VIA(board)
@@ -229,6 +233,8 @@ def main(argv: list[str]) -> int:
         if _nc > 0:
             _tv.SetNetCode(_nc)
         board.Add(_tv)
+        if owner := _v.get("escape_ownership"):
+            _escape_owners[_tv.m_Uuid.AsString()] = (_v["net_name"], owner)
 
     # --- stamp silkscreen graphics ---
     # Text labels are clamped into the board outline: the group label is
@@ -332,7 +338,9 @@ def main(argv: list[str]) -> int:
         print(f"silk_refdes legalization skipped: {_silk_err}", file=sys.stderr)
 
     board.BuildConnectivity()
-    board.Save(_out_path)
+    if board.Save(_out_path) is False:
+        raise RuntimeError(f"failed to save stamped PCB {_out_path}")
+    write_escape_receipt(_out_path, board, _escape_owners)
     from kicraft.autoplacer.hardware.history_geometry import capture_board, close_native_history
     capture_board(board, phase="parent_stamp")
     close_native_history()

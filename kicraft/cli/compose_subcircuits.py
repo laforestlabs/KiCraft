@@ -68,6 +68,7 @@ from kicraft.autoplacer.brain.subcircuit_composer import (
     ChildArtifactPlacement,
     DerivedAttachmentConstraints,
     ParentComposition,
+    _transform_rect,
     build_parent_composition,
     dominant_blocker_side,
     edge_anchor_target_coordinate,
@@ -1601,6 +1602,35 @@ def _validate_replica_rotations(
                 raise ValueError(f"replica_rotation_mismatch:{instance_path}")
 
 
+def _restore_connector_mating_evidence(artifacts, pcb_path: Path, zones: dict) -> None:
+    """Re-read exact reviewed mating facts for edge-zoned ordinary leaves."""
+    candidates = {
+        ref: component
+        for artifact in artifacts
+        if not (artifact.metadata.get("qualified_reuse") or {}).get("installed_geometry_sha256")
+        for ref, component in artifact.layout.components.items()
+        if (zones.get(ref) or {}).get("edge") and component.kind == "connector"
+        and component.mating_axis != "board_normal"
+    }
+    if not candidates:
+        return
+    from kicraft.autoplacer.hardware.adapter import (
+        _footprint_item_name, connector_mating_evidence, pcbnew,
+    )
+    from kicraft.parts_library.footprint_opening import is_board_normal_header, reviewed_connector_opening
+
+    board = pcbnew.LoadBoard(str(pcb_path))
+    for footprint in board.GetFootprints():
+        component = candidates.get(footprint.GetReference())
+        if component is None:
+            continue
+        name = _footprint_item_name(footprint)
+        if is_board_normal_header(name) or (
+            component.opening_direction is None and reviewed_connector_opening(name) is not None
+        ):
+            component.mating_axis, component.opening_direction = connector_mating_evidence(footprint)
+
+
 def _compose_artifacts(
     loaded_artifacts,
     *,
@@ -2314,6 +2344,8 @@ def _compose_artifacts(
             trace_count=len(transformed.transformed_traces),
             via_count=len(transformed.transformed_vias),
             anchor_count=len(transformed.transformed_anchors),
+            qualified_reuse=(artifact.metadata.get("qualified_reuse") or {})
+            if (artifact.metadata.get("qualified_reuse") or {}).get("status") in {"reused", "published", "already_published"} else {},
         )
         entries.append(entry)
         child_artifact_placements.append(placement)
@@ -2656,6 +2688,11 @@ def _compose_artifacts(
         edge_constrained_refs=frozenset(
             c.ref for c in all_constraints if c.target in ("edge", "corner")
         ),
+        native_component_rects={
+            ref: _transform_rect(rect, item["origin"], item["rotation"])
+            for item in placed_envelopes
+            for ref, rect in item["blocker_set"].component_edge_rects.items()
+        },
         edge_zoned_outline_sides=frozenset(
             side
             for c in all_constraints
@@ -2927,6 +2964,7 @@ def _compact_routed_validation(validation: dict[str, Any]) -> dict[str, Any]:
         # Repair/power-first evidence (small summaries) remains bounded.
         "power_first",
         "post_route_repairs",
+        "qualified_block_preservation",
         "unconnected_repair",
         "illegal_geometry_repair",
         # FR process returncode: -1 = watchdog-killed JVM.
@@ -4010,6 +4048,11 @@ def main(argv: list[str] | None = None) -> int:
             loaded_artifacts,
             parent_definition,
         )
+        from kicraft.leaf_library.qualification import verify_installed_instance
+
+        for artifact in loaded_artifacts:
+            if (artifact.metadata.get("qualified_reuse") or {}).get("status") in {"reused", "published", "already_published"}:
+                verify_installed_instance(Path(artifact.artifact_dir), artifact.metadata["qualified_reuse"])
 
         # NO FALLBACKS: every expected child subcircuit must have produced a
         # solved artifact. A child whose solve FAILED yields none, and absorbing
@@ -4067,6 +4110,8 @@ def main(argv: list[str] | None = None) -> int:
                 compose_cfg.update(load_project_config(str(proj_cfg_path)))
         if args.config:
             compose_cfg.update(load_project_config(args.config))
+        if args.pcb:
+            _restore_connector_mating_evidence(loaded_artifacts, Path(args.pcb), compose_cfg.get("component_zones") or {})
 
         # Candidate-search loop: K fast-cfg solves + DRC, pick shorts==0
         # winner (lex order: shorts asc, composite score desc). K=1 collapses

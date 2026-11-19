@@ -25,13 +25,16 @@ from .esp32_s3_mini_1_minimal import (
     ESP32_S3_MINI_1_MINIMAL,
     expand_esp32_s3_mini_1,
 )
-from .rp2040_minimal_v2 import RP2040_MINIMAL_V4, expand_rp2040_minimal
+from .rp2040_minimal_v2 import RP2040_MINIMAL_V4, RP2040_MINIMAL_V5, expand_rp2040_minimal
 from .wave_a_mcus import WAVE_A_MCU_RECIPES, expand_wave_a_mcu
 from .wave_b_power import (
+    TPS54331_3V3_SHUNT_CONTROLS,
+    TPS54331_ADJUSTABLE,
     USB_C_USB2_DEVICE,
     WAVE_B_POWER_RECIPES,
     expand_lm2577t_adj_12v_boost,
     expand_tps54331_buck,
+    expand_tps54331_shunt_controls,
     expand_tps61088_boost,
     expand_usb_c_usb2_device,
 )
@@ -53,14 +56,16 @@ from .power_entry import TPS26631_PD_INRUSH_POWER_PATH
 
 
 
-register_recipe(RP2040_MINIMAL_V4, expand_rp2040_minimal)
+register_recipe(RP2040_MINIMAL_V4, expand_rp2040_minimal, selectable=False)
+register_recipe(RP2040_MINIMAL_V5, expand_rp2040_minimal)
 register_recipe(ESP32_S3_MINI_1_MINIMAL, expand_esp32_s3_mini_1)
 for definition in WAVE_A_MCU_RECIPES:
     register_recipe(definition, expand_wave_a_mcu)
 _POWER_EXPANDERS = {
     USB_C_USB2_DEVICE.recipe: expand_usb_c_usb2_device,
-    "tps54331-adjustable@2": expand_tps54331_buck,
+    TPS54331_ADJUSTABLE.recipe: expand_tps54331_buck,
     "tps54331-12v-1a@2": expand_tps54331_buck,
+    TPS54331_3V3_SHUNT_CONTROLS.recipe: expand_tps54331_shunt_controls,
     "lm2577t-adj-12v-boost@1": expand_lm2577t_adj_12v_boost,
     "lm2577t-adj-2s-12v-boost@1": expand_lm2577t_adj_12v_boost,
     "tps61088-2s-12v-1a@1": expand_tps61088_boost,

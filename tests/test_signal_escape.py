@@ -621,3 +621,322 @@ def test_declared_usb_pair_cannot_receive_independent_dogbone_vias(tmp_path):
     add_breakout_stubs(path, specs)
     assert all(track.GetNetname() not in {"GPIO0", "GPIO1"}
                for track in pcbnew.LoadBoard(path).GetTracks())
+
+
+_RP2040_PORTS = {
+    "2": "SPI_MISO", "3": "SPI_CS", "4": "SPI_SCLK", "5": "SPI_MOSI",
+    "6": "I2C_SDA", "7": "I2C_SCL",
+}
+
+
+def _rp2040_exit_board(tmp_path):
+    import json
+    from pathlib import Path
+
+    from kicraft.design.synthesis.kicad_pro import DEFAULT_NETCLASS, DEFAULT_RULES
+
+    library = Path("/usr/share/kicad/footprints/Package_DFN_QFN.pretty")
+    item = "QFN-56-1EP_7x7mm_P0.4mm_EP3.2x3.2mm"
+    if not (library / f"{item}.kicad_mod").is_file():
+        pytest.skip("the native KiCad RP2040 QFN footprint is not installed")
+    path = tmp_path / "rp2040-interface.kicad_pcb"
+    board = pcbnew.NewBoard(str(path))
+    for name in (*_RP2040_PORTS.values(), "+3V3"):
+        board.Add(pcbnew.NETINFO_ITEM(board, name))
+    fp = pcbnew.FootprintLoad(str(library), item)
+    fp.SetReference("U4")
+    fp.SetOrientationDegrees(-90)
+    fp.SetPosition(pcbnew.VECTOR2I(_mm(146.4375), _mm(106.095224)))
+    board.Add(fp)
+    for pad in fp.Pads():
+        net = "+3V3" if pad.GetNumber() == "1" else _RP2040_PORTS.get(pad.GetNumber())
+        if net:
+            pad.SetNet(board.GetNetInfo().GetNetItem(net))
+    board.Save(str(path))
+    path.with_suffix(".kicad_pro").write_text(json.dumps({
+        "board": {"design_settings": {"rules": DEFAULT_RULES}},
+        "net_settings": {"classes": [DEFAULT_NETCLASS]},
+    }))
+    return path
+
+
+def test_rp2040_dense_singletons_reserve_concurrent_native_launches(tmp_path):
+    from kicraft.autoplacer.brain.breakout_stubs import BreakoutSpec, _seg_seg_dist_mm
+    from kicraft.autoplacer.brain.signal_escape import unlanded_interface_components
+
+    path = _rp2040_exit_board(tmp_path)
+    nets = set(_RP2040_PORTS.values())
+    board = pcbnew.LoadBoard(str(path))
+    local = signal_escape_specs(board)
+    assert len(local) == 6 and all(spec.via_exit is None for spec in local)
+    specs = signal_escape_specs(board, external_net_names=nets)
+    assert {spec.pad for spec in specs} == set(_RP2040_PORTS)
+    stamped = add_breakout_stubs(str(path), specs, signal_escape_owner=True)
+    assert stamped["stubs"] == stamped["vias"] == len(nets), stamped
+
+    board = pcbnew.LoadBoard(str(path))
+    assert unlanded_interface_components(board, nets) == []
+    from types import SimpleNamespace
+    from kicraft.autoplacer.brain.leaf_routing import _audit_interface_landings
+
+    validation = {}
+    _audit_interface_landings(
+        path, SimpleNamespace(external_net_names=nets), validation,
+        {"power_nets": {"+3V3", "GND"}},
+    )
+    assert validation["interface_unlanded_nets"] == [], validation
+    branches = {branch["pad"]: branch["items"] for branch in stamped["owned_signal_escapes"]}
+    exits = []
+    for pad_number, net in _RP2040_PORTS.items():
+        items = branches[pad_number]
+        via = next(item for item in items if item["kind"] == "via")
+        exit_track = next(item for item in items if item.get("layer") == "B.Cu")
+        assert exit_track["net"] == net
+        assert exit_track["width_mm"] == pytest.approx(0.2)
+        assert exit_track["start_mm"] == via["position_mm"]
+        exits.append(exit_track)
+    for index, first in enumerate(exits):
+        for second in exits[index + 1:]:
+            assert _seg_seg_dist_mm(
+                first["start_mm"], first["end_mm"], second["start_mm"], second["end_mm"],
+            ) >= 0.2 + 0.153
+
+    # Parent copper cannot cross another signal's reserved public launch.
+    reserved = next(item for item in exits if item["net"] == "SPI_CS")
+    start, end = reserved["start_mm"], reserved["end_mm"]
+    middle = tuple((a + b) / 2 for a, b in zip(start, end, strict=True))
+    crossing = BreakoutSpec(
+        ref="crossing", pad="1", net="I2C_SDA", start_xy=middle,
+        waypoints=[end], width_mm=0.127, layer="B.Cu",
+    )
+    assert add_breakout_stubs(str(path), [crossing])["skipped"] == [
+        "crossing.1:conflicts_with_stamped_stub",
+    ]
+    # A native via left connected by itself must no longer pass the audit.
+    launch = next(track for track in board.GetTracks() if track.GetLayer() == pcbnew.B_Cu
+                  and track.GetNetname() == "SPI_CS" and track.Type() == pcbnew.PCB_TRACE_T)
+    board.Remove(launch)
+    board.Save(str(path))
+    assert unlanded_interface_components(pcbnew.LoadBoard(str(path)), nets) == [
+        {"net": "SPI_CS", "pads": ["U4.3"], "reason": "missing_reserved_opposite_face_launch"},
+    ]
+
+
+def test_rp2040_opposite_face_crossing_blocks_entire_launch(tmp_path):
+    path = _rp2040_exit_board(tmp_path)
+    board = pcbnew.LoadBoard(str(path))
+    from kicraft.autoplacer.brain.breakout_stubs import _seg_seg_dist_mm
+
+    specs = signal_escape_specs(board, external_net_names=set(_RP2040_PORTS.values()))
+    chip_select = next(spec for spec in specs if spec.pad == "3")
+    end_x, end_y = chip_select.via_exit[0]
+    start, end = (end_x - 0.25, end_y), (end_x + 0.25, end_y)
+    tip = chip_select.waypoints[-1]
+    assert _seg_seg_dist_mm(tip, tip, start, end) > 0.36 / 2 + 0.127 / 2 + 0.153
+    crossing = pcbnew.PCB_TRACK(board)
+    # Block only the opposite-face launch, not the via or source-face dogbone.
+    crossing.SetStart(pcbnew.VECTOR2I(_mm(start[0]), _mm(start[1])))
+    crossing.SetEnd(pcbnew.VECTOR2I(_mm(end[0]), _mm(end[1])))
+    crossing.SetLayer(pcbnew.B_Cu)
+    crossing.SetWidth(_mm(0.127))
+    crossing.SetNet(board.GetNetInfo().GetNetItem("I2C_SDA"))
+    crossing.SetLocked(True)
+    board.Add(crossing)
+    board.Save(str(path))
+
+    result = add_breakout_stubs(str(path), [chip_select], signal_escape_owner=True)
+    assert result["stubs"] == result["vias"] == result["segments"] == 0
+    assert result["owned_signal_escapes"] == []
+    assert {track.m_Uuid.AsString() for track in pcbnew.LoadBoard(str(path)).GetTracks()} == {
+        crossing.m_Uuid.AsString(),
+    }
+
+
+def test_dense_interface_ports_admit_parent_via_envelope(tmp_path):
+    """The normal parent via must fit without moving inherited fanout."""
+    from kicraft.autoplacer.routing_board import run_kicad_cli_drc
+
+    path = _rp2040_exit_board(tmp_path)
+    board = pcbnew.LoadBoard(str(path))
+    specs = signal_escape_specs(board, external_net_names=set(_RP2040_PORTS.values()))
+    stamped = add_breakout_stubs(str(path), specs, signal_escape_owner=True)
+    assert not stamped["skipped"], stamped
+    board = pcbnew.LoadBoard(str(path))
+    for via in board.GetTracks():
+        if isinstance(via, pcbnew.PCB_VIA):
+            netclass = via.GetNet().GetNetClassSlow()
+            via.SetWidth(netclass.GetViaDiameter())
+            via.SetDrill(netclass.GetViaDrill())
+    assert pcbnew.SaveBoard(str(path), board)
+    drc = run_kicad_cli_drc(str(path))
+    assert drc["shorts"] == drc["clearance"] == 0, drc
+
+
+@pytest.mark.parametrize("side", (pcbnew.F_Cu, pcbnew.B_Cu))
+@pytest.mark.parametrize("terminal_kind", ("track", "via", "through", "boundary", "unadvertised"))
+def test_source_owned_landing_canonicalization(tmp_path, side, terminal_kind):
+    import hashlib
+    import shutil
+
+    from kicraft.autoplacer.brain.copper_accounting import attach_signal_escape_ownership
+    from kicraft.autoplacer.brain.escape_cleanup import _drc_item_key, _report_drc
+    from kicraft.autoplacer.brain.leaf_routing import _update_escape_items
+    from kicraft.autoplacer.brain.signal_escape import _escape_track_record, _finish_owned_escape_landings
+    from kicraft.autoplacer.fab_profile import stamp_fab_floors_into_pro
+    from kicraft.autoplacer.routing_board import import_routed_copper
+
+    if not shutil.which("kicad-cli"):
+        pytest.skip("KiCad CLI not installed")
+    path = tmp_path / "source.kicad_pcb"
+    project = path.with_suffix(".kicad_pro")
+    project.write_text("{}")
+    board = pcbnew.BOARD()
+    net = pcbnew.NETINFO_ITEM(board, "SIG")
+    board.Add(net)
+
+    def point(x, y):
+        return pcbnew.VECTOR2I(round(x * 1e6), round(y * 1e6))
+
+    def pad(ref, at, layer):
+        fp = pcbnew.FOOTPRINT(board)
+        fp.SetReference(ref)
+        board.Add(fp)
+        item = pcbnew.PAD(fp)
+        item.SetNumber("1")
+        item.SetAttribute(pcbnew.PAD_ATTRIB_SMD)
+        item.SetShape(pcbnew.PAD_SHAPE_RECT)
+        item.SetSize(point(0.6, 0.6))
+        layers = pcbnew.LSET()
+        layers.AddLayer(layer)
+        item.SetLayerSet(layers)
+        item.SetNet(net)
+        fp.Add(item)
+        item.SetPosition(point(*at))
+
+    def trace(start, end, layer, width, locked=False):
+        track = pcbnew.PCB_TRACK(board)
+        track.SetStart(point(*start))
+        track.SetEnd(point(*end))
+        track.SetLayer(layer)
+        track.SetWidth(round(width * 1e6))
+        track.SetNet(net)
+        track.SetLocked(locked)
+        board.Add(track)
+        return track
+
+    outline = pcbnew.PCB_SHAPE(board)
+    outline.SetShape(pcbnew.SHAPE_T_RECT)
+    outline.SetStart(point(1, 1))
+    outline.SetEnd(point(13, 9))
+    outline.SetLayer(pcbnew.Edge_Cuts)
+    board.Add(outline)
+    launch = (9, 5)
+    pad("U1", (10, 5), side)
+    predecessor = trace((10, 5), launch, side, 0.127, locked=True)
+    if terminal_kind == "track":
+        terminal = trace(launch, (8.593499, 5), side, 0.127, locked=True)
+        owned = _escape_track_record(board, terminal)
+        contact, destination = (8.833573, 5.003088), (8.033573, 5.803088)
+        route_side = side
+    else:
+        terminal = pcbnew.PCB_VIA(board)
+        terminal.SetPosition(point(*launch))
+        terminal.SetLayerPair(pcbnew.F_Cu, pcbnew.B_Cu)
+        terminal.SetWidth(_mm(0.36))
+        terminal.SetDrill(_mm(0.15))
+        terminal.SetNet(net)
+        terminal.SetLocked(True)
+        board.Add(terminal)
+        owned = {
+            "uuid": terminal.m_Uuid.AsString(), "kind": "via", "net": "SIG",
+            "position_mm": launch, "size_mm": 0.36, "drill_mm": 0.15,
+        }
+        contact, destination = (8.960927, 4.821234), (7.860927, 3.721233)
+        route_side = side
+        if terminal_kind == "through":
+            contact = launch
+            route_side = pcbnew.B_Cu if side == pcbnew.F_Cu else pcbnew.F_Cu
+    pad("U2", destination, route_side)
+    router = trace(contact, destination, route_side, 0.2)
+    board.Save(str(path))
+    stamp_fab_floors_into_pro(project)
+    summary = {"owned_signal_escapes": [{
+        "owner": "compiler.signal_escape", "ref": "U1", "pad": "1",
+        "items": [_escape_track_record(board, predecessor), owned],
+    }]}
+
+    original = path.read_bytes()
+    assert _finish_owned_escape_landings(path, (summary,), set(), {}) == {}
+    assert path.read_bytes() == original
+    assert _finish_owned_escape_landings(
+        path, (summary,), {"SIG"}, {"fab_capability": {"min_track_mm": 0.17}},
+    ) == {}
+    contract = {"owner_ref": "U1", "bypass_ref": "U2", "power_pins": ["1", "1"],
+                "max_route_length_mm": 10}
+    assert _finish_owned_escape_landings(path, (summary,), {"SIG"}, {"local_bypasses": [contract]}) == {}
+    assert path.read_bytes() == original
+    before = _report_drc(path, tmp_path / "before.json")
+    uid = owned["uuid"]
+    if terminal_kind in {"boundary", "unadvertised"}:
+        import json
+        from kicraft.autoplacer.brain.escape_cleanup import (
+            cleanup_signal_escapes, finish_boundary_escape_landings,
+        )
+
+        owner = {"owner": "compiler.signal_escape", "ref": "U1", "pad": "1",
+                 "branch_id": "U1.1", "branch_item_count": "2"}
+        predecessor_id = predecessor.m_Uuid.AsString()
+        ownership = tmp_path / "ownership.json"
+        sha = hashlib.sha256(original).hexdigest()
+        ownership.write_text(json.dumps({
+            "version": 1, "stamped_board_sha256": sha, "routed_board_sha256": sha,
+            **({"interface_net_names": ["SIG"]} if terminal_kind == "boundary" else {}),
+            "boundary_landing_constraints": {},
+            "traces": [{
+                "start_x": 10, "start_y": 5, "end_x": 9, "end_y": 5,
+                "width": 0.127, "layer": "F.Cu" if side == pcbnew.F_Cu else "B.Cu",
+                "net_name": "SIG", "native_uuid": predecessor_id,
+                "escape_ownership": {**owner, "source_uuid": predecessor_id, "branch_item_index": "0"},
+            }],
+            "vias": [{
+                "x": 9, "y": 5, "size": 0.36, "drill": 0.15, "net_name": "SIG",
+                "native_uuid": uid,
+                "escape_ownership": {**owner, "source_uuid": uid, "branch_item_index": "1"},
+            }],
+        }))
+        cleanup = cleanup_signal_escapes(path, ownership, tmp_path / "cleanup.json")
+        assert cleanup["accepted"] and not cleanup["removed"]
+        result = finish_boundary_escape_landings(path, ownership, cleanup)
+        if terminal_kind == "unadvertised":
+            assert result == {} and path.read_bytes() == original
+            return
+    else:
+        result = _finish_owned_escape_landings(path, (summary,), {"SIG"}, {})
+    if terminal_kind == "through":
+        assert result == {} and path.read_bytes() == original
+        return
+    warning_type = "track_dangling" if terminal_kind == "track" else "via_dangling"
+    assert any(row["type"] == warning_type and row["items"][0]["uuid"] == uid
+               for row in before["violations"])
+    assert result["accepted"] and result["native_readback"]
+    assert result["board_before_sha256"] == hashlib.sha256(original).hexdigest()
+    assert result["board_after_sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
+    assert result["retired"] == {
+        uid: {key: list(value) if isinstance(value, tuple) else value for key, value in owned.items()},
+    }
+    corrected = result["replacements"][uid]
+    assert tuple(corrected["start_mm"]) == launch and tuple(corrected["end_mm"]) == contact
+    assert corrected["width_mm"] == 0.127
+    saved = pcbnew.LoadBoard(str(path))
+    assert {item.m_Uuid.AsString() for item in saved.GetTracks()} == {
+        router.m_Uuid.AsString(), predecessor.m_Uuid.AsString(), corrected["uuid"],
+    }
+    after = _report_drc(path, tmp_path / "after.json")
+    assert not before["unconnected_items"] and not after["unconnected_items"]
+    assert set(map(_drc_item_key, after["violations"])) == {
+        _drc_item_key(row) for row in before["violations"]
+        if row["type"] != warning_type or row["items"][0]["uuid"] != uid
+    }
+    copper = import_routed_copper(str(path))
+    updated = _update_escape_items(summary, set(), result["replacements"])
+    assert attach_signal_escape_ownership(copper, updated) == {"bound": 2, "unresolved_source_uuids": []}

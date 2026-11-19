@@ -16,7 +16,6 @@ from kicraft.design.models import (
 )
 from kicraft.design.library import (
     ArchitectureLibraryError,
-    _format_available_leaves_block,
     _validate_library_picks,
 )
 from kicraft.leaf_library import LeafLibrary
@@ -44,17 +43,6 @@ def _make_arch(**kwargs) -> Architecture:
     base.update(kwargs)
     return Architecture(**base)
 
-
-def test_format_block_empty_returns_none():
-    assert _format_available_leaves_block([]) is None
-
-
-def test_format_block_includes_interface_and_metadata(tmp_path):
-    leaves = _make_loaded_leaves(tmp_path)
-    block = _format_available_leaves_block(leaves)
-    assert block is not None
-    assert "test-leaf@0.1.0" in block
-    assert "VBUS (input)" in block
 
 
 def test_validate_unknown_slug(tmp_path):

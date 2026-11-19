@@ -39,10 +39,13 @@ from kicraft.design.synthesis.array_decaps import (
     _ref_prefix,
     _ref_sort_key,
     _resplit_connections_by_sheet,
+    _apply_sheet_ownership_transfer,
+    _sheet_ownership_transfer,
 )
 
 __all__ = [
     "split_dense_soc_sheets",
+    "isolate_owned_blocks",
     "split_dense_sheets_enabled",
     "DENSE_SHEET_ROUTABLE_MAX",
 ]
@@ -231,3 +234,75 @@ def split_dense_soc_sheets(
             print(f"  [synth] {note}")
         bom.assumptions.append(note)
     return sorted(set(moved), key=_ref_sort_key)
+
+
+def isolate_owned_blocks(bom: BOM, architecture: Architecture) -> list[str]:
+    """Give complete electrical owners their own existing hierarchy leaf.
+
+    Sheet authoring is not reuse granularity. Never separate a recipe's private
+    nets, a lowerer's support circuit, an array, or explicitly coupled placement.
+    Unowned/model-authored parts remain together and cannot acquire qualification
+    merely by sharing a sheet with a reviewed circuit.
+    """
+    by_ref = {part.ref: part for part in bom.parts}
+    taken_names = {sheet.name for sheet in architecture.sheets}
+    taken_stems = {sheet.stem for sheet in architecture.sheets}
+    owners = [set(owner.refs) for owner in bom.recipe_ownership]
+    lowerers: dict[str, set[str]] = {}
+    for part in bom.parts:
+        if part.lowering_requirement_id:
+            lowerers.setdefault(part.lowering_requirement_id, set()).add(part.ref)
+    owners.extend(lowerers.values())
+    owned_refs = set().union(*owners) if owners else set()
+    coupled = [{ref, *members} for ref, members in bom.ic_groups.items()]
+    coupled.extend(set(spec.refs) for spec in bom.arrays)
+    coupled.extend(
+        {hint.ref, hint.anchor_ref} for hint in bom.placement_hints if hint.anchor_ref
+    )
+    for owner in bom.recipe_ownership:
+        for net in owner.internal_nets:
+            coupled.append({
+                endpoint.ref for connection in bom.connections if connection.net_name == net
+                for endpoint in connection.endpoints
+            })
+    moved: list[str] = []
+    for sheet in list(architecture.sheets):
+        if sheet.from_library or sheet.replication_group:
+            continue
+        refs = {part.ref for part in bom.parts if part.sheet == sheet.name}
+        groups = [group & refs for group in owners if group & refs]
+        unowned = refs - owned_refs
+        if unowned:
+            groups.append(unowned)
+        # Overlapping owners and local mechanical dependencies are indivisible.
+        for binding in [*groups, *coupled]:
+            overlap = [group for group in groups if group & binding]
+            if len(overlap) > 1:
+                merged = set().union(*overlap)
+                groups = [group for group in groups if not group & merged] + [merged]
+        if len(groups) < 2:
+            continue
+        groups.sort(key=lambda group: (
+            not bool(group & unowned), -len(group), sorted(group, key=_ref_sort_key),
+        ))
+        transfers = [
+            (group, _sheet_ownership_transfer(bom, architecture, sheet.name, group))
+            for group in groups[1:]
+        ]
+        for group, (requirements, selections) in transfers:
+            ordered = sorted(group, key=_ref_sort_key)
+            name, stem = _isolation_sheet_names(ordered, taken_names, taken_stems)
+            taken_names.add(name)
+            taken_stems.add(stem)
+            architecture.sheets.append(Sheet(
+                name=name, stem=stem, function="Complete deterministic electrical block",
+            ))
+            for ref in group:
+                by_ref[ref].sheet = name
+            _apply_sheet_ownership_transfer(requirements, selections, sheet.name, name)
+            moved.extend(ordered)
+            print(f"  [synth] isolated owned block {', '.join(ordered)} onto {name}")
+    if moved:
+        _resplit_connections_by_sheet(bom)
+        _declare_cross_sheet_signal_nets(bom, architecture)
+    return sorted(moved, key=_ref_sort_key)

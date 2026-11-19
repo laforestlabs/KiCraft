@@ -1,0 +1,28 @@
+{
+  "content_hash": "sha256:1db70f24a28e264a8f56df0757b738e37f8baa672dadf813175a2d8fa2a5fb0a",
+  "datasheet_url": "https://www.ti.com/lit/ds/symlink/tps54331.pdf",
+  "description": "TI TPS54331DDAR DDA PowerPAD on a separate, non-drilled land pattern for standard PCB fabrication.",
+  "footprint_name": "TI_TPS54331_DDA_PowerPAD_NoVIP",
+  "kicad_version_min": "9.0.0",
+  "maturity": "reviewed",
+  "mpn": "TPS54331DDAR",
+  "name": "tps54331-dda-no-vip",
+  "provenance": {
+    "added_at": "2026-11-19T00:00:00Z",
+    "kicad_version": "9.0.0",
+    "source": "TI SLVS839H pp. 35–37 (4202561/F, 4206322-5/L, 4208951-5/D); STEP copied unchanged from tps54331@0.1.0"
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C90761"
+  },
+  "symbol_name": "TPS54331DDAR",
+  "tags": [
+    "regulator",
+    "buck",
+    "adjustable",
+    "soic-8"
+  ],
+  "version": "1.0.0",
+  "watch_out_for": "Solder pad 9 to GND. TI SLVS839H §8.4.1 permits adjacent thermal vias. Requires externally stitched solid ground planes; pad 9 contains no drills and needs no filled-via process. Center paste aperture follows the 0.127 mm stencil example. No assembled thermal performance is claimed."
+}

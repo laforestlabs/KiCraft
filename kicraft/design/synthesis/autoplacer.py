@@ -133,11 +133,14 @@ def usb_routing_contracts(architecture: Architecture, bom: BOM):
     changing only the board-side net names would lose schematic custody.
     """
     from kicraft.design.models import PinEndpoint, USBPairSegment, USBRoutingContract
+    from kicraft.design.recipe_versions import RP2040_RECIPE_IDS
     from kicraft.design.recipes.registry import expand_recipe, get_recipe
+    from kicraft.design.recipes.rp2040_minimal_v2 import RP2040_USB_PINS
     from kicraft.design.recipes.wave_a_mcus import _NATIVE_USB_PINS
 
     mcu_pins = dict(_NATIVE_USB_PINS)
     mcu_pins["esp32-s3-mini-1-minimal@1"] = ("23", "24")
+    mcu_pins.update(dict.fromkeys(RP2040_RECIPE_IDS, RP2040_USB_PINS))
 
     def targets(selection, role):
         rules = [r for r in get_recipe(selection.recipe).placement_constraints
@@ -146,7 +149,6 @@ def usb_routing_contracts(architecture: Architecture, bom: BOM):
         if len(rules) != 1 or set(rules[0].parameters) != keys:
             raise ValueError(f"{selection.instance}: missing reviewed USB routing targets")
         return rules[0].parameters
-    mcu_pins["rp2040-minimal@4"] = ("46", "47")
     actual = {}
     for connection in bom.connections:
         for ep in connection.endpoints:

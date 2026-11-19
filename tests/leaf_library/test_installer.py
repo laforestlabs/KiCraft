@@ -284,7 +284,7 @@ def test_failed_promotion_preserves_previous_leaf(tmp_path, monkeypatch):
         snapshot[name] = path
     library = tmp_path / "library"
     old = library / "test-leaf"
-    old.mkdir(parents=True)
+    _populate_valid_leaf(old)
     (old / "old-data").write_text("must survive")
     req = extractor.PromoteRequest(
         project, "project", "sheet", "sheet", "key", 1,
@@ -294,7 +294,10 @@ def test_failed_promotion_preserves_previous_leaf(tmp_path, monkeypatch):
     replace = os.replace
 
     def fail_final(src, dst):
-        if Path(src).parent.name.startswith(".test-leaf.tmp.") and Path(dst) == old:
+        if (
+            Path(src).parent.name.startswith(".test-leaf.tmp.")
+            and Path(dst) == library / "test-leaf@2.0.0"
+        ):
             raise OSError("injected final rename failure")
         return replace(src, dst)
 
@@ -302,6 +305,7 @@ def test_failed_promotion_preserves_previous_leaf(tmp_path, monkeypatch):
     with pytest.raises(OSError, match="injected final rename failure"):
         extractor.extract_leaf(req, library, render=False)
     assert (old / "old-data").read_text() == "must survive"
+    assert not (library / "test-leaf@2.0.0").exists()
 
 
 def test_partial_install_records_written_schematic(tmp_path):
@@ -328,3 +332,61 @@ def test_partial_install_records_written_schematic(tmp_path):
         )
     sheet = project / "TEST.kicad_sch"
     assert recorded == {sheet: sheet.read_bytes()}
+
+
+def _publication_request(project, version="1.0.0"):
+    from kicraft.leaf_library.extractor import PromoteRequest
+
+    project.mkdir(exist_ok=True)
+    (project / "sheet.kicad_sch").write_text(SYNTH_SCH)
+    snapshots = project / ".experiments" / "subcircuits" / "key"
+    snapshots.mkdir(parents=True, exist_ok=True)
+    for name, text in (
+        ("leaf_routed.kicad_pcb", SYNTH_PCB),
+        ("metadata.json", "{}"),
+        ("solved_layout.json", "{}"),
+    ):
+        (snapshots / f"round_0001_{name}").write_text(text)
+    return PromoteRequest(
+        project, "project", "sheet", "sheet", "key", 1,
+        "test-leaf", version, "reviewed circuit",
+    )
+
+
+def test_publication_retains_versions_and_live_discovery(tmp_path):
+    from dataclasses import replace
+    from kicraft.leaf_library.extractor import extract_leaf
+
+    library = tmp_path / "library"
+    reader = LeafLibrary(library)
+    assert reader.find("test-leaf@1.0.0") is None
+    req = _publication_request(tmp_path / "source")
+    first = extract_leaf(req, library, render=False)
+    identity = reader.find("test-leaf@1.0.0").manifest.content_hash
+    extract_leaf(replace(req, version="2.0.0"), library, render=False)
+    assert reader.find("test-leaf@1.0.0").manifest.content_hash == identity
+    assert reader.find("test-leaf@2.0.0").dir != first
+    with pytest.raises(FileExistsError, match="immutable"):
+        extract_leaf(req, library, render=False)
+    assert LeafLibrary(library).find("test-leaf@1.0.0").manifest.content_hash == identity
+
+
+def test_concurrent_publication_never_replaces_a_version(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from kicraft.leaf_library.extractor import extract_leaf
+
+    req = _publication_request(tmp_path / "source")
+    library = tmp_path / "library"
+
+    def publish():
+        try:
+            return extract_leaf(req, library, render=False)
+        except FileExistsError:
+            return None
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _: publish(), range(2)))
+    assert sum(result is not None for result in results) == 1
+    loaded, broken = LeafLibrary(library).load_all()
+    assert [entry.slug for entry in loaded] == ["test-leaf@1.0.0"]
+    assert not broken

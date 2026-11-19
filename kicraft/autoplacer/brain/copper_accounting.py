@@ -636,8 +636,8 @@ def attach_signal_escape_ownership(
             if branch.get("owner") != "compiler.signal_escape" or not items:
                 continue
             branch_id = items[0]["uuid"]
-            for item in items:
-                records.setdefault(record_key(item), []).append((branch, branch_id, item))
+            for index, item in enumerate(items):
+                records.setdefault(record_key(item), []).append((branch, branch_id, index, item))
     for kind, name in (("track", "traces"), ("via", "vias")):
         for item in copper.get(name, []):
             objects.setdefault(object_key(item, kind), []).append(item)
@@ -645,16 +645,35 @@ def attach_signal_escape_ownership(
     for key, entries in records.items():
         matches = objects.get(key, [])
         if len(entries) != 1 or len(matches) != 1:
-            unresolved.extend(item["uuid"] for _, _, item in entries)
+            unresolved.extend(item["uuid"] for _, _, _, item in entries)
             continue
-        branch, branch_id, record = entries[0]
+        branch, branch_id, index, record = entries[0]
         matches[0].escape_ownership = {
             "owner": "compiler.signal_escape", "branch_id": branch_id,
             "source_uuid": record["uuid"], "ref": branch["ref"], "pad": branch["pad"],
             "branch_item_count": str(len(branch["items"])),
+            "branch_item_index": str(index),
         }
         bound += 1
     return {"bound": bound, "unresolved_source_uuids": unresolved}
+
+
+def signal_escape_geometry_receipt(copper: dict[str, Any]) -> dict:
+    """Serialize ownership already bound to native copper, without inferring it."""
+    return {
+        "traces": [
+            {"start_x": t.start.x, "start_y": t.start.y, "end_x": t.end.x,
+             "end_y": t.end.y, "width": t.width_mm, "net_name": t.net,
+             "layer": "F.Cu" if int(t.layer) == 0 else "B.Cu",
+             "escape_ownership": t.escape_ownership}
+            for t in copper.get("traces", []) if t.escape_ownership
+        ],
+        "vias": [
+            {"x": v.pos.x, "y": v.pos.y, "size": v.size_mm, "drill": v.drill_mm,
+             "net_name": v.net, "escape_ownership": v.escape_ownership}
+            for v in copper.get("vias", []) if v.escape_ownership
+        ],
+    }
 
 
 def attach_stamped_escape_ownership(copper: dict[str, Any], receipt: dict) -> dict:

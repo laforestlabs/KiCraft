@@ -155,7 +155,8 @@ def test_storage_must_share_mcu_supply_and_return_without_bus_supply_shorts():
 
 
 @pytest.mark.parametrize("shared_bus", [False, True])
-def test_logged_measurements_construct_writable_storage_on_the_existing_bus(shared_bus):
+@pytest.mark.parametrize("prefix", ["i2c_", ""])
+def test_logged_measurements_construct_writable_storage_on_the_existing_bus(shared_bus, prefix):
     from kicraft.design.architecture_intent import derive_architecture
     from kicraft.design.recipes import apply_architecture_recipe_resolution
     from kicraft.server.stage_work_units import probe_architecture_construction
@@ -171,8 +172,8 @@ def test_logged_measurements_construct_writable_storage_on_the_existing_bus(shar
              "ties": {"ground": "GND", "vcc": "V33"}},
         ],
         "signals": [
-            {"name": "SDA", "from": "mcu.i2c_sda", "to": "bus.sda"},
-            {"name": "SCL", "from": "mcu.i2c_scl", "to": "bus.scl"},
+            {"name": "SDA", "from": f"mcu.{prefix}sda", "to": "bus.sda"},
+            {"name": "SCL", "from": f"mcu.{prefix}scl", "to": "bus.scl"},
         ],
         "power": {"rails": {"V33": {"voltage": 3.3, "from": "input.pin1"}}},
         "mcu_present": True,
@@ -183,14 +184,17 @@ def test_logged_measurements_construct_writable_storage_on_the_existing_bus(shar
             "ties": {"ground": "GND", "vcc": "V33"},
         })
         payload["signals"].extend([
-            {"name": "SDA", "from": "mcu.i2c_sda", "to": "peer.sda"},
-            {"name": "SCL", "from": "mcu.i2c_scl", "to": "peer.scl"},
+            {"name": "SDA", "from": f"mcu.{prefix}sda", "to": "peer.sda"},
+            {"name": "SCL", "from": f"mcu.{prefix}scl", "to": "peer.scl"},
         ])
     functional = {"blocks": [{
         "name": "COLLECT", "category": "process",
         "purpose": "Collect and manage the ambient-light measurements as logged data.",
     }]}
     architecture = apply_architecture_recipe_resolution(derive_architecture(payload, functional))
+    owner = next(row for row in architecture.requirements if row.id == "mcu")
+    assert owner.ports["i2c_sda"] == "SDA" and owner.ports["i2c_scl"] == "SCL"
+    assert "sda" not in owner.ports and "scl" not in owner.ports
     constructed = probe_architecture_construction({"architecture": architecture.model_dump(mode="json")})
     bom = BOM.model_validate(constructed)
     storage = next(part for part in bom.parts if part.mpn == "24LC256T-I/SN")

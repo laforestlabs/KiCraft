@@ -99,7 +99,7 @@ def passthrough_router(monkeypatch):
 
 def test_guarded_geometry_repair_does_not_look_like_ground_copper_loss(tmp_path, passthrough_router):
     stamped, cfg = _parent(tmp_path, illegal_stub=True)
-    result = _route_parent_board(stamped, SimpleNamespace(composition=object()), tmp_path, cfg)
+    result = _route_parent_board(stamped, SimpleNamespace(composition=object(), qualified_geometry=[]), tmp_path, cfg)
     validation = result["validation"]
     assert validation["accepted"], validation
     assert validation["illegal_geometry_repair"]["kept"]
@@ -135,4 +135,25 @@ def test_destructive_ground_finisher_still_rejected(tmp_path, passthrough_router
 
     monkeypatch.setattr(gnd_pour, "add_gnd_pour_and_thermal_vias", lose_copper)
     with pytest.raises(RuntimeError, match="ground finishing lost routed copper"):
-        _route_parent_board(stamped, SimpleNamespace(composition=object()), tmp_path, cfg)
+        _route_parent_board(stamped, SimpleNamespace(composition=object(), qualified_geometry=[]), tmp_path, cfg)
+
+
+def test_one_ounce_thermal_parent_keeps_real_dual_ground_path(tmp_path, passthrough_router):
+    from kicraft.pcb_layers import has_two_ounce_outer_stackup
+
+    stamped, cfg = _parent(tmp_path, illegal_stub=False)
+    cfg["thermal_requirements"] = [{
+        "owner_ref": "U1", "ground_pins": ["4"],
+        "outer_copper_oz": 1.0, "ground_layers": ["F.Cu", "B.Cu"],
+        "local_radius_mm": 4.0, "minimum_local_ground_area_mm2": 4.0,
+        "connected_ground_spreading": True,
+    }]
+    result = _route_parent_board(stamped, SimpleNamespace(composition=object(), qualified_geometry=[]), tmp_path, cfg)
+    validation = result["validation"]
+    assert validation["accepted"], validation
+    assert validation["drc"]["unconnected"] == validation["drc"]["shorts"] == 0
+    routed = result["routed_board_path"]
+    assert not has_two_ounce_outer_stackup(routed)
+    board = pcbnew.LoadBoard(routed)
+    assert {zone.GetLayer() for zone in board.Zones()
+            if not zone.GetIsRuleArea() and zone.GetNetname() == "GND"} == {pcbnew.F_Cu, pcbnew.B_Cu}

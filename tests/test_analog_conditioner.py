@@ -137,6 +137,47 @@ def test_temperature_consumer_limit_covers_full_range_and_unspecified_component_
     }))
 
 
+def test_untrimmed_temperature_network_supports_eight_3v3_adc_channels():
+    requirement = _requirement("temperature", 8, "MCP6002-I/SN")
+    requirement.ports["vplus"] = "V33"
+    requirement.parameters.update(analog_rail_v=3.3, consumer_input_max_v=3.3)
+    artifact = lower_requirement(requirement)
+    supply_pins = {
+        (pin.role, pin.index, pin.pin): pin.net for pin in artifact.pins
+        if (pin.role == "amplifier" and pin.pin == "8")
+        or (pin.role == "sensor" and pin.pin == "1")
+    }
+    assert set(supply_pins.values()) == {"V33"}
+    assert {pin.net for pin in artifact.pins
+            if pin.role == "amplifier" and pin.pin in {"1", "7"}} == {
+        f"OUT{i}" for i in range(1, 9)
+    }
+    limits = {item.output: item.chosen_value for item in artifact.calculations}
+    assert limits["maximum_output_v"] == "3.3V"
+    with pytest.raises(ValueError):
+        lower_requirement(requirement.model_copy(update={
+            "parameters": {**requirement.parameters, "consumer_input_max_v": 3.0},
+        }))
+
+
+@pytest.mark.parametrize("changes", [
+    {"trim": True}, {"power_cycle_isolation": True},
+    {"amplifier_exact_part": "LM358DR"}, {"sensor_type": "humidity"},
+])
+def test_3v3_temperature_variant_does_not_expand_other_reviewed_envelopes(changes):
+    requirement = _requirement("temperature", 2, "MCP6002-I/SN")
+    requirement.parameters.update(analog_rail_v=3.3, **changes)
+    if "amplifier_exact_part" in changes:
+        requirement.exact_part = changes["amplifier_exact_part"]
+    if changes.get("power_cycle_isolation"):
+        requirement.ports.update(
+            isolation_vdd="HOST5", isolation_enable="RELEASE",
+            analog_out_1="HOST_OUT1", analog_out_2="HOST_OUT2",
+        )
+    with pytest.raises(ValueError):
+        lower_requirement(requirement)
+
+
 def test_eight_isolated_sht30_channels_exceed_switched_capacitance():
     requirement = _requirement("humidity", 8, "MCP6002-I/SN")
     isolated = requirement.model_copy(update={

@@ -2579,45 +2579,112 @@ def _reviewed_enable_defects(architecture, part, fact, bom, info, nets) -> list[
             f"E_ENABLE_SUPPORT {part.ref}.{pin}: static enable rail {net!r} is "
             f"{voltage:g}V; enabled operation requires {minimum:g}–{maximum:g}V"
         ]
-    conductance = 0.0
-    weighted_voltage = 0.0
-    source_voltages = []
-    for peer in bom.parts:
-        if peer.ref == part.ref or net not in (nets.get(peer.ref) or {}).values():
-            continue
+    parts = {peer.ref: peer for peer in bom.parts}
+    net_refs: dict[str, set[str]] = defaultdict(set)
+    for ref, pins in nets.items():
+        for node in pins.values():
+            net_refs[node].add(ref)
+    branches: list[tuple[float, float, float, bool]] = []
+    local_shunts: set[str] | None = None
+    private_enable = any(
+        part.ref in manifest.refs and net in manifest.internal_nets
+        for manifest in getattr(bom, "recipe_ownership", ())
+    )
+
+    def resistor_branch(ref):
+        """Walk only unbranched, connected passive series elements to a known DC rail."""
+        node = net
+        visited = {net}
+        low = high = 0.0
+        reviewed = True
+        while (resistor := parts.get(ref)) is not None and _ref_prefix(ref) == "R":
+            pair = _two_terminal_part_nets(resistor, nets)
+            nominal = _resistance_ohms(resistor.value)
+            other = next((name for name in pair or () if name != node), None)
+            if pair is None or nominal is None or node not in pair or other is None or other in visited:
+                return None
+            record = _reviewed_identity_for_bom_part(resistor)
+            limits = record.operating_limits if record else {}
+            tolerance = _fact_number(limits, "tolerance_fraction")
+            if _fact_number(limits, "resistance_ohm") != nominal or not (
+                tolerance is not None and 0 < tolerance < 1
+            ):
+                reviewed = False
+                tolerance = 0.0  # legacy nominal low-voltage divider evidence
+            low += nominal * (1 - tolerance)
+            high += nominal * (1 + tolerance)
+            source = _fact_number(architecture.rail_voltages, other)
+            if source is not None:
+                return source, low, high, reviewed
+            peers = net_refs[other] - {ref}
+            if len(peers) != 1:
+                return None
+            ref = next(iter(peers))
+            node = other
+            visited.add(node)
+        return None
+
+    for ref in sorted(net_refs[net] - {part.ref}):
+        peer = parts.get(ref)
+        if peer is None:
+            break
         if any(
             pin_info.get("type") in {"output", "bidirectional", "open_collector", "open_emitter"}
             and (nets.get(peer.ref) or {}).get(number) == net
             for number, pin_info in (info.get(peer.ref) or {}).items()
         ):
+            if private_enable:
+                break  # a driver on a recipe-private bias node is not a published EN control
             # A controllable enable is not an always-on bias. Its operating modes
             # belong to the design; a low commanded state is not a broken supply.
             return []
         if _ref_prefix(peer.ref) == "C":
             continue  # A timing/bypass capacitor supplies no DC bias.
-        pair = _two_terminal_part_nets(peer, nets)
-        resistance = _resistance_ohms(peer.value) if _ref_prefix(peer.ref) == "R" else None
-        other = next((name for name in pair or () if name != net), None)
-        source = _fact_number(architecture.rail_voltages, other) if other else None
-        if pair is None or resistance is None or source is None:
-            return [
-                f"E_ENABLE_SUPPORT {part.ref}.{pin}: static enable network "
-                f"on {net!r} has unproven DC bias"
-            ]
-        conductance += 1.0 / resistance
-        weighted_voltage += source / resistance
-        source_voltages.append(source)
-    # The documented internal pull-up can only raise this passive-divider value.
-    # Its typical current is not a guaranteed minimum, so it cannot rescue a
-    # divider that falls below the maximum enable threshold.
-    if conductance and weighted_voltage / conductance >= minimum and all(
-        0.0 <= source <= maximum for source in source_voltages
-    ):
-        return []
+        if getattr(peer, "recipe_role", None) in {"reset_button", "enable_jumper"}:
+            if local_shunts is None:
+                local_shunts = set()
+                for manifest in getattr(bom, "recipe_ownership", ()):
+                    if part.ref not in manifest.refs:
+                        continue
+                    requirement = _recipe_requirement_context(architecture, bom, manifest)
+                    for role in ("reset_button", "enable_jumper"):
+                        if verified_regulator_shunt_controls(requirement, bom, reset=role == "reset_button"):
+                            local_shunts.update(
+                                ref for ref in manifest.refs
+                                if ref in parts and parts[ref].recipe_role == role
+                            )
+            if ref in local_shunts:
+                continue  # the reviewed open state is the state whose bias is proved here
+        branch = resistor_branch(ref)
+        if branch is None:
+            break
+        branches.append(branch)
+    else:
+        bound = _fact_number(contract, "bias_current_bound_a")
+        if branches and all(source >= 0 for source, *_ in branches) and all(
+            source <= maximum or (reviewed and bound is not None)
+            for source, _, _, reviewed in branches
+        ):
+            # At the low threshold prove positive net current into EN; at the
+            # high threshold prove negative. Choose the worst tolerance for
+            # each branch's polarity independently, including signed pin current.
+            pin_current = bound or 0.0
+            low_margin = sum(
+                (source - minimum) / (high if source >= minimum else low)
+                for source, low, high, _ in branches
+            )
+            high_margin = sum(
+                (maximum - source) / (high if source <= maximum else low)
+                for source, low, high, _ in branches
+            )
+            if low_margin >= pin_current and high_margin >= pin_current:
+                return []
+        return [
+            f"E_ENABLE_SUPPORT {part.ref}.{pin}: static enable bias on {net!r} "
+            f"does not establish {minimum:g}–{maximum:g}V over the proved bias bounds"
+        ]
     return [
-        f"E_ENABLE_SUPPORT {part.ref}.{pin}: static enable bias on {net!r} "
-        f"does not establish {minimum:g}–{maximum:g}V without an unbounded "
-        "internal pull-up-current assumption"
+        f"E_ENABLE_SUPPORT {part.ref}.{pin}: static enable network on {net!r} has unproven DC bias"
     ]
 
 
@@ -4275,6 +4342,7 @@ def _has_trusted_recipe_topology_witness(
             if len(actual_parts) != len(expected_parts) or any(
                 any(getattr(actual, field) != getattr(expected, field)
                     for field in ("value", "symbol", "footprint", "mpn", "sheet"))
+                or (expected.accessories and getattr(actual, "accessories", ()) != expected.accessories)
                 for actual, expected in zip(actual_parts, expected_parts)
             ):
                 break
@@ -4514,10 +4582,97 @@ def _declared_pin_reaches_port_net(
     return False
 
 
-def _external_interface_has_construction_witness(requirement, bom, protocol: str) -> bool:
-    """Prove an external interface from a complete reviewed construction."""
-    from kicraft.design.lowering import lower_requirement, lowerer_supports_external_interface
+def verified_regulator_shunt_controls(requirement, bom, *, reset: bool) -> bool:
+    """Prove the real recipe-owned EN network before claiming control behavior."""
+    from kicraft.design.recipes.wave_b_power import TPS54331_3V3_SHUNT_CONTROLS
+
+    parameter = "reset_control" if reset else "enable_control"
+    definition = TPS54331_3V3_SHUNT_CONTROLS
+    if (
+        requirement.role != "regulator" or requirement.family != definition.family
+        or requirement.parameters.get(parameter) is not True
+        or set(requirement.ports) != {"input", "output", "gnd"}
+    ):
+        return False
+    return any(
+        manifest.recipe == definition.recipe
+        and _has_trusted_recipe_topology_witness(requirement, bom, None, manifest=manifest)
+        for manifest in getattr(bom, "recipe_ownership", ())
+        if requirement.id in manifest.requirement_ids
+    )
+
+
+def verified_power_output_header(architecture, bom, requirement) -> bool:
+    """Recheck the compiled 5 V header contract against both complete BOM owners."""
+    from kicraft.design.architecture_intent import power_output_source_return_port
+    from kicraft.design.lowering import verified_lowering
     from kicraft.design.recipes.registry import get_recipe
+
+    contracts = [
+        row for row in getattr(architecture, "power_output_header_contracts", ())
+        if row.header_requirement == requirement.id
+    ]
+    if len(contracts) != 1 or requirement.role != "connector":
+        return False
+    (contract,) = contracts
+    if (
+        set(requirement.ports) != {"pin1", "pin2"}
+        or set(requirement.ports.values()) != {contract.rail, contract.ground}
+        or architecture.rail_voltages.get(contract.rail) != 5.0
+        or architecture.rail_voltages.get(contract.ground) != 0.0
+    ):
+        return False
+    header = verified_lowering(requirement, bom)
+    if header is None or header[0].lowerer_id != "pin-header@1":
+        return False
+    sources = [
+        (owner, port, reference)
+        for owner in architecture.requirements
+        for port, net in owner.ports.items()
+        if net == contract.rail
+        and (reference := power_output_source_return_port(owner, port)) is not None
+    ]
+    if len(sources) != 1:
+        return False
+    (source, port, reference), = sources
+    if (
+        (source.id, port, reference)
+        != (contract.source_requirement, contract.source_port, contract.source_return_port)
+        or source.id == requirement.id or source.ports.get(reference) != contract.ground
+    ):
+        return False
+    lowered = verified_lowering(source, bom)
+    if lowered is not None:
+        return {contract.rail, contract.ground} <= {pin.net for pin in lowered[0].pins}
+    for manifest in getattr(bom, "recipe_ownership", ()):
+        if source.id not in manifest.requirement_ids:
+            continue
+        try:
+            definition = get_recipe(manifest.recipe)
+        except (KeyError, ValueError):
+            continue
+        if (
+            definition.family == source.family
+            and (source.exact_part is None
+                 or (definition.exact_part or "").casefold() == source.exact_part.casefold())
+            and {contract.rail, contract.ground} <= {pin.net for pin in manifest.pins}
+            and _has_trusted_recipe_topology_witness(source, bom, None, manifest=manifest)
+        ):
+            return True
+    return False
+
+
+def _external_interface_has_construction_witness(architecture, requirement, bom, protocol: str) -> bool:
+    """Prove an external interface from a complete reviewed construction."""
+    from kicraft.design.lowering import (
+        POWER_OUTPUT_HEADER_PROTOCOL,
+        lower_requirement,
+        lowerer_supports_external_interface,
+    )
+    from kicraft.design.recipes.registry import get_recipe
+
+    if protocol == POWER_OUTPUT_HEADER_PROTOCOL:
+        return verified_power_output_header(architecture, bom, requirement)
 
     if lowerer_supports_external_interface(requirement.family, protocol):
         refs = _canonical_lowerer_refs(requirement, bom)
@@ -4652,13 +4807,24 @@ def check_requirement_physical_realization(
                     ] += 1
 
 
+    from kicraft.design.architecture_intent import _regulator_reset_obligation
+
     bad: list[str] = []
     aggregate_demands: dict[tuple[str, str], list[tuple[str, int]]] = defaultdict(list)
     for requirement in architecture.requirements:
         for obligation in requirement.obligations:
+            if _regulator_reset_obligation(obligation) and not verified_regulator_shunt_controls(
+                requirement, bom, reset=True
+            ):
+                bad.append(
+                    f"E_REGULATOR_RESET {requirement.id!r}: missing reviewed momentary EN "
+                    "inhibit and its independent input bias network"
+                )
             if (
                 obligation.kind == "external_interface"
-                and not _external_interface_has_construction_witness(requirement, bom, obligation.protocol)
+                and not _external_interface_has_construction_witness(
+                    architecture, requirement, bom, obligation.protocol
+                )
             ):
                 bad.append(
                     f"E_EXTERNAL_INTERFACE {requirement.id!r}: no complete reviewed construction "
