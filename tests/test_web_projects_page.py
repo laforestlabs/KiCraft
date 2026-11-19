@@ -12,15 +12,18 @@ on the fresh app.
 """
 from __future__ import annotations
 
+import hashlib
 import importlib
 import json
 import sys
+import zipfile
 
 import pytest
 from nicegui.testing.user_simulation import user_simulation
 
 from account_fixtures import seed_project
 
+from kicraft.build_outcome import REVIEW_REQUIRED_RC, USB_REVIEW_WARNING
 from kicraft.server.accounts import AccountStore
 from kicraft.server.config import LEGAL_VERSION
 
@@ -282,3 +285,209 @@ async def test_failed_row_with_an_old_package_offers_no_download(harness):
     await u.should_see("Failed")
     await u.should_not_see("Download")
     await u.should_see("Rebuild board")
+
+
+def _review_project(store, user_id, *, status="review_required"):
+    pid = seed_project(store, user_id, "USB controller")
+    root = store.projects_dir / str(user_id) / str(pid)
+    project = root / "generated" / "attempt-0" / "USB"
+    project.mkdir(parents=True)
+    (root / ".kicraft").mkdir()
+    board = project / "USB.kicad_pcb"
+    board.write_bytes(b"(kicad_pcb)")
+    schematic = project / "USB.kicad_sch"
+    schematic.write_text("(kicad_sch)", encoding="utf-8")
+    config = project / "USB_autoplacer.json"
+    config.write_text("{}", encoding="utf-8")
+    kicad_project = project / "USB.kicad_pro"
+    kicad_project.write_text("{}", encoding="utf-8")
+    digest = hashlib.sha256(board.read_bytes()).hexdigest()
+    provenance = board.with_suffix(".provenance.json")
+    provenance.write_text(json.dumps({
+        "run_id": "layout-run", "run_started_at": 10.0,
+        "fresh": True, "source_kind": "routed", "md5": hashlib.md5(board.read_bytes()).hexdigest(),
+    }), encoding="utf-8")
+    verification = board.with_suffix(".verification.receipt.json")
+    verification.write_text(json.dumps({
+        "ok": True, "physical_ok": True, "review_required": True,
+        "fab_acceptable": False, "board_sha256": digest,
+    }), encoding="utf-8")
+    receipt = board.with_suffix(".engineering-review.receipt.json")
+    receipt.write_text(json.dumps({
+        "mode": "engineering_review", "physical_ok": True, "fabrication_approved": False,
+        "board_sha256": digest, "attempt_generation": 0, "verification_receipt": verification.name,
+        "run_id": "layout-run", "run_started_at": 10.0,
+    }), encoding="utf-8")
+    archive = project / "USB_review.zip"
+    with zipfile.ZipFile(archive, "w") as out:
+        out.writestr("DRAFT-NOT-FOR-FABRICATION.txt", USB_REVIEW_WARNING + "\n")
+        for path in (board, schematic, config, kicad_project, receipt, verification):
+            out.write(path, path.name)
+    state = {
+        "project_stem": "USB",
+        "stage_status": {k: {"ok": True} for k in
+                         ("intent", "functional_spec", "architecture", "bom", "wiring")},
+        "artifacts": {"status": "review_required", "project_dir": str(project),
+                      "routed_pcb": str(board), "review_zip": str(archive), "fab_zip": None},
+    }
+    (root / ".kicraft" / "state.json").write_text(json.dumps(state), encoding="utf-8")
+    store.finish_project(pid, status, stem="USB", dir_path=str(root))
+    return pid, root, board, archive, receipt, provenance
+
+
+async def test_review_draft_list_and_reopen(harness):
+    from nicegui import ui
+
+    u, _, store, acct = harness
+    pid, _, _, archive, _, _ = _review_project(store, acct.id)
+    await _login(u)
+    await u.open("/projects")
+    await u.should_see("Draft ready — USB fabrication confirmation needed")
+    await u.should_not_see("Failed")
+    u.find("Download editable draft source (.zip)", kind=ui.button).click()
+    download = await u.download.next()
+    assert download.status_code == 200
+    assert download.content == archive.read_bytes()
+    assert "USB_review.zip" in download.headers["content-disposition"]
+    await u.open(f"/?project={pid}")
+    await u.should_see("Download editable draft source (.zip)")
+    await u.should_not_see("Download KiCad project (.zip)")
+
+
+@pytest.mark.parametrize("damage", [
+    "board", "receipt", "run", "generation", "archive", "source", "fabrication_member", "old_archive",
+])
+async def test_review_draft_rejects_stale_evidence(harness, damage):
+    u, _, store, acct = harness
+    pid, root, board, archive, receipt, provenance = _review_project(store, acct.id)
+    if damage == "board":
+        board.write_bytes(b"changed board")
+    elif damage == "receipt":
+        data = json.loads(receipt.read_text(encoding="utf-8"))
+        data["physical_ok"] = False
+        receipt.write_text(json.dumps(data), encoding="utf-8")
+    elif damage == "run":
+        data = json.loads(provenance.read_text(encoding="utf-8"))
+        data["run_id"] = "different-build"
+        provenance.write_text(json.dumps(data), encoding="utf-8")
+    elif damage == "generation":
+        store.begin_project_attempt(pid)
+        store.finish_project(pid, "review_required", dir_path=str(root))
+    elif damage == "archive":
+        archive.write_bytes(b"not a zip")
+    elif damage == "fabrication_member":
+        fab = board.parent / "fab" / "USB.gbr"
+        fab.parent.mkdir()
+        fab.write_text("older manufacturing output", encoding="utf-8")
+        with zipfile.ZipFile(archive, "a") as out:
+            out.write(fab, "fab/USB.gbr")
+    elif damage == "old_archive":
+        # Even a current board and mutually agreeing receipts cannot bless
+        # an archive from an earlier run (including an identical board).
+        for path in (provenance, receipt):
+            data = json.loads(path.read_text(encoding="utf-8"))
+            data["run_id"] = "new-build"
+            path.write_text(json.dumps(data), encoding="utf-8")
+    else:
+        (board.parent / "USB.kicad_sch").write_text("changed schematic", encoding="utf-8")
+    await _login(u)
+    await u.open("/projects")
+    await u.should_see("The draft or its verification no longer matches the current attempt.")
+    await u.should_not_see("Download editable draft source (.zip)")
+    generation = store.get_project(pid).attempt_generation
+    assert (await u.http_client.get(f"/project-draft/{pid}/{generation}")).status_code == 404
+
+
+async def test_review_download_rechecks_board_after_render(harness):
+    from nicegui import ui
+
+    u, _, store, acct = harness
+    _, _, board, _, _, _ = _review_project(store, acct.id)
+    await _login(u)
+    await u.open("/projects")
+    button = u.find("Download editable draft source (.zip)", kind=ui.button)
+    board.write_bytes(b"changed after rendering the button")
+    button.click()
+    download = await u.download.next()
+    assert download.status_code == 404
+    assert "Draft is no longer available." in download.text
+
+
+async def test_fab_button_from_previous_attempt_cannot_offer_old_package(harness):
+    from nicegui import ui
+
+    u, _, store, acct = harness
+    pid, root, _, _, _, _ = _review_project(store, acct.id)
+    fab = root / "kicraft_project.zip"
+    fab.write_bytes(b"previous fabrication package")
+    store.finish_project(pid, "ok", stem="USB", dir_path=str(root), zip_path=str(fab))
+    await _login(u)
+    await u.open("/projects")
+    button = u.find("Download", kind=ui.button)
+    store.begin_project_attempt(pid)
+    store.finish_project(pid, "review_required", dir_path=str(root))
+    button.click()
+    await u.should_see("This fabrication package is no longer current.")
+
+
+async def test_public_review_draft_is_not_a_download_or_clone(harness):
+    u, _, store, _ = harness
+    other = store.create_user("other@example.com", PASSWORD)
+    pid, _, board, _, _, _ = _review_project(store, other.id)
+    assert (await u.http_client.get(f"/project-draft/{pid}/0")).status_code == 404
+    await _login(u)
+    await u.open("/browse")
+    await u.should_see("Draft — not approved for fabrication")
+    await u.open(f"/p/{pid}")
+    await u.should_see("Draft ready — USB fabrication confirmation needed")
+    await u.should_see("Editable sources are available only to the project owner.")
+    await u.should_not_see("Download")
+    await u.should_not_see("Clone")
+    assert (await u.http_client.get(f"/project-draft/{pid}/0")).status_code == 404
+    board.write_bytes(b"changed since published")
+    await u.open(f"/p/{pid}")
+    await u.should_see("Saved draft unavailable — not approved for fabrication")
+    await u.should_see("This project's files aren't available to preview.")
+
+
+@pytest.mark.parametrize("has_evidence", [True, False])
+async def test_restart_only_delivers_review_attempt_with_current_evidence(harness, monkeypatch, has_evidence):
+    u, web, store, acct = harness
+    monkeypatch.setattr(web.notify, "notify_run_event", lambda *a, **kw: None)
+    pid, root, _, archive, _, _ = _review_project(store, acct.id, status="running")
+    if not has_evidence:
+        archive.unlink()
+    job_id = store.enqueue_build(workspace=str(root), project_id=pid, user_id=acct.id,
+                                 attempt_generation=0)
+    assert store.claim_build(job_id, "test-worker")
+    assert store.finish_build(job_id, rc=REVIEW_REQUIRED_RC)
+    web._finalize_orphan(store.get_build_job(job_id))
+    await _login(u)
+    await u.open("/projects")
+    if has_evidence:
+        await u.should_see("Draft ready — USB fabrication confirmation needed")
+        await u.should_see("Download editable draft source (.zip)")
+    else:
+        await u.should_see("Failed")
+        await u.should_see("The build did not produce a current, verifiable editable draft.")
+        await u.should_not_see("Download")
+
+
+@pytest.mark.parametrize("kind", ["build", "manual_route"])
+async def test_rebuild_review_is_terminal_without_failure(harness, monkeypatch, kind):
+    u, web, store, acct = harness
+    monkeypatch.setattr(web.notify, "notify_run_event", lambda *a, **kw: None)
+    pid, root, _, _, _, _ = _review_project(store, acct.id, status="running")
+    state = {
+        "ws": str(root), "project_id": pid, "user_id": acct.id, "attempt_generation": 0,
+        "brief": "USB controller", "events": [], "running": True,
+        "zip": str(root / "kicraft_project.zip"),
+    }
+    (root / "kicraft_project.zip").write_bytes(b"previous fabrication package")
+    monkeypatch.setattr(web, "_drive_build_queue", lambda *a, **kw: REVIEW_REQUIRED_RC)
+    web._rerun_build_worker(state, kind)
+    await _login(u)
+    await u.open(f"/?project={pid}")
+    await u.should_see("Download editable draft source (.zip)")
+    await u.should_not_see("Download KiCad project (.zip)")
+    await u.should_not_see("Run stopped")

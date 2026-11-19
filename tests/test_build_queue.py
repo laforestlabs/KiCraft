@@ -19,6 +19,7 @@ import pytest
 from account_fixtures import seed_project
 
 import kicraft.build_slots as build_slots
+from kicraft.build_outcome import REVIEW_REQUIRED_RC
 from kicraft.build_slots import (
     ACQUIRED_MARKER,
     WAITING_MARKER,
@@ -310,16 +311,17 @@ def test_worker_runs_job_and_logs(store, tmp_path, monkeypatch):
     assert "hello from build" in (ws / ".kicraft" / "build.log").read_text()
 
 
-def test_worker_records_nonzero_rc(store, tmp_path, monkeypatch):
+@pytest.mark.parametrize("rc", [7, REVIEW_REQUIRED_RC], ids=["verification-rejected", "review-draft"])
+def test_worker_records_nonzero_rc(store, tmp_path, monkeypatch, rc):
     monkeypatch.setenv("KICRAFT_BUILD_SLOTS", "0")
     ws = _ws(tmp_path)
     j = store.enqueue_build(workspace=str(ws))
-    w = BuildWorker(store, build_cmd=[sys.executable, "-c", "raise SystemExit(7)"],
+    w = BuildWorker(store, build_cmd=[sys.executable, "-c", f"raise SystemExit({rc})"],
                     poll_s=0.05)
     w.run_once()
     _drain(w)
     job = store.get_build_job(j)
-    assert job.status == "done" and job.rc == 7
+    assert job.status == "done" and job.rc == rc
 
 
 def test_worker_missing_workspace_fails_job(store, tmp_path):
@@ -441,6 +443,16 @@ def test_notify_sends_when_user_away(store, sent):
     assert html_body and 'href="https://kicraft.io/?project=7"' in html_body
 
 
+def test_notify_review_draft_does_not_claim_fabrication_ready(store, sent):
+    u = store.create_user("draft@example.com", "pw12345678")
+    assert notify.notify_run_event(store, _settings(), user_id=u.id, project_id=7,
+                                   status="review_required", brief="USB board")
+    _, subject, body, html_body = sent[0]
+    assert "review" in subject.lower()
+    assert "fabrication confirmation" in body.lower()
+    assert "not a fabrication package" in body.lower()
+    assert "Review your draft" in html_body
+    assert 'href="https://kicraft.io/?project=7"' in html_body
 
 
 def test_notify_suppressed_while_watching(store, sent):

@@ -61,6 +61,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+from kicraft.build_outcome import REVIEW_REQUIRED_RC
 from kicraft.build_slots import ACQUIRED_MARKER, resolve_build_slots
 from kicraft.proc_tree import kill_tree
 from kicraft.design.advisories import recorded_advisory_codes
@@ -124,11 +125,9 @@ def _find_parent_board(rundir: Path) -> Path | None:
 
 
 # Build outcomes that leave a PROMOTED ROUTED parent at
-# ``generated/<stem>/<stem>.kicad_pcb``: rc=0 (fab-ready) and rc=7 (not
-# fab-ready, DRC) both composed + routed + promoted a parent, so the shape was
-# stamped. Every other outcome -- rc=6 (route/infra abort), rc<=5 (synthesis
-# death), None -- leaves only the rectangular synthesis SEED STUB on that path.
-_PROMOTED_PARENT_RCS = frozenset({0, 7})
+# ``generated/<stem>/<stem>.kicad_pcb``: fab-ready, DRC-failed, and
+# review-required outcomes all leave a promoted routed parent.
+_PROMOTED_PARENT_RCS = frozenset({0, 7, REVIEW_REQUIRED_RC})
 
 
 def _outline_check(entry: dict, rundir: Path, build_rc: int | None) -> dict | None:
@@ -220,6 +219,7 @@ _BUILD_RC_LABEL = {
     5: "synthesis check failed",  # refined per failed check by _build_label()
     6: "route/infra failed",
     7: "not fab-ready (DRC)",
+    REVIEW_REQUIRED_RC: "review required (not fab-ready)",
 }
 
 
@@ -1252,7 +1252,10 @@ def evaluate_one(
             "status": "completed" if judge.get("ran") else "skipped",
             "cost_usd": round(float(judge.get("cost_usd") or 0.0), 6),
         }
-        rec["delivery_status"] = "fab-ready" if build_rc == 0 else "not-delivered"
+        rec["delivery_status"] = (
+            "fab-ready" if build_rc == 0 else
+            "review_required" if build_rc == REVIEW_REQUIRED_RC else "not-delivered"
+        )
         # Deterministic outline-shape check (shaped briefs only). Reported
         # alongside the rubric score, not folded into the 100-pt scale -- the
         # rubric's finalize rejects N/A dimensions, and it would only apply to

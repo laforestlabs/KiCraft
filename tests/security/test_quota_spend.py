@@ -38,6 +38,18 @@ def test_awaiting_input_and_ok_still_consume_quota(store):
     assert store.count_active_designs(u.id, TIERS["free"]["window_days"]) == 0
 
 
+def test_review_required_consumes_quota_and_cannot_be_repeated_for_free(store):
+    u = store.create_user("draft@x.io", "pw", tier="free")
+    u = store.consume_verification_token(store.create_verification_token(u.id))
+    for _ in range(TIERS["free"]["limit"]):
+        pid = store.create_project(u.id, "USB board")
+        assert pid is not None
+        store.finish_project(pid, "review_required", zip_path="/old/fab.zip")
+        assert store.get_project(pid).zip_path is None
+    assert store.count_active_designs(u.id, TIERS["free"]["window_days"]) == TIERS["free"]["limit"]
+    assert store.create_project(u.id, "another USB board") is None
+
+
 def test_paid_tiers_have_higher_but_finite_limits(store):
     for tier in ("pro", "max"):
         u = store.create_user(f"{tier}@x.io", "pw", tier=tier)

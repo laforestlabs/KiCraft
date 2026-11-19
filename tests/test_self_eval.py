@@ -1372,6 +1372,8 @@ def test_build_label_rc5_distinguishes_failed_check(tmp_path):
     # Non-rc5 labels and None are unchanged.
     assert se._build_label(0, erc) == "fab-ready"
     assert se._build_label(7, erc) == "not fab-ready (DRC)"
+    assert se._build_label(9, erc) == "review required (not fab-ready)"
+    assert 9 in se._PROMOTED_PARENT_RCS
     assert se._build_label(None, erc) is None
 
 

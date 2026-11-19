@@ -395,7 +395,7 @@ def test_promoted_fab_refuses_missing_or_weakened_recipe_thermal_contract(
     _, artifacts = _build_context(tmp_path, "BOARD")
     monkeypatch.setattr(silk_legend, "apply_silk_legend", lambda *a: {})
     monkeypatch.setattr(cli_app, "_verify_routed_board", lambda *a, **k: {
-        "ok": True, "fab_acceptable": True, "shorts": 0, "unconnected": 0,
+        "ok": True, "physical_ok": True, "fab_acceptable": True, "shorts": 0, "unconnected": 0,
         "tracks": {"footprint_refs": [p.ref for p in state.bom.parts]}, "reasons": [],
     })
     monkeypatch.setattr(cli_app, "_shipped_advisory_codes", lambda state: [])
@@ -478,7 +478,7 @@ def test_promoted_two_ounce_board_rejects_actual_narrow_trace_without_metadata(
     state, artifacts = _build_context(tmp_path, "BOARD")
     monkeypatch.setattr(silk_legend, "apply_silk_legend", lambda *a: {})
     monkeypatch.setattr(cli_app, "_verify_routed_board", lambda *a, **k: {
-        "ok": True, "fab_acceptable": True, "shorts": 0, "unconnected": 0,
+        "ok": True, "physical_ok": True, "fab_acceptable": True, "shorts": 0, "unconnected": 0,
         "tracks": {"footprint_refs": []}, "reasons": [],
     })
     monkeypatch.setattr(cli_app, "_shipped_advisory_codes", lambda state: [])

@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
+from kicraft.build_outcome import REVIEW_REQUIRED_RC
 from kicraft.design.stage_state import (
     downstream_stages as _downstream_stages,
     invalidate_downstream,
@@ -148,6 +149,8 @@ def derive_stage_statuses(
         if design_complete and fab_gated
         else "failed"
         if design_complete and pcb_ready and (failed or route_error or verify_error)
+        else "warning"
+        if design_complete and pcb_ready and project_status == "review_required"
         else "warning"
         if design_complete and zip_ok and has_warnings
         else "done"
@@ -1798,9 +1801,9 @@ def run_build_recovery(
     geometry, never relaxes a gate, and never restarts the budget.
 
     Returns ``{rc, attempts, max_attempts, status, failure_kind, events,
-    needs_input, questions}`` where status is ``ok`` (a build completed),
-    ``recovered`` (a revision rebuilt successfully), ``blocked``,
-    ``exhausted``, or ``awaiting_input``.
+    needs_input, questions}`` where status is ``ok`` (a fab-ready build),
+    ``recovered`` (a revision rebuilt successfully), ``review_required``
+    (a physically valid draft), ``blocked``, ``exhausted``, or ``awaiting_input``.
     """
     ws = Path(ws)
     state = read_build_recovery(ws)
@@ -1809,7 +1812,7 @@ def run_build_recovery(
     seen_failures = state.failure_fingerprints
     seen_choices = set(state.choice_fingerprints)
     rc = build()
-    if rc == 0:
+    if rc in (0, REVIEW_REQUIRED_RC):
         write_build_recovery(
             ws,
             ok=True,
@@ -1823,7 +1826,8 @@ def run_build_recovery(
             "rc": rc,
             "attempts": attempts,
             "max_attempts": max_attempts,
-            "status": "ok" if attempts == 0 else "recovered",
+            "status": ("review_required" if rc == REVIEW_REQUIRED_RC
+                       else "ok" if attempts == 0 else "recovered"),
             "failure_kind": None,
             "events": state.events,
             "needs_input": False,
@@ -2052,7 +2056,7 @@ def run_build_recovery(
                 "events": state.events, "needs_input": False, "questions": [],
             }
         rc = build()
-        if rc == 0:
+        if rc in (0, REVIEW_REQUIRED_RC):
             write_build_recovery(
                 ws, ok=True, run_id=run_id, attempts=attempts,
                 max_attempts=max_attempts, choice_fingerprints=list(seen_choices),
@@ -2065,7 +2069,8 @@ def run_build_recovery(
             )
             return {
                 "rc": rc, "attempts": attempts, "max_attempts": max_attempts,
-                "status": "recovered", "failure_kind": None,
+                "status": "review_required" if rc == REVIEW_REQUIRED_RC else "recovered",
+                "failure_kind": None,
                 "events": state.events, "needs_input": False, "questions": [],
             }
 

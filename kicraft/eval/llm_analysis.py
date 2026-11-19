@@ -12,6 +12,7 @@ import sys
 from collections import Counter, defaultdict
 from pathlib import Path
 
+from kicraft.build_outcome import REVIEW_REQUIRED_RC
 from kicraft.cli.web_cost_report import (
     load_rows,
     load_stage_attempts,
@@ -802,6 +803,8 @@ def _one_run(batch: Path, record: dict, spend: list[dict], stage_rows: list[dict
         build_outcome = "not_run"
     elif build_rc == 0:
         build_outcome = "fab_ready"
+    elif build_rc == REVIEW_REQUIRED_RC:
+        build_outcome = "review_required"
     elif build_rc == 7:
         build_outcome = "drc_failed"
     else:

@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from kicraft.build_outcome import REVIEW_REQUIRED_RC
 from kicraft.server.session import (
     BUILD_RECOVERY_MAX_ATTEMPTS,
     classify_build_failure,
@@ -181,6 +182,30 @@ def test_infrastructure_failure_is_not_a_circuit_change(tmp_path):
 
 
 # ---- the loop -------------------------------------------------------------
+
+def test_review_required_is_terminal_without_redrive(tmp_path):
+    _state(tmp_path)
+    _failing(tmp_path, [("9.12 ERC", ["Pin U1.3 not connected"])])
+    script = _Script(tmp_path, rcs=[REVIEW_REQUIRED_RC])
+    result = run_build_recovery(tmp_path, "USB board", script.build, redrive=script.redrive)
+    assert result["status"] == "review_required"
+    assert result["rc"] == REVIEW_REQUIRED_RC
+    assert result["failure_kind"] is None
+    assert result["attempts"] == 0
+    assert script.builds == 1
+    assert script.redrives == []
+
+
+def test_repair_can_finish_as_review_required(tmp_path):
+    _state(tmp_path)
+    _failing(tmp_path, [("9.12 ERC", ["Pin U1.3 not connected"])])
+    script = _Script(tmp_path, rcs=[5, REVIEW_REQUIRED_RC])
+    result = run_build_recovery(tmp_path, "USB board", script.build, redrive=script.redrive)
+    assert result["status"] == "review_required"
+    assert result["rc"] == REVIEW_REQUIRED_RC
+    assert result["attempts"] == 1
+    assert script.builds == 2
+    assert len(script.redrives) == 1
 
 
 def test_local_repair_preserves_siblings_and_recovers(tmp_path):
@@ -615,3 +640,23 @@ def test_headless_pipeline_uses_the_shared_recovery(tmp_path, monkeypatch):
     assert builds["n"] == 2
     assert driver_calls[-1]["stages"] == ["wiring"]
     assert driver_calls[-1]["instruction"].startswith("The deterministic build failed")
+
+
+def test_headless_pipeline_returns_review_required(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from kicraft.server import stage_pipeline as sp
+
+    _state(tmp_path)
+
+    def drive(stages, brief, workspace, **kwargs):
+        return ([{"stage": stage, "commit_ok": True} for stage in stages],
+                {}, str(tmp_path / ".kicraft" / "state.json"))
+
+    monkeypatch.setattr(sp, "drive_chain", drive)
+    monkeypatch.setattr(sp, "run_design_cli",
+                        lambda *args, **kwargs: SimpleNamespace(returncode=REVIEW_REQUIRED_RC))
+    result = sp.run_pipeline("USB board", tmp_path, stages=("intent",), build=True,
+                             client=object())
+    assert result["build_rc"] == REVIEW_REQUIRED_RC
+    assert result["build_recovery"]["status"] == "review_required"

@@ -1849,16 +1849,15 @@ class ArtifactPaths(BaseModel):
     custom_footprint_dir: Path | None = None
     routed_pcb: Path | None = None  # set by `build`: promoted fully-routed board
     fab_zip: Path | None = None  # set by `build`: zipped Gerber/drill/CPL/BOM package
+    review_zip: Path | None = None  # editable draft sources, never fabrication output
     step_file: Path | None = None  # STEP export; body-reference coverage may be partial
     board_3d_png: Path | None = None  # set by `build`: rendered 3D view of the board
     layout_history_manifest: Path | None = None
     # None = unmeasured/uninterpretable; [] = every expected assembly ref occurs.
     # Occurrence presence alone does not qualify model geometry or placement.
     step_model_missing_refs: list[str] | None = None
-    status: str = "ok"  # "ok" if all §9 checks passed, else "failed"
-    # Non-blocking fab-readiness warnings (e.g. a minor, fraction-of-a-mm
-    # courtyard clip). The board IS fab-exported + 3D-rendered; these surface as
-    # a yellow caution in the UI rather than a red failure.
+    status: str = "ok"  # "ok", "review_required", or "failed"
+    # Non-blocking physical or manufacturing-qualification warnings.
     build_warnings: list[str] = Field(default_factory=list)
     # Electrical-review findings persisted for the GUI inspector (structured,
     # with suggestions, vs the build_log lines which are bare text).

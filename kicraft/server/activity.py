@@ -103,6 +103,7 @@ PHASE_STATUSES = (
     "awaiting_input",
     "failed",
     "interrupted",
+    "review_required",
     "complete",
 )
 
@@ -116,6 +117,7 @@ PRESENTATION_STATUSES = (
     "finalizing",
     "complete",
     "complete_with_warnings",
+    "review_required",
     "stale",
     "failed",
     "interrupted",
@@ -128,6 +130,7 @@ ACTIONS = (
     "continue",
     "rebuild",
     "download",
+    "download_review",
     "open",
     "new_from_brief",
     "support",
@@ -376,10 +379,11 @@ def reduce_activity(previous: dict | None, event: dict) -> dict:
 
     if kind == "run_finished":
         status = str(event.get("status") or "")
-        if status in ("ok", "failed", "awaiting_input", "interrupted"):
+        if status in ("ok", "review_required", "failed", "awaiting_input", "interrupted"):
             act["finished_at"] = ts or now_iso()
         act["phase_status"] = {
             "ok": "complete",
+            "review_required": "review_required",
             "failed": "failed",
             "awaiting_input": "awaiting_input",
             "interrupted": "interrupted",
@@ -387,13 +391,17 @@ def reduce_activity(previous: dict | None, event: dict) -> dict:
         if event.get("stage"):
             act["stage"] = event.get("stage")
         failure_kind = event.get("failure_kind")
-        if (status and status != "ok") or failure_kind:
+        if status == "review_required":
+            act["failure"] = None
+        elif (status and status != "ok") or failure_kind:
             # The cause a structured event already recorded ("BOM failed")
             # outranks whatever the activity line holds at that moment: the last
             # line can be a driver's raw stdout dump, which is not a cause. Only
             # text that may be shown to a person is carried into the fact.
             prior = act.get("failure") or {}
-            message = (human_failure_text(prior.get("message"))
+            message = (human_failure_text(event.get("message"))
+                       if failure_kind == "draft_evidence_unavailable" else
+                       human_failure_text(prior.get("message"))
                        or human_failure_text(act.get("last_activity")))
             act["failure"] = _failure_fact(
                 kind=failure_kind or prior.get("kind"),
@@ -408,6 +416,7 @@ def reduce_activity(previous: dict | None, event: dict) -> dict:
             )
         act["last_activity"] = {
             "ok": "Run finished",
+            "review_required": "Draft ready — USB fabrication confirmation needed",
             "failed": "Run stopped",
             "awaiting_input": "Waiting for your answer",
             "interrupted": "Run was interrupted",
@@ -544,7 +553,9 @@ def reduce_activity(previous: dict | None, event: dict) -> dict:
         return act
 
     if kind == "build_done":
-        if not event.get("ok"):
+        if event.get("review_required"):
+            act["last_activity"] = "Checking draft verification"
+        elif not event.get("ok"):
             message = "Board build failed"
             stage = act.get("stage")
             if stage:

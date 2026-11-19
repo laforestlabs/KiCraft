@@ -48,6 +48,16 @@ def test_fts_available(store):
     assert store._fts_enabled is True
 
 
+def test_public_review_draft_is_searchable_but_not_fab_ready(store):
+    u = store.create_user("draft@e.st", "pw")
+    pid = _indexed(store, u.id, "USB draft", _state("USB board"),
+                   status="review_required")
+    store.set_quality(pid, "fab_ready")
+    assert [row["id"] for row in store.list_public_projects(query="USB")] == [pid]
+    assert store.list_public_projects(badge="fab_ready") == []
+    assert store.get_project(pid).quality is None
+
+
 def test_build_fts_document_flattens_state():
     doc = build_fts_document(
         "an esp32 board",

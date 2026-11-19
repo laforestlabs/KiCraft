@@ -12,6 +12,20 @@ kicraft artifacts --project <synthesized-project-dir> --kind all      # human
 kicraft artifacts --project <dir> --kind placed --json                # machine
 ```
 
+USB builds without manufacturer confirmation use calculated provisional geometry
+and continue placement/routing. When physical checks pass they return `9` and
+persist `artifacts.status: review_required`, `routed_pcb`, and a separate
+`review_zip` (`<stem>_review.zip`). The archive contains editable design sources,
+not manufacturing outputs; `fab_zip` and the project's fabrication `zip_path`
+remain null. Board-bound `.engineering-review.receipt.json` and
+`.verification.receipt.json` distinguish physical validity from fabrication
+approval. The UI labels this **Draft ready — USB fabrication confirmation needed**.
+Actual physical failures remain failures; missing approval alone is a warning.
+Review archives publish atomically: rebuilding the same workspace cannot truncate
+an already authorized download. Failed archive writes leave the prior archive
+intact; physical validity never sets `fab_acceptable` for an unapproved draft.
+
+
 ## On-disk layout
 
 A synthesized project keeps every board the layout engine produces under

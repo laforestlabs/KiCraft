@@ -21,21 +21,25 @@ import json
 import os
 import re
 import shutil
-import zipfile
 import ssl
+import stat
 import subprocess
 import threading
 import time
 import urllib.error
 import urllib.request
 import uuid
+import zipfile
+import zlib
 from concurrent.futures import ThreadPoolExecutor
+from functools import lru_cache
 from pathlib import Path
 from urllib.parse import quote
 
 from nicegui import app, ui
+from starlette.background import BackgroundTask
 from starlette.requests import Request
-from starlette.responses import PlainTextResponse, RedirectResponse
+from starlette.responses import PlainTextResponse, RedirectResponse, StreamingResponse
 
 from .accounts import (
     _RESET_TTL_SECONDS,
@@ -84,6 +88,7 @@ from .session import (
 )
 from .spend_guard import SpendGuard
 from kicraft import __version__ as KICRAFT_VERSION
+from kicraft.build_outcome import REVIEW_REQUIRED_RC, USB_REVIEW_WARNING
 from kicraft.build_slots import ACQUIRED_MARKER, slot_count
 from kicraft.design.advisories import advisory_code
 from kicraft.fsutil import atomic_write_text
@@ -230,7 +235,7 @@ def _attempt_elapsed_s(activity: dict, *, now: dt.datetime | None = None) -> flo
         started = dt.datetime.fromisoformat(activity["started_at"])
         ended = activity.get("finished_at")
         if not ended and activity.get("phase_status") in (
-            "complete", "failed", "interrupted", "awaiting_input",
+            "complete", "review_required", "failed", "interrupted", "awaiting_input",
         ):
             ended = activity.get("last_event_at")
         stop = dt.datetime.fromisoformat(ended) if ended else (
@@ -272,25 +277,25 @@ def _finalize_orphan_locked(job) -> None:
                 "orphan_job_id": job.id}
     if ws is not None and ws.is_dir():
         st["stem"] = _read_project_stem(ws) or p.project_stem
+        pd = _current_attempt_project_dir(ws, job.attempt_generation, job.kind)
         if job.status in ("done", "failed"):
             from kicraft.layout_history_export import recover_terminated_capture
-            recover_terminated_capture(
-                _current_attempt_project_dir(ws, job.attempt_generation, job.kind),
-                generation=job.attempt_generation, build_rc=job.rc,
-            )
-        if st["ok"]:
-            st["zip"] = _zip_generated(
-                ws, _current_attempt_project_dir(ws, job.attempt_generation, job.kind))
+            recover_terminated_capture(pd, generation=job.attempt_generation, build_rc=job.rc)
+        if job.status == "done" and job.rc == REVIEW_REQUIRED_RC:
+            _adopt_review_outcome(st, ws, pd)
+        elif st["ok"]:
+            st["zip"] = _zip_generated(ws, pd)
             st["ok"] = bool(st["zip"])
     else:
         st["stem"] = p.project_stem
-    if not st["ok"]:
-        st["failure_kind"] = "orphaned_build"
+    if not st["ok"] and st.get("status") != "review_required":
+        st.setdefault("failure_kind", "orphaned_build")
     _record_reconciliation(
-        st, status="ok" if st["ok"] else "failed",
-        message=("The build finished after the web process restarted."
-                 if st["ok"] else
-                 "The build was interrupted when the web process restarted."))
+        st, status=st.get("status") or ("ok" if st["ok"] else "failed"),
+        message=(_DRAFT_EVIDENCE_UNAVAILABLE if st.get("failure_kind") == "draft_evidence_unavailable"
+                 else "The build finished after the web process restarted."
+                 if st["ok"] or st.get("status") == "review_required"
+                 else "The build was interrupted when the web process restarted."))
     _persist_project(st)
 
 
@@ -1080,7 +1085,7 @@ def _read_state_json(ws: Path) -> dict:
     try:
         data = json.loads(_state_path(ws).read_text(encoding="utf-8"))
         return data if isinstance(data, dict) else {}
-    except (OSError, json.JSONDecodeError):
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
         return {}
 
 
@@ -1893,11 +1898,12 @@ def _inspector_spec(stage: str, sj: dict, run_status: dict, project_dir: Path | 
             secs.append({"type": "assurance", "assurance": assurance})
         arts = sj.get("artifacts") or {}
         if arts:
+            draft = arts.get("status") == "review_required"
             secs.append({"type": "kv", "title": "Artifacts", "rows": [
-                ("status", arts.get("status", "")),
-                ("fab package", "ready" if arts.get("fab_zip") else "pending"),
-                ("STEP model", _step_model_summary(arts)),
-                ("3D render", "ready" if arts.get("board_3d_png") else "pending")]})
+                ("status", "Editable draft — confirmation needed" if draft else arts.get("status", "")),
+                ("fab package", "not exported" if draft else "ready" if arts.get("fab_zip") else "pending"),
+                ("STEP model", "not exported" if draft else _step_model_summary(arts)),
+                ("3D render", "not exported" if draft else "ready" if arts.get("board_3d_png") else "pending")]})
             secs.extend(_silk_sections(sj, arts))
         log = _build_lines_for("fab", build_lines)
         if log:
@@ -2461,7 +2467,9 @@ def _finish_attempt(state: dict) -> None:
     exists even if the snapshot never lands. The auto-filed support report's id
     is included only when the report was actually created.
     """
-    if state.get("status") == "awaiting_input":
+    if state.get("status") == "review_required":
+        status = "review_required"
+    elif state.get("status") == "awaiting_input":
         status = "awaiting_input"
     elif state.get("ok") is False:
         status = "failed"
@@ -2472,11 +2480,13 @@ def _finish_attempt(state: dict) -> None:
     event = {
         "kind": "run_finished",
         "status": status,
-        "stage": _attempt_stage(state),
+        "stage": "place_route" if status == "review_required" else _attempt_stage(state),
     }
     for key in ("failure_kind", "retryable", "retry_action"):
         if state.get(key) is not None:
             event[key] = state.get(key)
+    if state.get("failure_kind") == "draft_evidence_unavailable":
+        event.update(stage="place_route", message=_DRAFT_EVIDENCE_UNAVAILABLE)
     if status == "failed" and state.get("support_report_id") is not None:
         event["support_report_id"] = state.get("support_report_id")
     _record_progress_event(state, event)
@@ -2525,6 +2535,9 @@ def _record_reconciliation(state: dict, *, status: str, message: str) -> None:
     _record_progress_event(
         state,
         {"kind": "run_finished", "status": status, "message": message,
+         "failure_kind": state.get("failure_kind"),
+         "stage": "place_route" if status == "review_required"
+         or state.get("failure_kind") == "draft_evidence_unavailable" else None,
          "reconciled": True},
     )
     _close_journal(state)
@@ -2666,6 +2679,8 @@ def _select_stage(pres: dict, derived: dict) -> str | None:
     if pres.get("status") == "interrupted" and pres.get("stage"):
         # An interrupted attempt's own last stage is what the user was watching.
         return pres["stage"]
+    if pres.get("status") == "review_required":
+        return "place_route"
     for key in order:
         if derived.get(key) == "failed":
             return key
@@ -2697,7 +2712,7 @@ def _pick_default_project(user_id: int):
         if p.status == "running" and p.id in _LIVE_RUNS:
             return p
     for p in projs:
-        if p.status in ("ok", "failed") and p.dir_path and not p.viewed_at:
+        if p.status in ("ok", "review_required", "failed") and p.dir_path and not p.viewed_at:
             return p
     return None
 
@@ -2807,12 +2822,14 @@ def _durable_attempt_outcome(root: Path | None) -> dict:
                 "stage": event.get("stage"),
                 "status": str(event.get("status") or ""),
                 "failure_kind": event.get("failure_kind"),
+                "message": _activity.human_failure_text(event.get("message")),
                 "retryable": event.get("retryable"),
                 "retry_action": event.get("retry_action"),
             }
     if outcome.get("status") not in ("failed", "interrupted"):
         return {}
-    message = cause_text or stage_statement
+    message = (outcome.get("message") if outcome.get("failure_kind") == "draft_evidence_unavailable"
+               else cause_text or stage_statement)
     if not message:
         return {}
     stage = outcome.get("stage")
@@ -2958,6 +2975,226 @@ def _file_sha256(path: Path) -> str | None:
         return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
     except OSError:
         return None
+
+_DRAFT_EVIDENCE_UNAVAILABLE = "The build did not produce a current, verifiable editable draft."
+
+
+def _draft_file_id(s: os.stat_result) -> tuple[int, int, int, int, int]:
+    if not stat.S_ISREG(s.st_mode):
+        raise ValueError("draft input is not a regular file")
+    return s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns
+
+
+def _draft_stamp(path: Path) -> tuple[int, int, int, int, int]:
+    return _draft_file_id(path.stat())
+
+
+@lru_cache(maxsize=32)
+def _draft_source_members(archive: Path, stamp: tuple, stem: str) -> tuple[str, ...]:
+    """Accept only the source-file classes the draft producer packages."""
+    notice = "DRAFT-NOT-FOR-FABRICATION.txt"
+    required = {
+        f"{stem}.kicad_pcb", f"{stem}.kicad_sch", f"{stem}.kicad_pro",
+        f"{stem}_autoplacer.json", f"{stem}.verification.receipt.json",
+        f"{stem}.engineering-review.receipt.json",
+    }
+    with zipfile.ZipFile(archive) as z:
+        entries = z.infolist()
+    names = [info.filename for info in entries]
+    if len(names) != len(set(names)) or not required.union({notice}).issubset(names):
+        raise ValueError("draft archive is missing required sources or has duplicates")
+    for info in entries:
+        name = info.filename
+        path = Path(name)
+        if (path.is_absolute() or path.as_posix() != name or ".." in path.parts
+                or "\\" in name or stat.S_IFMT(info.external_attr >> 16) not in (0, stat.S_IFREG)):
+            raise ValueError("invalid draft archive member")
+        if len(path.parts) == 1:
+            if (name in required or name in (notice, "sym-lib-table", "fp-lib-table",
+                                              f"{stem}.usb-routing.receipt.json")
+                    or path.suffix in (".kicad_sch", ".kicad_sym")):
+                continue
+        elif ((path.parts[0] == "3dmodels" and path.suffix in (".step", ".stp", ".wrl"))
+              or (path.parts[0].endswith(".pretty") and path.suffix == ".kicad_mod")):
+            continue
+        raise ValueError("draft archive contains non-source data")
+    return tuple(name for name in names if name != notice)
+
+
+@lru_cache(maxsize=32)
+def _draft_archive_matches(archive: Path, stamp: tuple, sources: tuple,
+                           board: Path, provenance: Path, provenance_stamp: tuple,
+                           generation: int) -> bool:
+    # Stamps invalidate the cache when files change independently of state.json.
+    review_path = board.with_suffix(".engineering-review.receipt.json")
+    verify_path = board.with_suffix(".verification.receipt.json")
+    review, verify, promoted = map(_json_dict, (review_path, verify_path, provenance))
+    data = board.read_bytes()
+    digest = hashlib.sha256(data).hexdigest()
+    if (review.get("mode") != "engineering_review"
+            or review.get("physical_ok") is not True
+            or review.get("fabrication_approved") is not False
+            or review.get("board_sha256") != digest
+            or type(review.get("attempt_generation")) is not int
+            or review["attempt_generation"] != generation
+            or not review.get("run_id") or review["run_id"] != promoted.get("run_id")
+            or review.get("run_started_at") is None
+            or review["run_started_at"] != promoted.get("run_started_at")
+            or promoted.get("fresh") is not True or promoted.get("source_kind") != "routed"
+            or promoted.get("md5") != hashlib.md5(data).hexdigest()
+            or review.get("verification_receipt") != verify_path.name
+            or verify.get("ok") is not True
+            or verify.get("physical_ok") is not True
+            or verify.get("review_required") is not True
+            or verify.get("fab_acceptable") is not False
+            or verify.get("board_sha256") != digest):
+        return False
+    with zipfile.ZipFile(archive) as z:
+        notice = (USB_REVIEW_WARNING + "\n").encode("utf-8")
+        with z.open("DRAFT-NOT-FOR-FABRICATION.txt") as entry:
+            if entry.read(len(notice) + 1) != notice:
+                return False
+        for name, source, source_stamp in sources:
+            if z.getinfo(name).file_size != source_stamp[2]:
+                return False
+            with z.open(name) as entry, source.open("rb") as original:
+                for chunk in iter(lambda: original.read(1 << 20), b""):
+                    if entry.read(len(chunk)) != chunk:
+                        return False
+                if entry.read(1):
+                    return False
+    return True
+
+
+def _current_review_zip(root: Path | None, generation, *, state: dict | None = None
+                        ) -> tuple[str, tuple[int, int, int, int, int]] | None:
+    """Resolve only a physically verified draft bound to this attempt and run."""
+    if root is None or type(generation) is not int:
+        return None
+    sj = state if state is not None else _read_state_json(root)
+    arts = sj.get("artifacts")
+    stem = sj.get("project_stem")
+    if (not isinstance(arts, dict) or not isinstance(stem, str)
+            or not stem or Path(stem).name != stem
+            or arts.get("status") != "review_required" or arts.get("fab_zip")):
+        return None
+    try:
+        root = root.resolve()
+        generated = root / "generated"
+
+        def local(value):
+            path = Path(value)
+            path = path if path.is_absolute() else root / path
+            if path.is_symlink():
+                raise ValueError("draft artifact pointer is a symbolic link")
+            path = path.resolve()
+            path.relative_to(generated)
+            return path
+
+        project = local(arts["project_dir"])
+        board = local(arts["routed_pcb"])
+        archive = local(arts["review_zip"])
+        if (project.name != stem or board != project / f"{stem}.kicad_pcb"
+                or archive != project / f"{stem}_review.zip"):
+            return None
+        stamp = _draft_stamp(archive)
+        members = _draft_source_members(archive, stamp, stem)
+        sources = []
+        for name in members:
+            source = project / name
+            if source.resolve() != source:
+                return None
+            sources.append((name, source, _draft_stamp(source)))
+        provenance = board.with_suffix(".provenance.json")
+        if provenance.resolve() != provenance:
+            return None
+        if _draft_archive_matches(archive, stamp, tuple(sources), board, provenance,
+                                  _draft_stamp(provenance), generation):
+            return str(archive), stamp
+    except (OSError, ValueError, TypeError, KeyError, RuntimeError, EOFError,
+            zipfile.BadZipFile, zlib.error):
+        pass
+    return None
+
+
+def _adopt_review_outcome(state: dict, ws: Path, project_dir: Path | None) -> None:
+    """RC 9 stops design recovery, but only evidence makes it a deliverable."""
+    state["zip"] = None
+    sj = _read_state_json(ws)
+    statuses = _derived_statuses(ws, sj, "review_required", False) if project_dir else {}
+    draft = (_current_review_zip(ws, state["attempt_generation"], state=sj)
+             if project_dir and all(statuses[s] in ("done", "warning") for s in DESIGN_STAGES)
+             else None)
+    if draft and Path(draft[0]).parent == project_dir.resolve():
+        state.update(status="review_required", ok=None, failed=False)
+    else:
+        state.update(status=None, ok=False, failed=True, failure_kind="draft_evidence_unavailable")
+
+
+@app.get("/project-draft/{project_id}/{generation}")
+def download_project_draft(project_id: int, generation: int):
+    """Recheck the logged-in owner, attempt and current evidence at file fetch."""
+    unavailable = PlainTextResponse("Draft is no longer available.", status_code=404,
+                                    headers={"Cache-Control": "private, no-store"})
+    user = _current_user()
+    if user is None or user.accepted_terms_version != LEGAL_VERSION:
+        return unavailable
+    with _ATTEMPT_LOCK:
+        p = _store().get_project(project_id)
+        if (p is None or p.user_id != user.id or p.status != "review_required"
+                or p.attempt_generation != generation):
+            return unavailable
+        live = _LIVE_RUNS.get(p.id)
+        job = _newest_project_job(p.id, user.id)
+        root = _project_root_for(p, p.id)
+        pres = _project_presentation(p, live=live, job=job,
+                                     state_json=_read_state_json(root) if root is not None else {})
+        path = pres["review_zip"]
+        if not path:
+            return unavailable
+        try:
+            stream = Path(path).open("rb")
+        except OSError:
+            return unavailable
+        try:
+            current = _store().get_project(project_id)
+            if (_draft_file_id(os.fstat(stream.fileno())) != pres["review_stamp"]
+                    or current is None or current.user_id != user.id
+                    or current.status != "review_required"
+                    or current.attempt_generation != generation):
+                stream.close()
+                return unavailable
+        except (OSError, ValueError):
+            stream.close()
+            return unavailable
+
+    def chunks():
+        with stream:
+            yield from iter(lambda: stream.read(1 << 20), b"")
+
+    return StreamingResponse(chunks(), media_type="application/zip", headers={
+        "Cache-Control": "private, no-store",
+        "Content-Disposition": f"attachment; filename*=UTF-8''{quote(Path(path).name)}",
+    }, background=BackgroundTask(stream.close))
+
+
+def _download_review_project(project_id: int, generation: int) -> None:
+    ui.download.from_url(f"/project-draft/{project_id}/{generation}")
+
+
+def _download_current_fab(project_id: int, generation: int, path: str) -> None:
+    """A stale browser button cannot deliver an earlier attempt's fab package."""
+    with _ATTEMPT_LOCK:
+        user = _current_user()
+        p = _store().get_project(project_id) if user else None
+        if (p is not None and p.user_id == user.id and p.status == "ok"
+                and p.attempt_generation == generation):
+            pres = _project_presentation(p, live=_LIVE_RUNS.get(project_id),
+                                         job=_newest_project_job(project_id, user.id))
+            if pres["zip_path"] == path:
+                ui.download(path)
+                return
+    ui.notify("This fabrication package is no longer current.", color="warning")
 
 
 def _stable_hash(value) -> str:
@@ -3358,6 +3595,8 @@ def _project_assurance(*, status: str, derived: dict, signals: dict) -> dict:
         level = "clarification"
     elif not design_complete:
         level = "limited" if capability else "partial"
+    elif status == "review_required":
+        level = "review_required"
     elif status in ("failed", "interrupted") or not zip_fresh:
         level = "partial"
     elif capability:
@@ -3382,6 +3621,9 @@ def _project_assurance(*, status: str, derived: dict, signals: dict) -> dict:
     elif level == "generated":
         summary = ("A current, fabrication-gate-clean package exists. No independent "
                    "fulfilment verification is recorded for this export.")
+    elif status == "review_required":
+        summary = ("Physical verification passed for this editable draft. "
+                   "USB fabrication confirmation is still required; no fabrication package was exported.")
     elif level == "review_required":
         summary = f"Generated, but review is required before fabrication: {lead}"
     elif level == "limited":
@@ -3665,6 +3907,8 @@ def _headline_for(status: str, stage: str | None, act: dict, issues=()) -> str:
         return "Waiting for your answer"
     if status == "finalizing":
         return "Finalizing the board build"
+    if status == "review_required":
+        return "Draft ready — USB fabrication confirmation needed"
     if status == "complete":
         return "Generation complete"
     if status == "complete_with_warnings":
@@ -3709,6 +3953,8 @@ def _plan_from(status: str, derived: dict, signals: dict) -> str | None:
         return "answer"
     if status in ("complete", "complete_with_warnings"):
         return "download"
+    if status == "review_required":
+        return "download_review"
     if status == "stale":
         # The artifacts on disk are not this design's delivery: finish (or rebuild
         # from) the current design state before any download is offered again.
@@ -3752,7 +3998,7 @@ def _project_presentation(p, *, live=None, job=None, activity=None,
 
     `status` is presentation-only (see :data:`activity.PRESENTATION_STATUSES`);
     the durable DB status is untouched. `action` names the single affordance to
-    offer -- `answer|continue|rebuild|download|open|new_from_brief|support|None`
+    to offer -- `answer|continue|rebuild|download|download_review|open|new_from_brief|support|None`
     -- and the handlers stay in this module.
     """
     pid = getattr(p, "id", None)
@@ -3761,6 +4007,9 @@ def _project_presentation(p, *, live=None, job=None, activity=None,
         _project_signals(root) if root is not None else dict(_EMPTY_SIGNALS))
     sj = state_json if state_json is not None else (sig.get("state") or {})
     db_status = getattr(p, "status", None) or "unavailable"
+    generation = _project_field(p, "attempt_generation")
+    if getattr(job, "attempt_generation", None) not in (None, generation):
+        job = None  # a previous generation's queue entry cannot own this attempt
     live = live if isinstance(live, dict) else None
     act = activity if activity is not None else (
         (live.get("activity") if live else None) or {})
@@ -3834,7 +4083,7 @@ def _project_presentation(p, *, live=None, job=None, activity=None,
         stage = stage or ("fab" if job_status == "running" else None)
     elif job_status == "done" and db_status == "running":
         status = "finalizing"
-        stage = stage or "fab"
+        stage = "place_route" if getattr(job, "rc", None) == REVIEW_REQUIRED_RC else stage or "fab"
     elif job_status == "failed" and db_status == "running":
         status = "failed"
         stage = stage or _relevant_stage(derived, act, failing=True)
@@ -3863,6 +4112,17 @@ def _project_presentation(p, *, live=None, job=None, activity=None,
                                 or sig.get("build_warnings"))
             status = "complete_with_warnings" if has_warnings else "complete"
             stage = stage or "fab"
+    elif db_status == "review_required":
+        current_review = _current_review_zip(root, generation, state=sj)
+        if (current_review and all(derived.get(s) in ("done", "warning")
+                                   for s in DESIGN_STAGES)):
+            status = "review_required"
+            stage = "place_route"
+            detail = "Editable source only; USB fabrication parameters require fabricator confirmation."
+        else:
+            status = "stale"
+            stage = "place_route"
+            detail = "The draft or its verification no longer matches the current attempt."
     elif db_status == "failed" or live_failed:
         status = "failed"
         stage = _relevant_stage(derived, act, failing=True)
@@ -3900,15 +4160,18 @@ def _project_presentation(p, *, live=None, job=None, activity=None,
     # _project_assurance). Derived, never stored: a reopen reads the same files
     # and reaches the same answer, and no surface may claim more than this.
     assurance = _project_assurance(status=status, derived=derived, signals=sig)
+    if db_status == "review_required" and status == "stale":
+        assurance["stale_preview"] = True
+        assurance["summary"] = ("The saved draft or its verification is stale; "
+                                "it is not a current fabrication-ready delivery.")
     # A previous generation remains inspectable while a new build starts, but
     # it is not evidence for the current attempt or a current download.
-    generation = _project_field(p, "attempt_generation")
     artifact_dir = sig.get("generated")
     manual_route = ((getattr(job, "kind", None) == "manual_route"
                      and getattr(job, "attempt_generation", None) == generation)
                     or (live is not None and act.get("mode") == "manual_route"))
     if (root is not None and artifact_dir and isinstance(generation, int)
-            and generation > 0 and not manual_route
+            and generation > 0 and not manual_route and status != "review_required"
             and Path(artifact_dir).parent != root / "generated" / f"attempt-{generation}"):
         assurance["stale_preview"] = True
         assurance["summary"] += " The displayed board is from an earlier attempt."
@@ -3930,6 +4193,7 @@ def _project_presentation(p, *, live=None, job=None, activity=None,
 
     return {
         "title": _project_display_name(p, _resolve_stem(p, live, sig)),
+        "attempt_generation": generation,
         "status": status,
         "stage": stage,
         "headline": headline,
@@ -3939,6 +4203,8 @@ def _project_presentation(p, *, live=None, job=None, activity=None,
         "action": action,
         "download_ready": download_ready,
         "zip_path": zip_ref if download_ready else None,
+        "review_zip": current_review[0] if status == "review_required" else None,
+        "review_stamp": current_review[1] if status == "review_required" else None,
         "queue_note": queue_note,
         # What this project's evidence does and does not support: the label and
         # the recorded evidence/assumptions/limitations every surface shows next
@@ -4004,6 +4270,7 @@ _STATUS_BADGE: dict[str, tuple[str, str, str]] = {
     "awaiting_input": ("help", "#a78bfa", "Waiting for your answer"),
     "finalizing": ("hourglass_bottom", "#94a3b8", "Finalizing"),
     "complete": ("check_circle", "#4ade80", "Generated"),
+    "review_required": ("warning", "#eab308", "Draft ready — USB fabrication confirmation needed"),
     "complete_with_warnings": ("warning", "#eab308", "Generated with cautions"),
     "stale": ("history_toggle_off", "#eab308", "Stale preview"),
     "failed": ("cancel", "#f87171", "Failed"),
@@ -4135,7 +4402,8 @@ def _execute_claimed_job_local(ws: Path, state: dict, job_id: int, progress,
     if wd["killed"]:
         progress({"kind": "build_log", "text": "[build exceeded 30m, killed]"})
     _store().finish_build(job_id, rc=rc)
-    progress({"kind": "build_done", "ok": rc == 0})
+    progress({"kind": "build_done", "ok": rc == 0,
+              "review_required": rc == REVIEW_REQUIRED_RC})
     return rc
 
 
@@ -4182,7 +4450,8 @@ def _drive_build_queue(ws: Path, state: dict, progress, *,
                 log_path, offset, tail_buf, progress)
             if job.status in ("done", "failed"):
                 rc = job.rc if job.rc is not None else 1
-                progress({"kind": "build_done", "ok": rc == 0})
+                progress({"kind": "build_done", "ok": rc == 0,
+                          "review_required": rc == REVIEW_REQUIRED_RC})
                 return rc
             if job.status == "queued":
                 ahead, depth, running = store.build_queue_position(job_id)
@@ -4279,6 +4548,9 @@ def _rerun_build_worker(state: dict, kind: str) -> None:
         pd = _current_attempt_project_dir(ws, state["attempt_generation"], kind)
         if pd is not None:
             state["pcb_ready"] = (pd / f"{pd.name}.kicad_pcb").is_file()
+        if rc == REVIEW_REQUIRED_RC:
+            _adopt_review_outcome(state, ws, pd)
+            return
         if rc != 0:
             state["ok"] = False
             return
@@ -4289,7 +4561,7 @@ def _rerun_build_worker(state: dict, kind: str) -> None:
         _record_run_error(state, e)
         state["ok"] = False
     finally:
-        if state.get("status") != "awaiting_input" and not state.get("ok"):
+        if state.get("status") not in ("awaiting_input", "review_required") and not state.get("ok"):
             # A failed (re)build has no valid package: drop any stale zip so
             # the persisted row offers no download that mismatches the board.
             # A PARKED rebuild is not a failure: it waits for the user's answer,
@@ -4581,6 +4853,9 @@ def _run_design(state: dict, stages, answers=None, *, mode: str = "design") -> N
         pd = _current_attempt_project_dir(ws, state["attempt_generation"], "build")
         if pd is not None:
             state["pcb_ready"] = (pd / f"{pd.name}.kicad_pcb").is_file()
+        if rc == REVIEW_REQUIRED_RC:
+            _adopt_review_outcome(state, ws, pd)
+            return
         if rc != 0:
             state["failure_kind"] = recovery.get("failure_kind") or state.get("failure_kind")
             state["ok"] = False
@@ -5445,7 +5720,8 @@ def projects_page():
 
         def _actions_sig(p, pres, live) -> tuple:
             return (
-                pres["action"], pres["download_ready"], pres["status"],
+                pres["action"], pres["download_ready"], pres["status"], pres.get("review_zip"),
+                pres["zip_path"], p.attempt_generation,
                 bool(p.dir_path or live is not None), bool(p.brief),
                 live is None, bool(p.dir_path) and is_admin(user),
             )
@@ -5484,9 +5760,8 @@ def projects_page():
                 handles["assurance"].set_visibility(False)
                 handles["issues"] = ui.row().classes("w-full items-center gap-2")
                 handles["issues_sig"] = None
-                # Visibility is only meaningful for a completed board -- the
-                # community browser lists status=='ok' only. Paid plans get a real
-                # toggle; free plans see the always-public note.
+                # The community catalog lists completed fabrication builds and
+                # drafts. Paid plans can change visibility; free plans cannot.
                 handles["visibility"] = ui.column().classes("w-full gap-1")
                 handles["vis_sig"] = None
             handles["key"] = None
@@ -5570,8 +5845,8 @@ def projects_page():
             if vis_sig != handles["vis_sig"]:
                 handles["vis_sig"] = vis_sig
                 handles["visibility"].clear()
-                handles["visibility"].set_visibility(p.status == "ok")
-                if p.status == "ok":
+                handles["visibility"].set_visibility(p.status in ("ok", "review_required"))
+                if p.status in ("ok", "review_required"):
                     with handles["visibility"]:
                         _render_visibility(p)
 
@@ -5608,10 +5883,17 @@ def projects_page():
                           on_click=lambda pp=p: ui.navigate.to(
                               f"/?prompt={quote(pp.brief or '')}")) \
                     .props("flat dense no-caps")
+            if pres.get("review_zip"):
+                ui.button("Download editable draft source (.zip)", icon="download",
+                          on_click=lambda pid=p.id, gen=p.attempt_generation:
+                          _download_review_project(pid, gen)) \
+                    .props("flat dense no-caps") \
+                    .tooltip("Editable source only; not approved for fabrication.")
             if pres["download_ready"] and pres["zip_path"]:
                 assurance = pres.get("assurance") or {}
                 btn = ui.button("Download", icon="download",
-                                on_click=lambda zp=pres["zip_path"]: ui.download(zp)) \
+                                on_click=lambda pid=p.id, gen=p.attempt_generation, zp=pres["zip_path"]:
+                                _download_current_fab(pid, gen, zp)) \
                     .props("flat dense no-caps")
                 if assurance.get("level") == "verified":
                     btn.tooltip("Download the package whose export was independently verified.")
@@ -5638,11 +5920,13 @@ def projects_page():
                 sw = ui.switch("Public in the community", value=p.is_public)
 
                 def _flip(e, pid=p.id):
-                    # Re-check tier server-side: a downgraded/forged session must
-                    # not move a project in the catalog.
-                    if not _can_make_private(_current_user()):
-                        ui.notify("Only paid plans can change visibility.",
-                                  color="warning")
+                    # A long-lived page can outlive a logout or a plan change.
+                    actor = _current_user()
+                    if not _can_make_private(actor):
+                        ui.notify("Only paid plans can change visibility.", color="warning")
+                        return
+                    if actor.id != user.id:
+                        ui.notify("This project is no longer available.", color="warning")
                         return
                     _store().set_visibility(pid, bool(e.value))
                     _store().reindex_search(pid)
@@ -6056,7 +6340,7 @@ def _public_project_or_none(project_id):
     except (TypeError, ValueError):
         return None
     p = _store().get_project(pid)
-    if p is None or p.status != "ok" or not p.is_public:
+    if p is None or p.status not in ("ok", "review_required") or not p.is_public:
         return None
     return p
 
@@ -6191,7 +6475,9 @@ def _clone_project_locked(source, cloner, make_private: bool):
 def _project_card(r: dict) -> None:
     """One browse-grid card for a public project dict (from list_public_projects)."""
     stem = _project_display_name(r)
-    thumb = _board_thumb_url(r.get("dir_path"), r.get("project_stem"))
+    is_draft = r.get("status") == "review_required"
+    # Do not mint a preview capability for an unchecked (possibly stale) draft.
+    thumb = None if is_draft else _board_thumb_url(r.get("dir_path"), r.get("project_stem"))
     card = ui.card().classes("w-72 gap-1 cursor-pointer") \
         .style("background:var(--kc-surface);border:1px solid var(--kc-border)")
     with card:
@@ -6205,6 +6491,9 @@ def _project_card(r: dict) -> None:
         with ui.row().classes("w-full items-center justify-between gap-1"):
             ui.label(stem).classes("text-base font-semibold text-white")
             _quality_chip(r.get("quality"))
+        if is_draft:
+            ui.label("Draft — not approved for fabrication").classes("text-xs") \
+                .style("color:#eab308")
         with ui.row().classes("items-center gap-3"):
             _stat_icon("visibility", r.get("view_count"))
             _stat_icon("content_copy", r.get("clone_count"))
@@ -6363,7 +6652,11 @@ def public_project_page(project_id: str):
         viewed.append(p.id)
         app.storage.user["viewed_projects"] = viewed
 
-    gen = _persisted_generated_dir(p.dir_path, p.project_stem)
+    is_draft = p.status == "review_required"
+    current_draft = _project_presentation(p)["review_zip"] if is_draft else None
+    # Directory capabilities are not revoked on privacy changes. Do not issue
+    # one from the public listing for a draft's owner-only editable sources.
+    gen = None if is_draft else _persisted_generated_dir(p.dir_path, p.project_stem)
     token = _register_project_dir(gen) if gen else None
 
     with ui.column().classes("w-full mx-auto p-4 gap-3").style("max-width:1200px"):
@@ -6371,6 +6664,10 @@ def public_project_page(project_id: str):
             ui.label(_project_display_name(p)) \
                 .classes("text-2xl font-bold text-white")
             _quality_chip(p.quality)
+        if is_draft:
+            ui.label("Draft ready — USB fabrication confirmation needed" if current_draft else
+                     "Saved draft unavailable — not approved for fabrication") \
+                .classes("text-sm").style("color:#eab308")
         if (p.brief or "").strip():
             ui.label(p.brief).classes("text-sm").style("color:#94a3b8")
 
@@ -6393,7 +6690,8 @@ def public_project_page(project_id: str):
             like_btn = ui.button(on_click=_on_like) \
                 .props("flat dense no-caps color=white").classes("text-xs")
             _refresh_like()
-            _clone_button(p, user)
+            if p.status == "ok":
+                _clone_button(p, user)
             ui.label("Community project").classes("text-xs").style("color:#64748b")
 
         if gen and token:
@@ -6408,6 +6706,9 @@ def public_project_page(project_id: str):
                         .style("background:var(--kc-surface);border:1px solid var(--kc-border)"):
                     ui.label("Board").classes("text-xs font-medium").style("color:#94a3b8")
                     KiCanvasView([KiCanvasSource(board[0], board[1])], height="h-[520px]")
+        elif current_draft:
+            ui.label("Editable sources are available only to the project owner.") \
+                .classes("text-sm").style("color:#64748b")
         else:
             ui.label("This project's files aren't available to preview.") \
                 .classes("text-sm").style("color:#64748b")
@@ -7879,16 +8180,17 @@ def index(prompt: str = "", project: str = ""):
                            if root is not None else None)
             sj = read_state(read_root) if read_root else {}
             zip_ok = bool(p.zip_path and Path(p.zip_path).is_file())
-            completed = p.status == "ok"
+            completed = p.status in ("ok", "review_required")
             state = _fresh_run_state()
-            state.update(done=completed, ok=(True if completed else None),
+            state.update(done=completed, ok=(True if p.status == "ok" else None),
                          failed=(p.status == "failed"),
                          auto_default_questions=p.auto_default_questions,
                          spend=p.cost_usd, zip=(p.zip_path if zip_ok else None),
                          ws=ws_str, stem=p.project_stem,
                          user_id=user.id, project_id=p.id, brief=p.brief or "",
+                         attempt_generation=p.attempt_generation,
                          board_code=p.board_code,
-                         status=("awaiting_input" if p.status == "awaiting_input" else None),
+                         status=(p.status if p.status in ("awaiting_input", "review_required") else None),
                          awaiting_input=(p.status == "awaiting_input"),
                          questions=[q for q in (sj.get("open_questions") or [])
                                     if not q.get("answer")])
@@ -7930,7 +8232,7 @@ def index(prompt: str = "", project: str = ""):
             # own that action now, so the same button is not offered twice with
             # two different guards.
             continue_btn.set_visibility(False)
-            if p.status in ("ok", "failed"):
+            if p.status in ("ok", "review_required", "failed"):
                 view["viewed_marked"] = True
                 _store().mark_viewed(p.id)
             pres = _workspace_presentation()
@@ -8170,7 +8472,8 @@ def index(prompt: str = "", project: str = ""):
             except ValueError as exc:
                 ui.notify(str(exc), color="warning")
                 return
-            state.update(running=True, done=False, ok=None, status=None)
+            state.update(running=True, done=False, ok=None, status=None, zip=None)
+            _reset_fab_view()
             status.text = ("Routing your manual layout (KiCad Routing Tools, may take "
                            "minutes) -- live progress is in the Place/Route tab.")
             design_btn.disable()
@@ -8241,7 +8544,8 @@ def index(prompt: str = "", project: str = ""):
             except ValueError as exc:
                 ui.notify(str(exc), color="warning")
                 return
-            state.update(running=True, done=False, ok=None, status=None)
+            state.update(running=True, done=False, ok=None, status=None, zip=None)
+            _reset_fab_view()
             status.text = message
             design_btn.disable()
             _close_layout_editor()
@@ -8255,6 +8559,10 @@ def index(prompt: str = "", project: str = ""):
             _start_replace_build(
                 "Rebuilding (synthesize + place + route + fab, may take "
                 "minutes) -- live progress is in the tabs.")
+
+        def _reset_fab_view():
+            view.update(fab_done=False, fab_invalid=False, fab_delivery=None)
+            tabs.view_slot("fab").clear()
 
         def _mark_fab_invalid():
             """Fail loudly in the FAB tab: red icon + banner. The board on
@@ -8422,13 +8730,20 @@ def index(prompt: str = "", project: str = ""):
                 if pres.get("zip_path"):
                     assurance = pres.get("assurance") or {}
                     btn = ui.button("Download KiCad project (.zip)", icon="download",
-                                    on_click=lambda z=pres["zip_path"]: ui.download(z)) \
+                                    on_click=lambda pid=state["project_id"], gen=pres["attempt_generation"],
+                                    z=pres["zip_path"]: _download_current_fab(pid, gen, z)) \
                         .props("dense no-caps color=positive")
                     btn.tooltip(
                         "Download the package whose export was independently verified."
                         if assurance.get("level") == "verified" else
                         "Generated KiCad package. Independent fulfilment verification is not "
                         "recorded for this export — review before fabrication.")
+            elif action == "download_review" and pres.get("review_zip"):
+                ui.button("Download editable draft source (.zip)", icon="download",
+                          on_click=lambda pid=state["project_id"], gen=pres["attempt_generation"]:
+                          _download_review_project(pid, gen)) \
+                    .props("dense outline no-caps") \
+                    .tooltip("Editable source only; not approved for fabrication.")
             elif action == "new_from_brief":
                 brief_text = state.get("brief") or ""
                 if brief_text:
@@ -8481,7 +8796,8 @@ def index(prompt: str = "", project: str = ""):
                 assurance = _workspace_assurance(assurance, pres["stage"], pres["issues"])
             sig = (pres["title"], pres["status"], pres["stage"], pres["headline"],
                    pres["detail"], pres["last_event_at"], pres["action"],
-                   pres["download_ready"], pres.get("zip_path"), state.get("brief"),
+                   pres["download_ready"], pres["zip_path"], pres["review_zip"],
+                   pres["attempt_generation"], state.get("brief"),
                    state.get("retryable"), json.dumps(pres["issues"], sort_keys=True),
                    units, detail.get("percent"), detail.get("phase"),
                    state.get("journal_failed"), state.get("board_code"),
@@ -8559,7 +8875,8 @@ def index(prompt: str = "", project: str = ""):
                     with assurance_box:
                         _render_section({"type": "assurance", "assurance": assurance},
                                         "#94a3b8")
-            actions_sig = (pres["action"], pres["download_ready"], pres.get("zip_path"),
+            actions_sig = (pres["action"], pres["download_ready"], pres["zip_path"],
+                           pres["review_zip"], pres["attempt_generation"],
                            assurance.get("level"), bool(state.get("retryable")),
                            state.get("brief"), owner)
             if actions_sig != summary_actions_sig[0]:
@@ -8816,6 +9133,9 @@ def index(prompt: str = "", project: str = ""):
                 view["observed_at"] = now
                 pres = _workspace_presentation()
                 view["presentation"] = pres
+                if (delivery := view.get("fab_delivery")) is not None:
+                    delivery.set_visibility(bool(pres and pres["download_ready"]
+                                                 and pres["attempt_generation"] == state["attempt_generation"]))
                 summary_card.set_visibility(pres is not None)
                 if pres is not None:
                     _paint_summary(pres)
@@ -9107,7 +9427,9 @@ def index(prompt: str = "", project: str = ""):
                                 stg, sj, rs, project_dir, view["build_lines"],
                                 assurance=fab_assurance if stg == "fab" else None))
                         if state["zip"]:
-                            with tabs.view_slot("fab"):
+                            with tabs.view_slot("fab"), ui.column().classes("w-full") as delivery:
+                                if fab_pres.get("download_ready"):
+                                    view["fab_delivery"] = delivery
                                 # The honest export label: what this package is and is
                                 # not, directly above the download that used to imply
                                 # fabrication readiness on its own.
@@ -9143,7 +9465,9 @@ def index(prompt: str = "", project: str = ""):
                                     ).classes("w-full max-w-3xl rounded-borders q-mb-sm")
                                 if fab_pres.get("download_ready"):
                                     ui.button("Download KiCad project (.zip)", icon="download",
-                                              on_click=lambda: ui.download(state["zip"])) \
+                                              on_click=lambda pid=state["project_id"],
+                                              gen=fab_pres["attempt_generation"], z=fab_pres["zip_path"]:
+                                              _download_current_fab(pid, gen, z)) \
                                         .props("color=positive")
                                 else:
                                     # state["zip"] exists but is not the CURRENT

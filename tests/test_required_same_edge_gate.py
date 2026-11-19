@@ -137,7 +137,7 @@ def test_six_connector_fitted_outline_uses_rotated_header_end(tmp_path):
     )
     state = SimpleNamespace(composition=SimpleNamespace(board_state=board_state),
                             manual_outline=None, edge_constrained_refs=set(components),
-                            edge_zoned_outline_sides={"bottom"})
+                            edge_zoned_outline_sides={"bottom"}, native_component_rects={})
     refs = tuple(components)
     (tmp_path / "BOARD_autoplacer.json").write_text(json.dumps({
         "required_same_edge_connectors": {"edge": "bottom", "refs": list(refs)},

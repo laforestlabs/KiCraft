@@ -1,9 +1,10 @@
 """Walk-away email notifications for design runs.
 
 A run takes many minutes (LLM stages + a possibly-queued build), so users leave.
-This module emails them on the three transitions worth coming back for:
+This module emails users on the transitions worth coming back for:
 
-  ok             the board finished and the download is ready
+  ok             the board finished and the fab download is ready
+  review_required a draft is ready but needs fabrication confirmation
   failed         the run ended without a board (so they can retry or rephrase)
   awaiting_input the run PARKED on a clarifying question; without an email a
                  walked-away user blocks their own run indefinitely, which makes
@@ -66,6 +67,15 @@ _RUN_EVENTS = {
                  "board and fab package are ready to download."),
         "cta": "Download your board",
     },
+    "review_required": {
+        "subject": "Your KiCraft draft needs review: {title}",
+        "heading": "Your draft is ready for review",
+        "preheader": "USB fabrication confirmation is needed before manufacturing.",
+        "lead": ("Your design “{title}” has a routed draft ready for review. "
+                 "USB fabrication confirmation is needed before manufacturing; "
+                 "the editable sources are not a fabrication package."),
+        "cta": "Review your draft",
+    },
     "failed": {
         "subject": "Your KiCraft run did not finish: {title}",
         "heading": "Your run didn't finish",
@@ -118,7 +128,7 @@ def notify_run_event(store: AccountStore, settings: Settings, *,
     was actually handed to a backend. `skip_if_active=False` is for the startup
     sweep, where the process just restarted and the activity map is empty-but-
     meaningless anyway."""
-    if user_id is None or status not in ("ok", "failed", "awaiting_input"):
+    if user_id is None or status not in ("ok", "review_required", "failed", "awaiting_input"):
         return False
     try:
         user = store.get_user(int(user_id))

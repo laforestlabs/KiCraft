@@ -23,6 +23,7 @@ from pathlib import Path
 
 from nicegui import background_tasks, run, ui
 
+from kicraft.build_outcome import REVIEW_REQUIRED_RC
 from kicraft.layout_editor import (
     build_canvas_html,
     build_canvas_init_script,
@@ -278,7 +279,14 @@ class LayoutEditorPanel:
         # (below, once the canvas has mounted) mark the failure locations,
         # instead of leaving the diagnosis in the generic failed-build view.
         route_markers: list = []
-        if last_route and last_route.get("rc") != 0:
+        if last_route and last_route.get("rc") == REVIEW_REQUIRED_RC:
+            with ui.card().classes("w-full p-2 mb-1").style(
+                    "border:1px solid #b45309;background:#451a03"):
+                ui.label(
+                    "Last routing attempt produced an editable draft. "
+                    "USB fabrication confirmation is still needed."
+                ).classes("text-xs").style("color:#fcd34d")
+        elif last_route and last_route.get("rc") != 0:
             v = last_route.get("verify") or {}
             with ui.card().classes("w-full p-2 mb-1").style(
                     "border:1px solid #b91c1c;background:#450a0a"):

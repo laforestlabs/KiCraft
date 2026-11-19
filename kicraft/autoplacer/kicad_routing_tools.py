@@ -1909,6 +1909,10 @@ def _route_krt_pass(
         # below must still reject any inherited layer/geometry mutation.
         command.append("--no-stub-layer-swap")
     if usb_contract is not None:
+        if config.get("kicad_routing_tools_grid_step_mm") is None:
+            # USB contact escape channels can be narrower than the stock 0.1 mm grid.
+            # Refine only the pair pass; ordinary nets keep their existing resolution.
+            command.extend(["--grid-step", "0.025"])
         command[1] = str(root / "py_router" / "route_diff.py")
         command.extend([
             "--require-coupled",

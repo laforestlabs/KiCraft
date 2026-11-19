@@ -23,6 +23,7 @@ import pytest
 
 from account_fixtures import seed_project
 
+from kicraft.build_outcome import REVIEW_REQUIRED_RC
 from kicraft.server.accounts import AccountStore
 from kicraft.server.config import LEGAL_VERSION
 from kicraft.server.layout_panel import (
@@ -229,6 +230,28 @@ async def test_failed_route_attempt_shows_diagnosis_card(harness):
     await u.should_see("Manual layout")
     await u.should_see("failed verification", retries=30)
     await u.should_see("SDA, SCL", retries=10)
+
+
+async def test_review_required_manual_route_shows_draft_not_failure(harness):
+    from nicegui import ui
+
+    u, _, store, acct = harness
+    store.set_tier(EMAIL, "pro")
+    pid = _persisted_project_with_board(store, acct.id, status="review_required")
+    base = store.projects_dir / str(acct.id) / str(pid)
+    manual = base / "generated" / "USB_BMP280_READER" / ".experiments" / "manual"
+    manual.mkdir(parents=True)
+    (manual / "last_route_result.json").write_text(json.dumps({
+        "rc": REVIEW_REQUIRED_RC, "stage": "review_required",
+        "verify": {"shorts": 0, "unconnected": 0, "violations": []},
+    }), encoding="utf-8")
+
+    await _login(u)
+    await u.should_see("Edit board layout")
+    u.find("Edit board layout", kind=ui.button).click()
+    await u.should_see("Last routing attempt produced an editable draft.", retries=30)
+    await u.should_see("USB fabrication confirmation is still needed.")
+    await u.should_not_see("failed verification")
 
 
 async def test_free_user_sees_upgrade_gate(harness):

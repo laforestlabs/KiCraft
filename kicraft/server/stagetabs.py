@@ -1814,8 +1814,11 @@ class StageTabs:
                 self.panels[self._current].push(e)
         elif k == "build_done":
             self._build_queued = False
-            cur = self._current if self._current in _BUILD_STAGES else "fab"
-            self._finish(cur, bool(e.get("ok")), None)
+            if e.get("review_required"):
+                self._finish("place_route", True, None, warning=True)
+            else:
+                cur = self._current if self._current in _BUILD_STAGES else "fab"
+                self._finish(cur, bool(e.get("ok")), None)
         elif k == "run_finished":
             self._build_queued = False
             self._on_run_finished(e)
@@ -1844,6 +1847,9 @@ class StageTabs:
         """The attempt's terminal event: stop whatever was running and paint the
         attempt's outcome on the stage it reached."""
         status = str(event.get("status") or "")
+        if status == "review_required":
+            self._finish("place_route", True, None, warning=True)
+            return
         stage = event.get("stage") or self._current
         panel = self.panels.get(stage) if stage else None
         if panel is None:

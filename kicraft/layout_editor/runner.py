@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from kicraft.autoplacer.brain.types import Point
+from kicraft.build_outcome import REVIEW_REQUIRED_RC
 from kicraft.layout_editor.leaves import LeafInfo
 from kicraft.layout_editor.model import (
     DEFAULT_MOUNTING_HOLE_SCREW,
@@ -230,6 +231,8 @@ def manual_layout_status(project_dir: Path) -> str | None:
     if last:
         if last.get("rc") == 0:
             parts.append("last manual route: fab-ready")
+        elif last.get("rc") == REVIEW_REQUIRED_RC:
+            parts.append("last manual route: draft ready — fabrication confirmation needed")
         elif last.get("stage") == "route":
             parts.append("last manual route: routing failed")
         else:

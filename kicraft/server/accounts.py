@@ -833,7 +833,7 @@ class AccountStore:
             if conn.execute("SELECT COUNT(*) FROM projects_fts").fetchone()[0]:
                 return
             ids = [r["id"] for r in conn.execute(
-                "SELECT id FROM projects WHERE status='ok' AND is_public=1")]
+                "SELECT id FROM projects WHERE status IN ('ok','review_required') AND is_public=1")]
         for pid in ids:
             try:
                 self.reindex_search(pid)
@@ -1563,7 +1563,7 @@ class AccountStore:
                 cutoff = (_utcnow() - dt.timedelta(days=tier["window_days"])).isoformat()
                 used = conn.execute(
                     "SELECT COUNT(*) FROM projects WHERE user_id=? AND "
-                    "status IN ('running','ok','awaiting_input') AND created_at>=?",
+                    "status IN ('running','ok','review_required','awaiting_input') AND created_at>=?",
                     (user_id, cutoff)).fetchone()[0]
                 if used >= tier["limit"]:
                     return None
@@ -1613,11 +1613,14 @@ class AccountStore:
     def finish_project(self, project_id: int, status: str, stem: str | None = None,
                        cost_usd: float | None = None, dir_path: str | None = None,
                        zip_path: str | None = None) -> None:
+        if status == "review_required":
+            zip_path = None
         with self._conn() as conn:
             conn.execute(
                 "UPDATE projects SET status=?, project_stem=?, cost_usd=?, "
-                "dir_path=?, zip_path=?, finished_at=? WHERE id=?",
-                (status, stem, cost_usd, dir_path, zip_path, _utcnow_iso(),
+                "dir_path=?, zip_path=?, finished_at=?, "
+                "quality=CASE WHEN ?='review_required' THEN NULL ELSE quality END WHERE id=?",
+                (status, stem, cost_usd, dir_path, zip_path, _utcnow_iso(), status,
                  project_id))
 
     def finish_project_if_running(self, project_id: int, status: str,
@@ -1634,9 +1637,11 @@ class AccountStore:
         may decide to close a row and then lose the race to the run's own worker,
         which writes the REAL outcome; an unconditional UPDATE would let the
         janitor's guess overwrite a finished result."""
+        if status == "review_required":
+            zip_path = None
         conditions = ["id=?", "status='running'"]
         params: list = [status, stem, cost_usd, dir_path, zip_path,
-                        _utcnow_iso(), project_id]
+                        _utcnow_iso(), status, project_id]
         if expected_attempt_generation is not None:
             conditions.append("attempt_generation=?")
             params.append(expected_attempt_generation)
@@ -1657,7 +1662,9 @@ class AccountStore:
         with self._conn() as conn:
             cur = conn.execute(
                 "UPDATE projects SET status=?, project_stem=?, cost_usd=?, "
-                "dir_path=?, zip_path=?, finished_at=? WHERE " + " AND ".join(conditions),
+                "dir_path=?, zip_path=?, finished_at=?, "
+                "quality=CASE WHEN ?='review_required' THEN NULL ELSE quality END WHERE "
+                + " AND ".join(conditions),
                 params)
             return cur.rowcount > 0
 
@@ -1666,8 +1673,11 @@ class AccountStore:
         if status == "running":
             raise ValueError("start runs with begin_project_attempt")
         with self._conn() as conn:
-            conn.execute("UPDATE projects SET status=? WHERE id=?",
-                         (status, project_id))
+            conn.execute(
+                "UPDATE projects SET status=?, "
+                "zip_path=CASE WHEN ?='review_required' THEN NULL ELSE zip_path END, "
+                "quality=CASE WHEN ?='review_required' THEN NULL ELSE quality END WHERE id=?",
+                (status, status, status, project_id))
 
     def mark_viewed(self, project_id: int) -> None:
         """Stamp that the owner has the project open in the workspace; the index
@@ -1895,8 +1905,10 @@ class AccountStore:
         'unverified') so the catalog can filter/sort in SQL without re-reading the
         synthesis check per row."""
         with self._conn() as conn:
-            conn.execute("UPDATE projects SET quality=? WHERE id=?",
-                         (quality, project_id))
+            conn.execute(
+                "UPDATE projects SET quality=CASE WHEN status='review_required' "
+                "AND ?='fab_ready' THEN NULL ELSE ? END WHERE id=?",
+                (quality, quality, project_id))
 
     def record_view(self, project_id: int) -> None:
         """Increment the view counter. Per-session dedup is the web layer's job."""
@@ -1959,13 +1971,13 @@ class AccountStore:
         return None
 
     def reindex_search(self, project_id: int) -> None:
-        """Refresh a project's FTS row. A project that is not BOTH public and 'ok'
-        is removed from the index, so private/failed projects are never searchable.
+        """Refresh a public completed project's FTS row.
+        Private, incomplete, and failed projects are never searchable.
         No-op when FTS5 is unavailable."""
         if not self._fts_enabled:
             return
         p = self.get_project(project_id)
-        if p is None or p.status != "ok" or not p.is_public:
+        if p is None or p.status not in ("ok", "review_required") or not p.is_public:
             self.remove_from_search(project_id)
             return
         doc = build_fts_document(p.brief, self._load_project_state(p))
@@ -2044,7 +2056,7 @@ class AccountStore:
             return 0
         with self._conn() as conn:
             ids = [r["id"] for r in conn.execute(
-                "SELECT id FROM projects WHERE status='ok' AND is_public=1")]
+                "SELECT id FROM projects WHERE status IN ('ok','review_required') AND is_public=1")]
         for pid in ids:
             self.reindex_search(pid)
         return len(ids)
@@ -2075,10 +2087,10 @@ class AccountStore:
         return " ".join(terms) if terms else None
 
     def _public_where(self, query: str | None, badge: str | None):
-        """Shared FROM/WHERE for the catalog: publish gate (public + ok) plus an
+        """Shared FROM/WHERE for the catalog: public completed projects plus an
         optional full-text match and quality badge. Returns (join, where, params).
         Falls back to a brief LIKE scan when FTS5 is unavailable."""
-        where = ["p.status='ok'", "p.is_public=1"]
+        where = ["p.status IN ('ok','review_required')", "p.is_public=1"]
         params: list = []
         join = ""
         if query and self._fts_enabled:
@@ -2123,13 +2135,13 @@ class AccountStore:
     def count_active_designs(self, user_id: int, window_days: int) -> int:
         """Designs that consume quota in the trailing window: a started run
         ('running'), a run parked on a clarifying question ('awaiting_input'),
-        and a success ('ok') each hold a slot; a 'failed' build frees it.
+        a success ('ok'), and a review-ready draft each hold a slot; a 'failed' build frees it.
         ISO-8601 UTC timestamps compare lexicographically."""
         cutoff = (_utcnow() - dt.timedelta(days=window_days)).isoformat()
         with self._conn() as conn:
             row = conn.execute(
                 "SELECT COUNT(*) FROM projects WHERE user_id=? "
-                "AND status IN ('running','ok','awaiting_input') AND created_at >= ?",
+                "AND status IN ('running','ok','review_required','awaiting_input') AND created_at >= ?",
                 (user_id, cutoff)).fetchone()
         return int(row[0] or 0)
 

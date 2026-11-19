@@ -147,8 +147,8 @@ def test_replay_flag_parsing(monkeypatch):
 # ---- the synthesis-skip guarantee + seed/route threading ---------------------
 
 
-@pytest.mark.parametrize("mode", ["engineering_review", "unrecognized"])
-def test_manufacturing_invocation_refuses_nonmanufacturing_routing_input(tmp_path, mode):
+@pytest.mark.parametrize("mode", ["unrecognized"])
+def test_invalid_routing_mode_is_rejected(tmp_path, mode):
     import json
 
     project = _stub_workspace(tmp_path)
@@ -161,6 +161,57 @@ def test_manufacturing_invocation_refuses_nonmanufacturing_routing_input(tmp_pat
             project, "DEMO", config, engineering_review=False,
         )
     assert path.read_bytes() == before
+
+
+def test_usb_without_approval_automatically_selects_reusable_draft_geometry(tmp_path):
+    import json
+
+    project = _stub_workspace(tmp_path)
+    config = {"usb_routing_contracts": [{"id": "programming-usb"}]}
+    configured = cli_app._configure_usb_geometry_mode(
+        project, "DEMO", config, engineering_review=False,
+    )
+    assert configured["usb_geometry_mode"] == "engineering_review"
+    assert configured["usb_review_allow_bounded_launches"] is True
+    assert "usb_impedance_fabrication_approval" not in configured
+    reopened = json.loads((project / "DEMO_autoplacer.json").read_text())
+    assert cli_app._configure_usb_geometry_mode(
+        project, "DEMO", reopened, engineering_review=False,
+    ) == configured
+
+
+def test_usb_strict_policy_never_invents_approval(tmp_path):
+    project = _stub_workspace(tmp_path)
+    config = {"usb_routing_contracts": [{"id": "programming-usb"}],
+              "usb_geometry_mode": "engineering_review"}
+    configured = cli_app._configure_usb_geometry_mode(
+        project, "DEMO", config, engineering_review=False, require_fabrication_approval=True,
+    )
+    assert configured["usb_geometry_mode"] == "fabrication"
+    from kicraft.autoplacer.kicad_routing_tools import require_usb_fabrication_approval
+    with pytest.raises(ValueError, match="requires fabricator approval"):
+        require_usb_fabrication_approval(configured)
+
+
+def test_supplied_invalid_usb_approval_is_not_silently_defaulted(tmp_path):
+    project = _stub_workspace(tmp_path)
+    config = {"usb_routing_contracts": [{"id": "programming-usb"}],
+              "usb_impedance_fabrication_approval": {}}
+    with pytest.raises(ValueError, match="requires fabricator approval"):
+        cli_app._configure_usb_geometry_mode(
+            project, "DEMO", config, engineering_review=False,
+        )
+
+
+def test_usb_review_respects_explicit_full_width_launch_policy(tmp_path):
+    project = _stub_workspace(tmp_path)
+    config = {"usb_routing_contracts": [{"id": "programming-usb"}],
+              "usb_review_allow_bounded_launches": False}
+    configured = cli_app._configure_usb_geometry_mode(
+        project, "DEMO", config, engineering_review=False,
+    )
+    assert configured["usb_geometry_mode"] == "engineering_review"
+    assert configured["usb_review_allow_bounded_launches"] is False
 
 
 def _patch_replay_seams(monkeypatch, recorder):

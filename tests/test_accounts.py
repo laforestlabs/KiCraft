@@ -1055,6 +1055,18 @@ def test_list_public_only_ok_and_public(store):
     assert store.count_public_projects() == 1
 
 
+def test_review_finalization_clears_stale_fab_artifacts(store):
+    u = store.create_user("review@e.st", "pw")
+    pid = seed_project(store, u.id, "USB board")
+    store.set_quality(pid, "fab_ready")
+    assert store.finish_project_if_running(pid, "review_required",
+                                           zip_path="/old/fab.zip")
+    project = store.get_project(pid)
+    assert project.status == "review_required"
+    assert project.zip_path is None
+    assert project.quality is None
+
+
 def test_popularity_ordering(store):
     u = store.create_user("pop@e.st", "pw")
     liker = store.create_user("lk@e.st", "pw")

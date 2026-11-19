@@ -38,6 +38,17 @@ def test_manual_route_registered_and_gates_missing_layout(tmp_path, capsys):
 # ---- promote tail -------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def native_promotion_checks(monkeypatch):
+    """These persistence tests isolate native checks, not the promotion policy."""
+    from kicraft.autoplacer.brain import escape_cleanup
+    from kicraft.autoplacer.hardware import silk_legend
+
+    monkeypatch.setattr(escape_cleanup, "cleanup_signal_escapes", lambda *a: {"accepted": True})
+    monkeypatch.setattr(escape_cleanup, "finish_boundary_escape_landings", lambda *a: {"accepted": True})
+    monkeypatch.setattr(silk_legend, "apply_silk_legend", lambda *a: {"placed": [], "dropped": []})
+
+
 @pytest.fixture
 def project(tmp_path, monkeypatch):
     # Pin the run identity BEFORE the fixture writes boards: run context is
@@ -64,9 +75,10 @@ def project(tmp_path, monkeypatch):
 
 
 def _state_stub():
-    from kicraft.design.models import BOM, BomPart, ConversationState
+    from kicraft.design.models import Architecture, BOM, BomPart, ConversationState
     return ConversationState(
         project_stem="WIDGET",
+        architecture=Architecture(sheets=[], power_nets=[], inter_sheet_nets=[]),
         bom=BOM(parts=[BomPart(ref="R1", value="10k", sheet="MAIN",
                                symbol="Device:R",
                                footprint="Resistor_SMD:R_0402_1005Metric")]),
@@ -90,7 +102,8 @@ def test_failed_gate_keeps_candidate_over_previous_routed_board(
     # can be inspected (no silent keep-the-last-good fallback).
     pcb = project / "WIDGET.kicad_pcb"
     monkeypatch.setattr(cli_app, "_verify_routed_board", lambda p, **_: {
-        "ok": False, "shorts": 3, "unconnected": 1, "reasons": ["shorts"],
+        "ok": False, "physical_ok": False, "fab_acceptable": False,
+        "shorts": 3, "unconnected": 1, "reasons": ["shorts"],
         "tracks": {}})
     state_path = tmp_path / "state.json"
     rc = cli_app._promote_verify_fab(
@@ -108,7 +121,8 @@ def test_failed_gate_with_no_previous_board_keeps_candidate(project, tmp_path,
     pcb = project / "WIDGET.kicad_pcb"
     pcb.unlink()  # no prior board (first promote)
     monkeypatch.setattr(cli_app, "_verify_routed_board", lambda p, **_: {
-        "ok": False, "shorts": 1, "unconnected": 0, "reasons": [], "tracks": {}})
+        "ok": False, "physical_ok": False, "fab_acceptable": False,
+        "shorts": 1, "unconnected": 0, "reasons": [], "tracks": {}})
     rc = cli_app._promote_verify_fab(
         _state_stub(), tmp_path / "state.json", _artifacts_stub(project),
         "WIDGET", project, pcb)
@@ -124,7 +138,8 @@ def test_failed_gate_with_unrouted_previous_board_keeps_candidate(
     pcb = project / "WIDGET.kicad_pcb"
     pcb.write_text("PLACED PARTS ONLY no copper here", encoding="utf-8")
     monkeypatch.setattr(cli_app, "_verify_routed_board", lambda p, **_: {
-        "ok": False, "shorts": 0, "unconnected": 1, "reasons": [], "tracks": {}})
+        "ok": False, "physical_ok": False, "fab_acceptable": False,
+        "shorts": 0, "unconnected": 1, "reasons": [], "tracks": {}})
     rc = cli_app._promote_verify_fab(
         _state_stub(), tmp_path / "state.json", _artifacts_stub(project),
         "WIDGET", project, pcb)
@@ -137,10 +152,11 @@ def test_passing_gate_promotes_and_exports(project, tmp_path, monkeypatch):
     pcb = project / "WIDGET.kicad_pcb"
     seen = {}
     monkeypatch.setattr(cli_app, "_verify_routed_board", lambda p, **_: {
-        "ok": True, "shorts": 0, "unconnected": 0, "reasons": [],
-        "tracks": {"traces": 12, "vias": 2}})
+        "ok": True, "physical_ok": True, "fab_acceptable": True,
+        "shorts": 0, "unconnected": 0, "reasons": [],
+        "tracks": {"traces": 12, "vias": 2, "footprint_refs": ["R1"]}})
 
-    def fake_export(pcb_path, project_dir, stem, bom_parts=None):
+    def fake_export(pcb_path, project_dir, stem, bom_parts=None, *, state=None, project_root=None):
         seen["bom_parts"] = bom_parts
         zip_path = Path(project_dir) / "fab.zip"
         zip_path.write_text("zip", encoding="utf-8")
@@ -170,14 +186,21 @@ def test_cmd_manual_route_end_to_end_with_stubbed_router(tmp_path, monkeypatch):
     compose invocation (stubbed: drops a routed parent), then the real
     promote tail with stubbed verify/export. No the autorouter, no pcbnew."""
     import subprocess as subprocess_mod
+    import os
+    import time
 
-    from kicraft.design.models import BOM, BomPart, ConversationState
+    from kicraft.cli import artifact_paths as ap
+
+    from kicraft.design.models import Architecture, BOM, BomPart, ConversationState
 
     monkeypatch.setenv("KICRAFT_BUILD_SLOTS", "0")  # slot gate off
+    monkeypatch.setenv(ap.ENV_RUN_ID, "manual-route-test")
+    monkeypatch.setenv(ap.ENV_RUN_STARTED_AT, repr(time.time()))
 
     ws = tmp_path
     state = ConversationState(
         project_stem="WIDGET",
+        architecture=Architecture(sheets=[], power_nets=[], inter_sheet_nets=[]),
         bom=BOM(parts=[BomPart(ref="R1", value="10k", sheet="MAIN",
                                symbol="Device:R",
                                footprint="Resistor_SMD:R_0402_1005Metric")]),
@@ -203,17 +226,21 @@ def test_cmd_manual_route_end_to_end_with_stubbed_router(tmp_path, monkeypatch):
         routed_dir.mkdir(parents=True, exist_ok=True)
         (routed_dir / "parent_routed.kicad_pcb").write_text(
             "ROUTED", encoding="utf-8")
+        (routed_dir / ap.METADATA_JSON).write_text(json.dumps({
+            "run_id": os.environ[ap.ENV_RUN_ID],
+        }))
         return subprocess_mod.CompletedProcess(cmd, 0)
 
     monkeypatch.setattr(subprocess_mod, "run", fake_run)
     monkeypatch.setattr(cli_app, "_preflight_project_router", lambda _p: {})
     monkeypatch.setattr(cli_app, "_verify_routed_board", lambda p, **_: {
-        "ok": True, "shorts": 0, "unconnected": 0, "reasons": [],
-        "tracks": {"traces": 5, "vias": 0}})
+        "ok": True, "physical_ok": True, "fab_acceptable": True,
+        "shorts": 0, "unconnected": 0, "reasons": [],
+        "tracks": {"traces": 5, "vias": 0, "footprint_refs": ["R1"]}})
 
     import kicraft.design.synthesis.fab_export as fab_export
 
-    def fake_export(pcb_path, project_dir, stem, bom_parts=None):
+    def fake_export(pcb_path, project_dir, stem, bom_parts=None, *, state=None, project_root=None):
         zp = Path(project_dir) / "fab.zip"
         zp.write_text("zip", encoding="utf-8")
         return {"zip": str(zp), "files": ["a.gbr"], "fab_dir": project_dir,

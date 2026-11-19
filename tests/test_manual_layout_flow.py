@@ -48,6 +48,10 @@ def test_status_line_states(tmp_path: Path):
     _write_manual_route_result(tmp_path, rc=0, stage="ok")
     assert "fab-ready" in manual_layout_status(tmp_path)
 
+    _write_manual_route_result(tmp_path, rc=9, stage="review_required")
+    assert "draft ready" in manual_layout_status(tmp_path)
+    assert "failed" not in manual_layout_status(tmp_path)
+
 
 def test_log_manual_event_appends_jsonl(tmp_path: Path):
     exp = tmp_path / ".experiments"

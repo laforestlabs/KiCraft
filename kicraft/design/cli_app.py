@@ -37,6 +37,7 @@ from typing import get_args
 
 from pydantic import ValidationError
 
+from kicraft.build_outcome import REVIEW_REQUIRED_RC, USB_REVIEW_WARNING
 from kicraft.cli import artifact_paths
 from kicraft.fsutil import atomic_write_text
 from kicraft.parts_library import jlcparts, lcsc_retail
@@ -5014,7 +5015,7 @@ def _run_synth_with_freshness(state, state_path: Path, project_dir: Path, **kwar
         if after is not None and after != before:
             if state.artifacts is not None:
                 state.artifacts = state.artifacts.model_copy(update={
-                    "status": "failed", "routed_pcb": None, "fab_zip": None,
+                    "status": "failed", "routed_pcb": None, "fab_zip": None, "review_zip": None,
                     "step_file": None, "board_3d_png": None,
                     "step_model_missing_refs": None,
                 })
@@ -6075,6 +6076,7 @@ def _persist_pcb_diagnostics(
     artifacts.pcb_errors = errors
     artifacts.status = "failed"
     artifacts.fab_zip = None
+    artifacts.review_zip = None
     artifacts.step_file = None
     artifacts.board_3d_png = None
     artifacts.step_model_missing_refs = None
@@ -6354,9 +6356,12 @@ def _verify_routed_board(
         sidecar = discover_project_config(pcb.parent)
         physical_config = load_project_config(str(sidecar)) if sidecar is not None else {}
     usb_receipt = _verify_usb_routes(pcb, physical_config)
-    if not usb_receipt["ok"]:
+    review = physical_config.get("usb_geometry_mode") == "engineering_review"
+    usb_ok = usb_receipt.get("geometry_ok", False) if review else usb_receipt["ok"]
+    if not usb_ok:
         accepted = False
-        reasons.extend(usb_receipt["errors"])
+        reasons.extend(usb_receipt.get("geometry_errors", usb_receipt["errors"]) if review
+                       else usb_receipt["errors"])
     dangling_receipt = _verify_dangling_copper(
         pcb, evidence=physical_config.get("dangling_copper_evidence", []),
     )
@@ -6366,18 +6371,20 @@ def _verify_routed_board(
             "dangling copper audit incomplete" if not dangling_receipt.get("complete")
             else f"unproven dangling copper: {len(dangling_receipt.get('unproven', []))} violations"
         )
+    physical_ok = (
+        shorts == 0
+        and unconnected == 0
+        and keepout == 0
+        and not blocking_courtyard
+        and not illegal_geometry
+        and not same_edge_violations
+        and usb_ok
+        and dangling_receipt["ok"]
+    )
     return {
         "ok": accepted and shorts == 0 and unconnected == 0 and courtyard == 0 and keepout == 0,
-        "fab_acceptable": (
-            shorts == 0
-            and unconnected == 0
-            and keepout == 0
-            and not blocking_courtyard
-            and not illegal_geometry
-            and not same_edge_violations
-            and usb_receipt["ok"]
-            and dangling_receipt["ok"]
-        ),
+        "physical_ok": physical_ok,
+        "fab_acceptable": physical_ok and usb_receipt["ok"] and not review,
         "shorts": shorts,
         "unconnected": unconnected,
         "courtyard": courtyard,
@@ -7107,25 +7114,38 @@ def _canonical_thermal_for_config(state, config: dict, *, do_fab: bool) -> list[
 
 def _configure_usb_geometry_mode(
     project_dir: Path, stem: str, config: dict, *, engineering_review: bool,
-    allow_bounded_launches: bool = False,
+    allow_bounded_launches: bool = False, require_fabrication_approval: bool = False,
 ) -> dict:
-    """Persist explicit review intent in derived routing input, never approval."""
+    """Resolve automatic draft geometry without inventing fabrication approval."""
     mode = config.get("usb_geometry_mode", "fabrication")
     if mode not in {"fabrication", "engineering_review"}:
         raise ValueError(f"unknown USB geometry mode: {mode!r}")
     bounded = config.get("usb_review_allow_bounded_launches", False)
     if type(bounded) is not bool:
         raise ValueError("bounded USB launch policy must be a boolean")
-    if not engineering_review:
-        if mode == "engineering_review":
-            raise ValueError("review routing input requires explicit --engineering-review")
-        if bounded or allow_bounded_launches:
-            raise ValueError("bounded USB launches require --engineering-review")
-        return config
+    if require_fabrication_approval and (engineering_review or allow_bounded_launches):
+        raise ValueError("--require-fabrication-approval conflicts with engineering review")
+    approval_present = "usb_impedance_fabrication_approval" in config
+    if approval_present and not engineering_review:
+        from kicraft.autoplacer.kicad_routing_tools import require_usb_fabrication_approval
+        require_usb_fabrication_approval(config)
+    automatic_review = bool(config.get("usb_routing_contracts")) and not approval_present
+    review = engineering_review or (
+        not require_fabrication_approval and (automatic_review or mode == "engineering_review")
+        and not approval_present
+    )
+    if not review and (bounded or allow_bounded_launches):
+        raise ValueError("bounded USB launches require engineering review")
+    resolved = "engineering_review" if review else "fabrication"
     updates = {}
-    if mode != "engineering_review":
-        updates["usb_geometry_mode"] = "engineering_review"
-    if allow_bounded_launches and not bounded:
+    if mode != resolved:
+        updates["usb_geometry_mode"] = resolved
+    if review and not bounded and (
+        allow_bounded_launches or (
+            bool(config.get("usb_routing_contracts"))
+            and "usb_review_allow_bounded_launches" not in config
+        )
+    ):
         updates["usb_review_allow_bounded_launches"] = True
     if updates:
         config = dict(config, **updates)
@@ -7147,6 +7167,45 @@ def _canonical_usb_for_config(state, config: dict) -> list[dict]:
     if config.get("usb_routing_contracts", []) != canonical:
         raise ValueError("autoplacer USB contracts differ from current recipes; regenerate synthesis")
     return canonical
+
+
+def _archive_review_sources(project_dir: Path, stem: str, artifacts) -> Path:
+    """Package this design's editable sources, never stale boards or fab output."""
+    import tempfile
+    import zipfile
+
+    archive = project_dir / f"{stem}_review.zip"
+    sources = [
+        project_dir / f"{stem}.kicad_pcb", artifacts.root_sch,
+        *artifacts.leaf_schs, artifacts.kicad_pro, artifacts.autoplacer_json,
+    ]
+    sources.extend(project_dir / name for name in ("sym-lib-table", "fp-lib-table"))
+    sources.extend(project_dir.glob("*.kicad_sym"))
+    sources.extend(project_dir / f"{stem}{suffix}" for suffix in (
+        ".verification.receipt.json", ".engineering-review.receipt.json",
+        ".usb-routing.receipt.json",
+    ))
+    for root in [project_dir / "3dmodels", *project_dir.glob("*.pretty")]:
+        if root.is_dir() and not root.is_symlink():
+            suffixes = {".step", ".stp", ".wrl"} if root.name == "3dmodels" else {".kicad_mod"}
+            sources.extend(
+                path for path in root.rglob("*")
+                if path.is_file() and not path.is_symlink() and path.suffix.lower() in suffixes
+            )
+    fd, pending_name = tempfile.mkstemp(prefix=f".{archive.name}.", dir=project_dir)
+    try:
+        with os.fdopen(fd, "wb") as pending:
+            with zipfile.ZipFile(pending, "w", compression=zipfile.ZIP_DEFLATED) as output:
+                output.writestr("DRAFT-NOT-FOR-FABRICATION.txt", USB_REVIEW_WARNING + "\n")
+                for path in sorted(sources):
+                    if path.is_file() and not path.is_symlink() and path.resolve().is_relative_to(project_dir.resolve()):
+                        output.write(path, path.relative_to(project_dir))
+            pending.flush()
+            os.fsync(pending.fileno())
+        os.replace(pending_name, archive)
+    finally:
+        Path(pending_name).unlink(missing_ok=True)
+    return archive
 
 
 def _verify_qualified_delivery(pcb: Path, routed: Path, project_dir: Path) -> dict | None:
@@ -7443,26 +7502,26 @@ def _promote_verify_fab(
     atomic_write_text(cleanup_path, json.dumps(cleanup_receipt, indent=2) + "\n")
     gate["escape_cleanup"] = cleanup_receipt
     if not cleanup_receipt["ok"]:
-        gate["fab_acceptable"] = False
+        gate.update(fab_acceptable=False, physical_ok=False)
         gate.setdefault("reasons", []).append("signal escape cleanup ownership/custody unverified")
     if silk_errors:
-        gate["fab_acceptable"] = False
+        gate.update(fab_acceptable=False, physical_ok=False)
         gate.setdefault("reasons", []).extend(silk_errors)
     if config_error:
-        gate["fab_acceptable"] = False
+        gate.update(fab_acceptable=False, physical_ok=False)
         gate.setdefault("reasons", []).append(config_error)
     try:
         qualified_delivery = _verify_qualified_delivery(pcb, routed, project_dir)
         if qualified_delivery is not None:
             gate["qualified_block_preservation"] = qualified_delivery
             if qualified_delivery.get("accepted") is not True:
-                gate["fab_acceptable"] = False
+                gate.update(fab_acceptable=False, physical_ok=False)
                 gate.setdefault("reasons", []).append(
                     "qualified block geometry changed in the delivered board"
                 )
     except Exception as exc:
         gate["qualified_block_preservation"] = {"accepted": False, "error": str(exc)}
-        gate["fab_acceptable"] = False
+        gate.update(fab_acceptable=False, physical_ok=False)
         gate.setdefault("reasons", []).append(f"qualified block delivery unverified: {exc}")
     # Recheck promoted native geometry, never just requested router settings.
     try:
@@ -7511,16 +7570,16 @@ def _promote_verify_fab(
                 run_pcbnew_script(script)
                 local_errors = json.loads(result_path.read_text())
                 if local_errors:
-                    gate["fab_acceptable"] = False
+                    gate.update(fab_acceptable=False, physical_ok=False)
                     gate.setdefault("reasons", []).extend(local_errors)
     except Exception as exc:
-        gate["fab_acceptable"] = False
+        gate.update(fab_acceptable=False, physical_ok=False)
         gate.setdefault("reasons", []).append(f"local contract verification failed: {exc}")
     expected_refs = {p.ref for p in (state.bom.parts if state and state.bom else [])}
     missing_refs = _missing_component_refs(expected_refs, gate["tracks"].get("footprint_refs"))
     castellation_violations = _castellation_geometry_violations(state, pcb)
     if castellation_violations:
-        gate["fab_acceptable"] = False
+        gate.update(fab_acceptable=False, physical_ok=False)
         gate.setdefault("reasons", []).extend(castellation_violations)
     semantic_fab_gates = [
         diagnostic.code
@@ -7529,7 +7588,7 @@ def _promote_verify_fab(
         if diagnostic.severity == "fab_gate"
     ]
     if semantic_fab_gates and os.environ.get("KICRAFT_STAGE_SEMANTICS", "observe") == "enforce":
-        gate["fab_acceptable"] = False
+        gate.update(fab_acceptable=False, physical_ok=False)
         gate.setdefault("reasons", []).append(
             "unresolved stage fabrication gates: " + ", ".join(sorted(set(semantic_fab_gates)))
         )
@@ -7556,7 +7615,7 @@ def _promote_verify_fab(
         gate["form_factor"] = ff_conf["summary"]
         if not ff_conf["conformant"]:
             if ff_conf["enforced"]:
-                gate["fab_acceptable"] = False
+                gate.update(fab_acceptable=False, physical_ok=False)
                 gate.setdefault("reasons", []).append(
                     f"form-factor non-conformant ({ff_conf['summary']})"
                 )
@@ -7577,7 +7636,7 @@ def _promote_verify_fab(
         gate["outline_shape"] = shape_conf["summary"]
         if not shape_conf["conformant"]:
             if shape_conf["enforced"]:
-                gate["fab_acceptable"] = False
+                gate.update(fab_acceptable=False, physical_ok=False)
                 gate.setdefault("reasons", []).append(
                     f"outline-shape non-conformant ({shape_conf['summary']})"
                 )
@@ -7596,7 +7655,7 @@ def _promote_verify_fab(
     #        loud warning so the part gets a marker instead of a silent pass.
     mis_facing, mouth_warnings = _connector_misoriented(pcb)
     if mis_facing:
-        gate["fab_acceptable"] = False
+        gate.update(fab_acceptable=False, physical_ok=False)
         for reason in mis_facing:
             if reason not in gate.setdefault("reasons", []):
                 gate["reasons"].append(reason)
@@ -7610,7 +7669,7 @@ def _promote_verify_fab(
     # Persisted antenna support-line and orientation contract.
     antenna_violations = _antenna_edge_contract_violations(pcb)
     if antenna_violations:
-        gate["fab_acceptable"] = False
+        gate.update(fab_acceptable=False, physical_ok=False)
         for reason in antenna_violations:
             if reason not in gate.setdefault("reasons", []):
                 gate["reasons"].append(reason)
@@ -7675,13 +7734,16 @@ def _promote_verify_fab(
         "violations": list(gate.get("violations", []) or []),
         "missing_refs": list(missing_refs or []),
     }
+    physical_ok = gate["physical_ok"] and not missing_refs
+    gate["physical_ok"] = physical_ok
+    gate["fab_acceptable"] = gate["fab_acceptable"] and physical_ok
+    gate["ok"] = gate["ok"] and physical_ok
     if engineering_review:
         gate["fab_acceptable"] = False
-        gate["ok"] = False
         gate["engineering_review"] = True
-        reason = "engineering-review geometry is unconfirmed; fabrication release blocked"
-        gate.setdefault("reasons", []).append(reason)
-        verify_summary["reasons"] = list(gate["reasons"])
+        gate["review_required"] = physical_ok
+        gate.setdefault("warnings", []).append(USB_REVIEW_WARNING)
+        gate["ok"] = physical_ok
     if verify_summary_out is not None:
         verify_summary_out.update(verify_summary)
 
@@ -7693,6 +7755,13 @@ def _promote_verify_fab(
                 "mode": "engineering_review",
                 "provenance": "calculated_unconfirmed",
                 "fabrication_approved": False,
+                "physical_ok": physical_ok,
+                "run_id": run_id,
+                "run_started_at": run_started_at,
+                "attempt_generation": (
+                    int(os.environ["KICRAFT_ATTEMPT_GENERATION"])
+                    if os.environ.get("KICRAFT_ATTEMPT_GENERATION", "").isdigit() else None
+                ),
                 "board_sha256": gate["board_sha256"],
                 "usb_geometry_ok": gate.get("usb_routing", {}).get("geometry_ok", False),
                 "shorts": gate["shorts"],
@@ -7703,7 +7772,7 @@ def _promote_verify_fab(
         )
     atomic_write_text(pcb.with_suffix(".verification.receipt.json"),
                       json.dumps(gate, indent=2) + "\n")
-    if not gate.get("fab_acceptable", gate["ok"]) or missing_refs:
+    if not physical_ok:
         print(
             f"[build]     kept failed board {pcb.name} for inspection "
             "(no fab package exported; any earlier package is now stale)",
@@ -7789,6 +7858,21 @@ def _promote_verify_fab(
         except Exception as e:  # noqa: BLE001 - bookkeeping must never break the build
             print(f"[build]     (could not surface build warnings: {e})", file=sys.stderr)
 
+    if engineering_review:
+        artifacts.status = "review_required"
+        artifacts.pcb_errors = []
+        artifacts.routed_pcb = pcb
+        artifacts.fab_zip = None
+        artifacts.step_file = None
+        artifacts.board_3d_png = None
+        artifacts.step_model_missing_refs = None
+        artifacts.review_zip = _archive_review_sources(project_dir, stem, artifacts)
+        _persist_artifacts(state, state_path, artifacts)
+        _write_build_gate(state_path, gate)
+        print(f"[build] DRAFT READY: {stem} — USB fabrication confirmation needed")
+        print(f"  editable sources: {artifacts.review_zip}")
+        return REVIEW_REQUIRED_RC
+
     # R3: The LLM electrical review now runs post-wiring (in web.py _run_design)
     # BEFORE the build starts, not at build tail. This avoids wasting the
     # ~11-min place/route on a design with a corroborated electrical blocker.
@@ -7817,6 +7901,8 @@ def _promote_verify_fab(
 
     artifacts.routed_pcb = pcb
     artifacts.fab_zip = Path(fab["zip"])
+    artifacts.review_zip = None
+    artifacts.status = "ok"
     artifacts.step_file = Path(fab["step"]) if fab.get("step") else None
     artifacts.board_3d_png = Path(fab["board_3d_png"]) if fab.get("board_3d_png") else None
     step_coverage = fab.get("step_model_coverage") or {}
@@ -7857,14 +7943,20 @@ def _preflight_project_router(project_dir: Path) -> dict[str, str]:
         load_project_config,
     )
     from kicraft.autoplacer.kicad_routing_tools import (
-        preflight_kicad_routing_tools,
+        preflight_kicad_routing_tools, _require_krt_strict_coupled,
     )
 
     cfg = dict(DEFAULT_CONFIG)
     config_path = discover_project_config(project_dir)
     if config_path is not None:
         cfg.update(load_project_config(config_path))
-    return preflight_kicad_routing_tools(cfg)
+    runtime = preflight_kicad_routing_tools(cfg)
+    if cfg.get("usb_routing_contracts"):
+        _require_krt_strict_coupled(
+            runtime, float(cfg.get("kicad_routing_tools_timeout_s", 300)),
+            bounded_launches=bool(cfg.get("usb_review_allow_bounded_launches", False)),
+        )
+    return runtime
 
 
 def _cmd_manual_route(args: argparse.Namespace) -> int:
@@ -7957,8 +8049,18 @@ def _cmd_manual_route_impl(args: argparse.Namespace) -> int:
         )
 
     try:
+        config_path = project_dir / f"{stem}_autoplacer.json"
+        config = json.loads(config_path.read_text()) if config_path.is_file() else {}
+        _canonical_usb_for_config(state, config)
+        config = _configure_usb_geometry_mode(
+            project_dir, stem, config, engineering_review=False,
+        )
         _preflight_project_router(project_dir)
-    except RuntimeError as exc:
+        if config.get("usb_geometry_mode") == "engineering_review":
+            print(f"[build] WARNING: {USB_REVIEW_WARNING}")
+            artifacts.build_warnings = [USB_REVIEW_WARNING]
+            _persist_artifacts(state, state_path, artifacts)
+    except (RuntimeError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 6
 
@@ -8004,7 +8106,7 @@ def _cmd_manual_route_impl(args: argparse.Namespace) -> int:
         _write_manual_route_result(
             project_dir,
             rc=rc,
-            stage="ok" if rc == 0 else "verify",
+            stage="review_required" if rc == REVIEW_REQUIRED_RC else "ok" if rc == 0 else "verify",
             verify=verify_summary or None,
         )
         return rc
@@ -8253,11 +8355,14 @@ def _layout_route_fab_impl(
         config = json.loads(config_path.read_text()) if config_path.is_file() else {}
         if engineering_review and not route:
             raise ValueError("--engineering-review requires routing, not --no-route")
+        usb_contracts = _canonical_usb_for_config(state, config)
         config = _configure_usb_geometry_mode(
             project_dir, stem, config, engineering_review=engineering_review,
             allow_bounded_launches=bool(getattr(args, "usb_bounded_launches", False)),
-        )
-        usb_contracts = _canonical_usb_for_config(state, config)
+            require_fabrication_approval=bool(getattr(args, "require_fabrication_approval", False)),
+        ) if route else config
+        engineering_review = config.get("usb_geometry_mode") == "engineering_review"
+        do_fab = do_fab and not engineering_review
         silk_errors = _refresh_required_silk(state, project_dir)
         if silk_errors:
             raise ValueError("; ".join(silk_errors))
@@ -8277,10 +8382,18 @@ def _layout_route_fab_impl(
                 raise ValueError("required 2 oz outer copper stackup is absent before layout")
             require_two_ounce_project_rules(pcb.with_suffix(".kicad_pro"), config)
         if route and usb_contracts:
+            from kicraft.autoplacer.config import DEFAULT_CONFIG
+            routing_config = {**DEFAULT_CONFIG, **config}
+            from kicraft.autoplacer.kicad_routing_tools import (
+                preflight_kicad_routing_tools, _require_krt_strict_coupled,
+            )
+            _require_krt_strict_coupled(
+                preflight_kicad_routing_tools(routing_config),
+                float(config.get("kicad_routing_tools_timeout_s", 300)),
+                bounded_launches=bool(config.get("usb_review_allow_bounded_launches", False)),
+            )
             if engineering_review:
-                from kicraft.autoplacer.config import DEFAULT_CONFIG
                 from kicraft.autoplacer.kicad_routing_tools import calculate_usb_review_geometry
-                routing_config = {**DEFAULT_CONFIG, **config}
                 profiles = []
                 for contract in usb_contracts:
                     nets = [segment[key] for segment in contract["segments"]
@@ -8300,8 +8413,9 @@ def _layout_route_fab_impl(
                         "profiles": profiles,
                     }, indent=2) + "\n",
                 )
-                print("[build] engineering review: calculated USB geometry; "
-                      "fabricator confirmation absent; fabrication release blocked")
+                print(f"[build] WARNING: {USB_REVIEW_WARNING}")
+                artifacts.build_warnings = [USB_REVIEW_WARNING]
+                _persist_artifacts(state, state_path, artifacts)
             else:
                 from kicraft.autoplacer.kicad_routing_tools import require_usb_fabrication_approval
                 require_usb_fabrication_approval(config)
@@ -9327,6 +9441,10 @@ def main(argv: list[str] | None = None) -> int:
         help="route with explicitly unconfirmed calculated USB geometry; never export fabrication data",
     )
     p_build.add_argument(
+        "--require-fabrication-approval", action="store_true",
+        help="require confirmed USB fabrication geometry instead of generating an unapproved draft",
+    )
+    p_build.add_argument(
         "--usb-bounded-launches", action="store_true",
         help="allow bounded, explicitly uncontrolled USB pad launches and contact joins in engineering review only",
     )
@@ -9399,6 +9517,10 @@ def main(argv: list[str] | None = None) -> int:
     p_replay.add_argument(
         "--engineering-review", action="store_true",
         help="route a review candidate with unconfirmed calculated USB geometry; fabrication stays blocked",
+    )
+    p_replay.add_argument(
+        "--require-fabrication-approval", action="store_true",
+        help="require confirmed USB fabrication geometry instead of generating an unapproved draft",
     )
     p_replay.add_argument(
         "--usb-bounded-launches", action="store_true",
