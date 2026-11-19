@@ -101,60 +101,88 @@ is already exhausted, parent composition does not start.
 
 ## Engineering review without fabrication approval
 
-**Experimental:** the bounded-launch native path has not completed a full
-`good`/seed-0 replay. Its current USB smoke is blocked. Do not deploy the native
-patch or interpret passing contract tests as board-routing qualification.
+USB review routing remains unapproved for manufacturing. Native local-link
+qualification and a full-board build verdict are separate: neither a successful
+pair route nor passing contract tests establishes fabrication readiness.
 
-`build` and `replay` accept `--engineering-review`. This is an explicit routing
-mode, not manufacturing approval:
+`build` and `replay` default to engineering review for a USB design when no
+manufacturer approval is supplied. They warn and calculate provisional
+geometry rather than rejecting the design before placement. `--engineering-review`
+explicitly selects draft mode; `--require-fabrication-approval` requires approval
+before layout. An invalid approval is not a fallback to automatic draft mode.
 
 ```sh
 .venv/bin/python -m kicraft.design.cli_app replay STATE.json OUT_DIR \
   --quality good --seed 0 --engineering-review --no-fab --no-archive
 ```
 
-Declared USB routing requires the strict-coupled Python frontend patch on the
-pinned source, without replacing the native binary. Apply it to a separate
-checkout and scope the configured backend path to that checkout:
+Declared USB routing requires the patched KiCad Routing Tools differential-pair
+frontend. Strict mode disables whole-pair and whole-member fallback. The optional
+bounded policy admits short, uncontrolled local links, but the USB chain still
+needs a full-profile coupled main span. The patch does not change the native
+binary. Apply it once to a separate checkout of the bundled commit above:
 
 ```sh
-patch -d "$KRT_REVIEW_CHECKOUT" -p1 \
+patch --batch --forward --fuzz=0 -d "$KRT_REVIEW_CHECKOUT" -p1 \
   < deploy/tuning-i7/kicad-routing-tools-strict-coupled.patch
 export KICRAFT_KICAD_ROUTING_TOOLS_PATH="$KRT_REVIEW_CHECKOUT"
 ```
 
-The adapter rejects a frontend lacking `--require-coupled`. This policy attempts
-short links as coupled routes instead of automatically deferring them to
-independent member routing; physically unroutable copper remains a failure.
+The application checks `--require-coupled` before placement. The adapter checks
+again before routing USB, including `--usb-bounded-launch-policy` when bounded
+launches are enabled. It rejects partial, deferred or member-incomplete results
+and single-ended member fallback. Physical copper verification remains separate.
 
-The derived sidecar records `usb_geometry_mode: engineering_review`; subsequent
-invocations must repeat the flag. USB width/gap come from the pinned nominal
-stackup solver on the actual board, with `calculated_unconfirmed` provenance.
-The model excludes outer soldermask and fabrication tolerances. It does not
-substitute a different layer count, thickness, or copper weight.
+USB-only passes default to a 0.025 mm grid when no explicit routing-grid setting
+exists. The ordinary-net grid and clearance floors are unchanged. The finer grid
+can represent channels between fine-pitch contacts that the 0.1 mm grid misses.
+For bounded terminal routing, rectangular partner pads use pad-shaped obstacles
+instead of the conservative capsule approximation.
 
-`--usb-bounded-launches` additionally permits explicitly uncontrolled local pad
-launches and same-component duplicate-contact joins in engineering review only.
-The generated sidecar records `usb_review_allow_bounded_launches: true`; ordinary
-fabrication mode rejects that policy. Narrow copper uses the real fabrication
-floor, not a fictitious 90 Ω rating. Endpoint launches are bounded by two calculated
-main-pair pitches; a short local link may consume both endpoint allowances and is
-reported as `bounded_local`, not coupled 90 Ω copper. Contact joins have separate
-length/envelope bounds derived from the declared contact pads, clearance and
-launch width. The complete USB chain must still contain genuinely coupled,
-full-profile main copper. Verification lists uncontrolled copper, including alias
+In the November 17 project 1167 engineering-review replay (`good`, seed 0),
+`PROGRAM USB` was accepted as a leaf. `POWER INPUT` did not qualify: its
+buck-switch net narrowed beyond the 1.5 mm pad-escape allowance. The replay
+ended at exit 6 with no selected routed parent. The promoted PCB was a partial
+diagnostic, not a verified draft or release. Local evidence:
+`/tmp/kicraft-krt-qualified-8WW7FT/replay.log`, `artifacts.json` in that
+directory, and the replay project's `.experiments` diagnostics.
+
+The derived sidecar records `usb_geometry_mode: engineering_review`; ordinary
+invocations can reuse that input without repeating the flag. USB width/gap come
+from the pinned nominal stackup solver on the actual board, with
+`calculated_unconfirmed` provenance. The model excludes outer soldermask and
+fabrication tolerances. It does not substitute a different layer count,
+thickness, or copper weight.
+
+Calculated review geometry defaults to bounded local pad launches and
+same-component duplicate-contact joins. `--usb-bounded-launches` explicitly
+requests the same policy; a saved `usb_review_allow_bounded_launches: false`
+preserves a full-width-only request unless explicitly overridden. The derived
+sidecar records the resolved policy. Fabrication mode rejects bounded launches.
+Narrow copper uses the fabrication width floor, not a fictitious 90 Ω rating.
+Endpoint launches are bounded by two calculated main-pair pitches. A local link
+may use both endpoint allowances and is reported as `bounded_local`, not coupled
+90 Ω copper. Contact join length and envelope bounds come from the declared
+contact pads, clearance and launch width. The complete USB chain must still
+contain full-profile coupled main copper. Verification lists uncontrolled copper, including alias
 branches, and retains reference, skew, transition, connectivity and clearance
 checks. The bounded policy does not enable whole-net independent routing fallback
 or fabrication release.
 
 Coupled routing, copper custody, physical connectivity, skew, reference copper,
 return transitions, thermal and ordinary DRC checks remain required. Independent
-USB-member fallback is not accepted. A routed review candidate is still
-unapproved: the final verification gate blocks fabrication acceptance and export,
-writes an engineering-review receipt, and returns `7`. Inspect that receipt and
-the full verification receipt to distinguish the intentional release block from
-real physical failures. An ordinary fabrication invocation still requires genuine,
-stackup-bound fabrication approval.
+USB-member fallback is not accepted. Missing manufacturer confirmation alone
+does not make a physically valid draft a failed build.
+
+A physically verified engineering-review result returns **9** (`review_required`),
+records board-bound engineering-review and verification receipts, and produces
+`<stem>_review.zip`: editable sources with a draft-only notice and no Gerber or
+drill files. Fabrication approval stays false. Physical failures retain their own
+exit codes; a partial preview is not a draft-ready result. Exit **0** remains
+success outside engineering-review mode, including a verified `--no-fab` replay.
+The web project reports **Draft ready — USB fabrication confirmation needed**,
+not Failed or fabrication-ready. A strict fabrication invocation requires genuine,
+stackup-bound approval.
 
 ## Verification
 

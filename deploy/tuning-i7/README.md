@@ -6,12 +6,17 @@ nothing on kicraft.io depends on it. The only thing that flows back to
 production is the winning `DEFAULT_CONFIG` (a tiny git commit you make yourself
 after reviewing the result).
 
-The container mirrors production: Ubuntu 24.04, KiCad 9, and KiCad Routing
+The image uses Ubuntu 24.04, KiCad 9, and pinned KiCad Routing
 Tools source `0.20.2` at commit
 `f6fa93122db463ff3f3a1617605c69f7959d2cd9` with native router `0.20.1`.
-The included Git bundle carries KiCraft's multipoint connectivity repair atop
-upstream `3ceb773722bea67aa3685e7ee430c0c0d17ef38d`; the Dockerfile imports it.
-It clones the KiCraft repo and runs `kicraft.tuning.cli run`.
+The included Git bundle carries KiCraft's connectivity fixes and streaming route
+observer atop upstream `3ceb773722bea67aa3685e7ee430c0c0d17ef38d`. The Dockerfile
+applies `kicad-routing-tools-strict-coupled.patch` to that bundled checkout.
+The patch changes only the Python frontend: it disables whole-pair and
+whole-member fallback in strict mode and permits explicitly bounded terminal
+routing for USB engineering review. It does not qualify a board or approve
+fabrication. The build requests the upstream native release asset separately.
+The image clones KiCraft and runs `kicraft.tuning.cli run`.
 
 ## Prerequisites (unraid 6.12.6)
 - Docker (built in).
@@ -23,7 +28,7 @@ It clones the KiCraft repo and runs `kicraft.tuning.cli run`.
 ## Get the files onto unraid
 Copy this `deploy/tuning-i7/` folder to the box, e.g. to a share or appdata:
 ```sh
-# from a machine that has the repo, copy the complete folder (including the Git bundle):
+# From the repo root, copy the complete folder (including the bundle and patch):
 scp -r deploy/tuning-i7 root@TOWER:/mnt/user/appdata/kicraft-tune-build
 ```
 (or clone the repo on the box and use `KiCraft/deploy/tuning-i7`).
