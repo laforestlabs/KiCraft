@@ -480,6 +480,7 @@ def lowerer_contract_diagnostic(
         except ValueError as exc:
             failure = str(exc)
     required_ports = lowerer.required_port_keys
+    conditioner_errors: list[str] = []
     if lowerer_id == "reviewed-jst-xh-connector@1":
         if requirement.exact_part:
             record = reviewed_part(requirement.exact_part)
@@ -494,12 +495,43 @@ def lowerer_contract_diagnostic(
             )
         required_ports = (*required_ports, *(f"pin{index}" for index in range(1, count + 1)))
     elif lowerer_id == "analog-conditioner@1":
-        channels = requirement.parameters.get("channel_count", 2)
-        if type(channels) in (int, float) and channels in (2, 4, 8):
-            required_ports = (
-                *required_ports,
-                *(f"analog_out_{index}" for index in range(1, int(channels) + 1)),
+        from kicraft.design.analog_conditioner import (
+            CONDITIONER_CHANNEL_COUNTS,
+            conditioner_channel_count,
+            conditioner_required_ports,
+            conditioner_sensor_type,
+            current_sense_port_errors,
+        )
+
+        channels = conditioner_channel_count(requirement.parameters)
+        if channels is None:
+            conditioner_errors.append(
+                f"parameters.channel_count={requirement.parameters.get('channel_count')!r} "
+                f"is unsupported; accepted counts are {list(CONDITIONER_CHANNEL_COUNTS)}"
             )
+        else:
+            sensor = conditioner_sensor_type(requirement.parameters)
+            required_ports = conditioner_required_ports(
+                channels, sensor, requirement.parameters.get("power_cycle_isolation") is True,
+            )
+            missing = [key for key in required_ports if not requirement.ports.get(key, "").strip()]
+            if missing:
+                conditioner_errors.append("unbound required ports: " + ", ".join(missing))
+                if any(key.startswith(("analog_out_", "load_return_")) for key in missing):
+                    conditioner_errors.append(
+                        "a single requested measurement uses channel_count=1; "
+                        "multiple requested measurements require all their inputs and outputs"
+                    )
+            extra = sorted(
+                key for key in requirement.ports
+                if key not in required_ports and lowerer_port_direction(lowerer, key) is not None
+            )
+            if extra:
+                conditioner_errors.append(
+                    f"ports outside the declared channel and isolation contract: {', '.join(extra)}"
+                )
+            if sensor == "current-sense":
+                conditioner_errors.extend(current_sense_port_errors(requirement.ports, channels))
     evidence = [
         "ports=" + ",".join(name for name, _direction in lowerer.port_directions),
         *(
@@ -511,6 +543,7 @@ def lowerer_contract_diagnostic(
     ]
     if required_ports:
         evidence.insert(0, "required_ports=" + ",".join(required_ports))
+    evidence.extend(conditioner_errors)
     if lowerer.parameter_choices:
         evidence.append(
             "parameter_choices="
@@ -537,7 +570,9 @@ def lowerer_contract_diagnostic(
         key for key in required_ports if str(key).lower() not in bound
     )
     unpublished_parameters = sorted(set(requirement.parameters) - set(lowerer.parameter_keys))
-    if not requirement.ports and (
+    if conditioner_errors:
+        message = f"known lowerer {lowerer_id}: " + "; ".join(conditioner_errors)
+    elif not requirement.ports and (
         required_ports or lowerer.port_directions or lowerer.port_patterns
     ):
         # The lowerer owns this family, so a model-authored fallback is refused; the

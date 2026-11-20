@@ -30,6 +30,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from .analog_conditioner import conditioner_channel_count, conditioner_sensor_type
 from .lowering import (
     DEFAULT_MOMENTARY_BUTTON,
     _stated_contact_count,
@@ -1094,8 +1095,38 @@ def _declared_ports_from_signals(payload: dict, requirement_id: str, contacts: t
     ]
 
 
+def _numbered_carrier_width(payload: dict, requirement: dict) -> int:
+    """Largest physical contact of a proven pinN → N interface, or zero."""
+    keys = _referenced_ports(payload, str(requirement.get("id") or ""))
+    for field in ("ports", "supply_bindings", "reference_bindings"):
+        bindings = requirement.get(field)
+        if isinstance(bindings, dict):
+            keys.update(str(key) for key in bindings)
+    declared = requirement.get("declared_ports")
+    if declared:
+        for port in declared:
+            if not isinstance(port, dict):
+                return 0
+            key = str(port.get("key") or "")
+            match = re.fullmatch(r"pin([1-9][0-9]*)", key)
+            if match is None or str(port.get("pin")) != match[1]:
+                return 0
+            keys.add(key)
+    width = 0
+    for key in keys:
+        match = re.fullmatch(r"pin([1-9][0-9]*)", key)
+        if match is not None:
+            width = max(width, int(match[1]))
+        elif not declared:
+            # Without an explicit identity map, mixed keys cannot prove one.
+            return 0
+    return width
+
+
 def _required_carrier_contacts(payload: dict, requirement: dict) -> int:
     """Contact cardinality required by explicit interface evidence, never a default series size."""
+    if width := _numbered_carrier_width(payload, requirement):
+        return width
     declared = requirement.get("declared_ports")
     if isinstance(declared, list) and declared:
         keys = [str(row.get("key") or "") for row in declared if isinstance(row, dict)]
@@ -1536,16 +1567,6 @@ def _adopt_carrier_families(payload: dict) -> dict:
             row for row in _physical_obligations(requirement)
             if row.get("kind") == "physical"
         ]
-        declared = requirement.get("declared_ports") or []
-        ports = requirement.get("ports") or {}
-        identity_contacts = bool(declared) and all(
-            isinstance(port, dict)
-            and re.fullmatch(r"pin[1-9][0-9]*", str(port.get("key") or ""))
-            and str(port.get("pin")) == str(port["key"])[3:]
-            for port in declared
-        )
-        if not declared and isinstance(ports, dict) and ports:
-            identity_contacts = all(re.fullmatch(r"pin[1-9][0-9]*", str(key)) for key in ports)
         if (
             family.casefold() in {
                 "pin-header", "pin_header", "generic-header", "header",
@@ -1560,7 +1581,7 @@ def _adopt_carrier_families(payload: dict) -> dict:
                 <= {"pin-header", "pin-socket"}
                 for row in physical
             )
-            and identity_contacts
+            and _numbered_carrier_width(payload, requirement)
             and (
                 not requirement.get("exact_part")
                 or _lowerer_realizes_exact_part("pin-header", str(requirement["exact_part"]))
@@ -4694,12 +4715,10 @@ def derive_architecture(
             }
         ):
             continue
-        try:
-            channels = int(requirement.parameters.get("channel_count", 2))
-        except (TypeError, ValueError):
+        channels = conditioner_channel_count(requirement.parameters)
+        if channels is None:
             continue
-        if type(requirement.parameters.get("channel_count", 2)) is bool or channels not in {2, 4, 8}:
-            continue
+        sensor = conditioner_sensor_type(requirement.parameters)
         bound = bindings.setdefault(requirement_id, {})
         analog_return = bound.get("vminus")
         if analog_return is not None:
@@ -4707,7 +4726,7 @@ def derive_architecture(
                 "analog_out_return",
                 *(f"sensor_{index}_return" for index in range(1, channels + 1)),
             ]
-            if str(requirement.parameters.get("sensor_type", requirement.parameters.get("topology", ""))).casefold().replace("_", "-") == "current-sense":
+            if sensor == "current-sense":
                 return_ports.extend(
                     f"load_return_out_{index}" for index in range(1, channels + 1)
                 )
@@ -4724,11 +4743,6 @@ def derive_architecture(
                         f"{requirement_id}.{port}: shares {analog_return} with vminus "
                         "(analog conditioner topology) (derived)"
                     )
-        sensor = str(
-            requirement.parameters.get(
-                "sensor_type", requirement.parameters.get("topology", "temperature")
-            )
-        ).casefold().replace("_", "-")
         for index in range(1, channels + 1):
             signal = f"sensor_{index}_signal"
             load_input = f"load_return_in_{index}"

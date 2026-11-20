@@ -1,7 +1,7 @@
 
 import pytest
 
-from kicraft.design.lowering import lower_requirement
+from kicraft.design.lowering import lower_requirement, lowerer_contract_diagnostic
 from kicraft.design.models import CircuitRequirement
 
 
@@ -51,7 +51,7 @@ def _requirement(sensor: str, channels: int, amplifier: str, *, trim=False):
 
 @pytest.mark.parametrize("amplifier", _AMPLIFIERS)
 @pytest.mark.parametrize("sensor", _SENSORS)
-@pytest.mark.parametrize("channels", (2, 4, 8))
+@pytest.mark.parametrize("channels", (1, 2, 4, 8))
 def test_conditioner_preserves_requested_dual_amplifier_sensor_and_channel_count(amplifier, sensor, channels):
     artifact = lower_requirement(_requirement(sensor, channels, amplifier))
     groups = {group.role: group for group in artifact.groups}
@@ -85,6 +85,53 @@ def test_current_sense_has_real_low_side_return_and_never_a_sense_placeholder():
     assert sensor_pins == {(0, "1"): "SHUNT_H1", (0, "2"): "AGND", (1, "1"): "SHUNT_H2", (1, "2"): "AGND"}
     assert all("SENSE" not in str(pin.net) for pin in artifact.pins)
 
+
+@pytest.mark.parametrize(
+    ("wired", "declared", "bindings", "details"),
+    [
+        (1, 2, {"load_return_out_1": "SENSE_SHUNT_OUT_1", "sensor_1_return": "SENSE_SHUNT_OUT_1"},
+         ("analog_out_2", "load_return_in_2", "load_return_out_2", "channel_count=1",
+          "load_return_out_1", "SENSE_SHUNT_OUT_1", "vminus 'AGND'", "tie its connector contact")),
+        (1, 1, {"load_return_out_1": "SENSE_SHUNT_OUT_1", "sensor_1_return": "SENSE_SHUNT_OUT_1"},
+         ("load_return_out_1", "SENSE_SHUNT_OUT_1", "vminus 'AGND'", "tie its connector contact")),
+        (1, 1, {"load_return_in_1": "AGND", "sensor_1_signal": "AGND"},
+         ("load_return_in_1", "vminus 'AGND'", "bypasses the shunt")),
+        (1, 1, {"load_return_in_1": "AV5", "sensor_1_signal": "AV5"},
+         ("load_return_in_1", "vplus 'AV5'", "shunt across the supplies")),
+        (2, 2, {"load_return_in_2": "SHUNT_H1", "sensor_2_signal": "SHUNT_H1"},
+         ("load_return_in_2", "load_return_in_1", "SHUNT_H1", "distinct load nets")),
+        (1, 1, {"analog_out_2": "OUT2"}, ("outside the declared channel", "analog_out_2")),
+    ],
+    ids=["incomplete-and-wrong-low", "wrong-low", "bypassed-shunt", "across-supplies",
+         "parallel-shunts", "extra-output"],
+)
+def test_current_sense_channel_contract_refuses_incomplete_or_shorted_paths(wired, declared, bindings, details):
+    requirement = _requirement("current-sense", wired, "MCP6002-I/SN")
+    parameters = {key: value for key, value in requirement.parameters.items() if key != "sensor_type"}
+    requirement = requirement.model_copy(update={
+        "parameters": {**parameters, "topology": "current_sense", "channel_count": declared},
+        "ports": {**requirement.ports, **bindings},
+    })
+    with pytest.raises(ValueError):
+        lower_requirement(requirement)
+    diagnostic = lowerer_contract_diagnostic(requirement)
+    assert diagnostic is not None
+    assert all(detail in diagnostic.message for detail in details), diagnostic.message
+    assert all(detail in " ".join(diagnostic.evidence) for detail in details), diagnostic.evidence
+
+
+@pytest.mark.parametrize("count", [True, "1", 1.5, 3, None])
+def test_conditioner_refuses_non_supported_channel_counts(count):
+    requirement = _requirement("current-sense", 1, "MCP6002-I/SN")
+    requirement = requirement.model_copy(update={
+        "parameters": {**requirement.parameters, "channel_count": count},
+    })
+    with pytest.raises(ValueError):
+        lower_requirement(requirement)
+    diagnostic = lowerer_contract_diagnostic(requirement)
+    assert f"channel_count={count!r}" in diagnostic.message
+    assert "[1, 2, 4, 8]" in diagnostic.message
+    assert "unbound" not in diagnostic.message
 
 def test_3v3_consumer_selects_tlv9062_documented_reduced_span_without_rewriting_explicit_gain():
     requirement = _requirement("current-sense", 2, "TLV9062IDR")
@@ -337,8 +384,6 @@ def test_isolated_conditioner_rejects_cross_channel_output_alias():
 
 
 def test_conditioner_repair_identifies_unconnected_channel_and_preserves_physical_output():
-    from kicraft.design.lowering import lowerer_contract_diagnostic
-
     complete = _requirement("humidity", 2, "TLV9062IDR")
     incomplete = complete.model_copy(update={
         "ports": {name: net for name, net in complete.ports.items()

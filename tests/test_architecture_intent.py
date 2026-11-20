@@ -4603,6 +4603,154 @@ def test_conditioner_internal_output_cannot_bypass_the_owned_isolation_switch():
         for row in exc.value.diagnostics
     )
 
+
+def test_single_channel_current_breakout_constructs_requested_interfaces():
+    from kicraft.design.lowering import lower_requirement
+    from kicraft.design.models import Architecture, BOM
+    from kicraft.design.part_identity import reviewed_part
+    from kicraft.design.stage_reference import architecture_lowerer_summaries
+    from kicraft.design.synthesis.validation import check_composed_wiring
+    from kicraft.eval.analog_artifact_evidence import analog_conditioner_facts
+    from kicraft.server.stage_work_units import probe_architecture_construction
+
+    conditioner = next(row for row in architecture_lowerer_summaries()
+                       if row["lowerer"] == "analog-conditioner@1")
+    (count,) = [value for value in conditioner["parameter_choices"]["channel_count"]
+                if type(value) is int and value == 1]
+    obligations = [
+        {"kind": "physical", "original_obligation_id": name, "component_class": component_class}
+        for name, component_class in (
+            ("host-power-header", "pin-header"), ("ch32v003", "microcontroller"),
+            ("spi-header", "pin-header"), ("jst-connector", "jst-connector"),
+        )
+    ]
+    upstream = {
+        "intent": {"goal": "Single low-side current measurement with SPI breakout", "obligations": obligations},
+        "functional_spec": {
+            "obligations": obligations,
+            "blocks": [
+                {"name": "HOST_POWER", "category": "power", "purpose": "Supply 5 V",
+                 "obligation_ids": ["host-power-header"]},
+                {"name": "PROCESSING", "category": "process", "purpose": "Sample and expose SPI",
+                 "obligation_ids": ["ch32v003", "spi-header"]},
+                {"name": "CURRENT_SENSING", "category": "sense", "count": 1, "purpose": "Measure one current",
+                 "obligation_ids": ["jst-connector"]},
+            ],
+            "connections": [{"from_block": "CURRENT_SENSING", "to_block": "PROCESSING",
+                             "signal_type": "analog", "description": "Current measurement"}],
+        },
+    }
+    payload = {
+        "mcu_present": True,
+        "sheets": [
+            {"name": "POWER", "stem": "POWER", "role": "power", "function": "Host 5 V and 3.3 V regulation"},
+            {"name": "PROCESSING", "stem": "PROCESSING", "role": "mcu", "function": "Sample current and expose SPI"},
+            {"name": "CURRENT SENSING", "stem": "CURRENT_SENSING", "role": "sensor", "function": "Low-side current measurement"},
+        ],
+        "requirements": [
+            {"id": "host", "sheet": "POWER", "role": "power_input", "family": "pin-header",
+             "parameters": {"rows": 1, "gender": "male"}, "ties": {"pin2": "GND"},
+             "functional_blocks": ["HOST_POWER"], "obligation_ids": ["host-power-header"]},
+            {"id": "regulator", "sheet": "POWER", "role": "regulator", "family": "me6211-3v3",
+             "exact_part": "ME6211C33M5G-N", "supply": "+5V", "functional_blocks": ["HOST_POWER"]},
+            {"id": "mcu", "sheet": "PROCESSING", "role": "mcu_core", "family": "ch32v003",
+             "exact_part": "CH32V003F4P6", "supply": "+3V3", "interfaces": ["spi_controller"],
+             "programming": "none", "functional_blocks": ["PROCESSING"], "obligation_ids": ["ch32v003"]},
+            {"id": "sense", "sheet": "CURRENT SENSING", "role": "analog_block", "family": "analog-conditioner",
+             "exact_part": "MCP6002-I/SN", "supply": "+5V",
+             "functional_blocks": ["CURRENT_SENSING"],
+             "parameters": {"channel_count": count, "sensor_type": "current-sense", "analog_rail_v": 5.0, "trim": False}},
+            {"id": "spi_header", "sheet": "PROCESSING", "role": "connector", "family": "pin-header",
+             "parameters": {"rows": 1, "gender": "male"}, "ties": {"pin6": "GND"},
+             "functional_blocks": ["PROCESSING"], "obligation_ids": ["spi-header"]},
+            {"id": "jst", "sheet": "CURRENT SENSING", "role": "connector", "family": "jst-xh-connector",
+             "exact_part": "B4B-XH-A(LF)(SN)", "ties": {"pin2": "GND"},
+             "functional_blocks": ["CURRENT_SENSING"], "obligation_ids": ["jst-connector"]},
+        ],
+        "signals": [
+            {"name": "SENSE_OUT_1", "from": "sense.analog_out_1", "to": "mcu.adc_0"},
+            {"name": "SENSE_SHUNT_IN_1", "from": "jst.pin1", "to": "sense.load_return_in_1"},
+            {"name": "SPI_SCK", "from": "mcu.spi_sck", "to": "spi_header.pin1"},
+            {"name": "SPI_MOSI", "from": "mcu.spi_mosi", "to": "spi_header.pin2"},
+            {"name": "SPI_MISO", "from": "mcu.spi_miso", "to": "spi_header.pin3"},
+            {"name": "SPI_CS", "from": "mcu.spi_cs0", "to": "spi_header.pin4"},
+            {"name": "SPI_3V3", "from": "regulator.output", "to": "spi_header.pin5"},
+        ],
+        "power": {"rails": {
+            "+5V": {"voltage": 5.0, "from": "host.pin1"},
+            "+3V3": {"voltage": 3.3, "from": "regulator.output"},
+        }},
+    }
+    normalized, _ = _normalize_stage_response("architecture", payload, upstream)
+    architecture = Architecture.model_validate(normalized)
+    bom = BOM.model_validate(probe_architecture_construction({**upstream, "architecture": normalized}))
+    assert not [check for check in check_composed_wiring(architecture, bom) if not check.ok]
+
+    pad_nets = {(ep.ref, ep.pin): net.net_name for net in bom.connections for ep in net.endpoints}
+
+    def pads(part):
+        return {pin: net for (ref, pin), net in pad_nets.items() if ref == part.ref}
+
+    (amp,) = [p for p in bom.parts if p.mpn == "MCP6002-I/SN"]
+    (shunt,) = [p for p in bom.parts if p.mpn == "WSL2512R1000FEA"]
+    (bypass,) = [p for p in bom.parts if p.lowering_requirement_id == "sense"
+                 and p.lowering_role == "amplifier_decoupling"]
+    (jst,) = [p for p in bom.parts if p.lowering_requirement_id == "jst"]
+    (host,) = [p for p in bom.parts if p.lowering_requirement_id == "host"]
+    (spi,) = [p for p in bom.parts if p.lowering_requirement_id == "spi_header"]
+    (mcu_selection,) = [s for s in architecture.recipe_selections if "mcu" in s.requirement_ids]
+    (mcu,) = [p for p in bom.parts if p.recipe_instance == mcu_selection.instance and p.recipe_role == "mcu"]
+    (adc,) = [a for a in mcu_selection.pin_allocations if a.capability == "adc"]
+    (regulator_selection,) = [s for s in architecture.recipe_selections if "regulator" in s.requirement_ids]
+    (regulator,) = [p for p in bom.parts if p.recipe_instance == regulator_selection.instance
+                    and p.mpn == "ME6211C33M5G-N"]
+
+    assert amp.lowering_requirement_id == shunt.lowering_requirement_id == "sense"
+    assert reviewed_part(shunt.mpn).operating_limits["resistance_ohm"] == 0.1
+    assert bypass.value == "100nF" and pads(bypass) == {"1": "+5V", "2": "GND"}
+    assert jst.mpn.casefold() == "b4b-xh-a(lf)(sn)"
+    assert pads(jst) == pads(shunt) == {"1": "SENSE_SHUNT_IN_1", "2": "GND"}
+    assert {ep.pin for ep in bom.no_connect_pins if ep.ref == jst.ref} == {"3", "4"}
+    assert tuple(pad_nets[amp.ref, pin] for pin in ("3", "4", "5", "8")) == (
+        "SENSE_SHUNT_IN_1", "GND", "GND", "+5V",
+    )
+    assert mcu.mpn == "CH32V003F4P6"
+    assert pad_nets[amp.ref, "1"] == pad_nets[mcu.ref, adc.pin] == adc.net == "SENSE_OUT_1"
+    idle = pad_nets[amp.ref, "7"]
+    assert {pad for pad, net in pad_nets.items() if net == idle} == {(amp.ref, "6"), (amp.ref, "7")}
+
+    assert pads(host) == {"1": "+5V", "2": "GND"}
+    assert pad_nets[regulator.ref, "1"] == "+5V"
+    assert pad_nets[regulator.ref, "5"] == "+3V3"
+    header = _requirement(architecture, "spi_header")
+    assert header.family == "pin-header" and header.parameters == {"rows": 1, "gender": "male"}
+    assert header.declared_interface is None
+    assert spi.resolution_id == "pin-header@1"
+    spi_nets = ("SPI_SCK", "SPI_MOSI", "SPI_MISO", "SPI_CS")
+    assert pads(spi) == dict(zip("123456", (*spi_nets, "+3V3", "GND"), strict=True))
+    # CH32V003F4P6 SPI1 SCK/MOSI/MISO/NSS contacts in that order.
+    assert tuple(pad_nets[mcu.ref, pin] for pin in ("15", "16", "17", "11")) == spi_nets
+
+    sense = _requirement(architecture, "sense")
+    assert {key: net for key, net in sense.ports.items() if key.startswith("analog_out_")
+            and key != "analog_out_return"} == {"analog_out_1": "SENSE_OUT_1"}
+    assert sense.parameters["consumer_input_max_v"] == 3.3
+    artifact = lower_requirement(sense)
+    assert next(c.chosen_value for c in artifact.calculations if c.output == "maximum_output_v") == "2.471V"
+    voltages = {"GND": 0.0, **architecture.rail_voltages}
+
+    def supply_voltage(high, low):
+        return voltages[high] - voltages[low] if high in voltages and low in voltages else None
+
+    facts = analog_conditioner_facts(
+        [part.model_dump() for part in bom.parts], {}, pad_nets,
+        state={"architecture": normalized}, supply_voltage=supply_voltage,
+    )
+    assert facts["analog_output_nets"] == ["SENSE_OUT_1"]
+    assert facts["gates"]["external_current_sense_conditioning_function"] == "pass"
+    assert facts["gates"].get("external_current_sense_channel_count_2") != "pass"
+
+
 def test_temt6000_reference_parameter_derives_its_required_return_binding():
     """`reference_v=GND` describes the return; it cannot leave vminus floating."""
     architecture = derive_architecture(

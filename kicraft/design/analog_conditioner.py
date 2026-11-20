@@ -7,6 +7,7 @@ has no op-amp enable/reset contact: the requested dual op amps do not provide on
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 from kicraft.design.models import CircuitRequirement
@@ -35,6 +36,20 @@ _SENSOR_DEFAULTS = {
     "hall-effect": "DRV5055A3QDBZR",
 }
 _SENSOR_ALIASES = {"ambient_light": "ambient-light", "current_sense": "current-sense", "hall": "hall-effect", "hall_effect": "hall-effect"}
+
+CONDITIONER_CHANNEL_COUNTS = (1, 2, 4, 8)
+
+
+def conditioner_channel_count(parameters: Mapping[str, object]) -> int | None:
+    value = parameters.get("channel_count", 2)
+    if type(value) in (int, float) and value in CONDITIONER_CHANNEL_COUNTS:
+        return int(value)
+    return None
+
+
+def conditioner_sensor_type(parameters: Mapping[str, object]) -> str:
+    sensor = str(parameters.get("sensor_type", parameters.get("topology", "temperature"))).casefold()
+    return _SENSOR_ALIASES.get(sensor, sensor)
 
 
 @dataclass(frozen=True)
@@ -75,25 +90,54 @@ def _sensor_group(sensor: str, channels: int, sensor_identity: str | None = None
     return _group("sensor", "S" if sensor != "current-sense" else "R", mpn, symbol, footprint, quantity=channels, mpn=mpn)
 
 
+def conditioner_required_ports(channels: int, sensor: str, isolated: bool) -> tuple[str, ...]:
+    required = ("vplus", "vminus", *(f"analog_out_{n}" for n in range(1, channels + 1)))
+    if sensor == "current-sense":
+        required += tuple(
+            f"load_return_{side}_{n}" for n in range(1, channels + 1) for side in ("in", "out")
+        )
+    if isolated:
+        required += ("isolation_vdd", "isolation_enable")
+    return required
+
+
+def current_sense_port_errors(ports: Mapping[str, str], channels: int) -> tuple[str, ...]:
+    """Check present shunt bindings even when other channel ports are missing."""
+    errors: list[str] = []
+    inputs: dict[str, str] = {}
+    vminus = ports.get("vminus")
+    vplus = ports.get("vplus")
+    for n in range(1, channels + 1):
+        low = f"load_return_out_{n}"
+        if (net := ports.get(low)) and vminus and net != vminus:
+            errors.append(
+                f"{low} is on {net!r}, but must share vminus {vminus!r}: remove the separately "
+                f"named return signal and tie its connector contact to {vminus!r}"
+            )
+        high = f"load_return_in_{n}"
+        if not (net := ports.get(high)):
+            continue
+        if net == vminus:
+            errors.append(f"{high} is on vminus {net!r} (bypasses the shunt); use a distinct load contact")
+        if net == vplus:
+            errors.append(f"{high} is on vplus {net!r} (shunt across the supplies); use a distinct load contact")
+        if net in inputs:
+            errors.append(f"{high} shares {net!r} with {inputs[net]}; use distinct load nets")
+        else:
+            inputs[net] = high
+    return tuple(errors)
 
 
 def _ports(requirement: CircuitRequirement, channels: int, sensor: str, power_cycle_isolation: bool) -> dict[str, str] | None:
-    required = {"vplus", "vminus", "analog_out_return"}
+    required = {*conditioner_required_ports(channels, sensor, power_cycle_isolation), "analog_out_return"}
     required |= {f"sensor_{index}_signal" for index in range(1, channels + 1)}
     required |= {f"sensor_{index}_return" for index in range(1, channels + 1)}
     required |= {f"conditioned_{index}" for index in range(1, channels + 1)}
-    required |= {f"analog_out_{index}" for index in range(1, channels + 1)}
-    if power_cycle_isolation:
-        required |= {"isolation_vdd", "isolation_enable"}
-    if sensor == "current-sense":
-        required |= {
-            f"load_return_{side}_{index}"
-            for side in ("in", "out")
-            for index in range(1, channels + 1)
-        }
     if set(requirement.ports) != required or any(not str(value).strip() for value in requirement.ports.values()):
         return None
     ports = {key: str(value) for key, value in requirement.ports.items()}
+    if sensor == "current-sense" and current_sense_port_errors(ports, channels):
+        return None
     if ports["vplus"] == ports["vminus"] or ports["vminus"] != ports["analog_out_return"]:
         return None
     if power_cycle_isolation and (
@@ -124,18 +168,13 @@ def _ports(requirement: CircuitRequirement, channels: int, sensor: str, power_cy
         ):
             return None
     if sensor == "current-sense":
-        current_inputs = []
         for index in range(1, channels + 1):
             in_key, out_key = f"load_return_in_{index}", f"load_return_out_{index}"
             if (
-                ports[out_key] != ports["vminus"]
-                or ports[f"sensor_{index}_signal"] != ports[in_key]
+                ports[f"sensor_{index}_signal"] != ports[in_key]
                 or ports[f"sensor_{index}_return"] != ports[out_key]
             ):
                 return None
-            current_inputs.append(ports[in_key])
-        if len(set(current_inputs)) != channels:
-            return None
     return ports
 
 
@@ -146,16 +185,16 @@ def _channel_pins(index: int) -> _Channel:
 
 def _analog_conditioner(requirement: CircuitRequirement) -> LoweringArtifact | None:
     parameters = requirement.parameters
-    sensor = _SENSOR_ALIASES.get(str(parameters.get("sensor_type", parameters.get("topology", "temperature"))).casefold(), str(parameters.get("sensor_type", parameters.get("topology", "temperature"))).casefold())
+    sensor = conditioner_sensor_type(parameters)
+    channels = conditioner_channel_count(parameters)
     try:
-        channels = int(parameters.get("channel_count", 2))
         rail = float(parameters.get("analog_rail_v", 5.0))
         load_min = float(parameters.get("output_load_min_ohm", 10_000.0))
         load_cap = float(parameters.get("output_cap_max_pf", 100.0))
         consumer_limit = float(parameters["consumer_input_max_v"]) if "consumer_input_max_v" in parameters else None
     except (TypeError, ValueError):
         return None
-    if type(parameters.get("channel_count", 2)) is bool or channels not in {2, 4, 8} or sensor not in _SENSOR_DEFAULTS or rail not in (3.3, 5.0) or load_min < 10_000 or load_cap > 100 or consumer_limit is not None and consumer_limit <= 0:
+    if channels is None or sensor not in _SENSOR_DEFAULTS or rail not in (3.3, 5.0) or load_min < 10_000 or load_cap > 100 or consumer_limit is not None and consumer_limit <= 0:
         return None
     power_cycle_isolation = parameters.get("power_cycle_isolation", False)
     if type(power_cycle_isolation) is not bool:
@@ -590,13 +629,14 @@ ANALOG_CONDITIONER_LOWERER = RegisteredLowerer(
     port_keys=("vplus, vminus; analog_out_<n>; power-cycle isolation also isolation_vdd/isolation_enable; current sense also load_return_in_<n>/load_return_out_<n>",),
     required_port_keys=("vplus", "vminus"),
     reference_port_keys=("vminus",),
-    parameter_choices=(("channel_count", (2, 4, 8)), ("sensor_type", tuple(_SENSOR_DEFAULTS)), ("topology", tuple(_SENSOR_DEFAULTS)), ("amplifier_exact_part", tuple(part[0] for part in _ANALOG_PARTS.values())), ("analog_rail_v", (3.3, 5.0)), ("trim", (False, True)), ("power_cycle_isolation", (False, True)), ("reset_button", (False, True))),
+    parameter_choices=(("channel_count", CONDITIONER_CHANNEL_COUNTS), ("sensor_type", tuple(_SENSOR_DEFAULTS)), ("topology", tuple(_SENSOR_DEFAULTS)), ("amplifier_exact_part", tuple(part[0] for part in _ANALOG_PARTS.values())), ("analog_rail_v", (3.3, 5.0)), ("trim", (False, True)), ("power_cycle_isolation", (False, True)), ("reset_button", (False, True))),
     port_directions=(("vplus", "input"), ("vminus", "bidirectional"), ("isolation_vdd", "input"), ("isolation_enable", "input")),
     port_patterns=((r"analog_out_[1-8]", "output"), (r"load_return_(?:in|out)_[1-8]", "bidirectional")),
     derived_port_patterns=((r"sensor_[1-8]_(?:signal|return)", "bidirectional"), (r"conditioned_[1-8]", "output"), (r"analog_out_return", "bidirectional")),
     reviewed_exact_parts=tuple(part[0] for part in _ANALOG_PARTS.values()),
     parameter_constraints=(
-        "Bind analog_out_<n> to the requested consumers for exactly channel_count channels. vplus is the amplifier positive SUPPLY (SOIC-8 pin 8); vminus is its supply RETURN (pin 4), not an inverting signal input. The compiler binds the declared supply and published return; never drive vminus with sensor, trim or reset signals. The compiler owns the on-board sensors, amplifier inputs, feedback networks and internal conditioned nodes; do not wire them as separate external signals. Set trim=true for the reviewed on-board trimmer instead of driving a supply pin from an external trimmer. With power_cycle_isolation, isolation_vdd is the unswitched 5 V rail and isolation_enable is the reset-supervisor release that stays low until the switched rail has recovered. Current sensing additionally binds a distinct low-side Kelvin load_return_in_<n> and shared-return load_return_out_<n> for every channel; parallel shunts are rejected. The analog output connector is an architecture-owned connector requirement, never an analog-conditioner parameter.",
+        "Bind one real consumer to analog_out_<n> for each active channel. vplus is the amplifier positive SUPPLY (SOIC-8 pin 8); vminus is its supply RETURN (pin 4), not an inverting signal input. The compiler binds the declared supply and published return; never drive vminus with sensor, trim or reset signals. The compiler owns the on-board sensors, amplifier inputs, feedback networks and internal conditioned nodes; do not wire them as separate external signals. Set trim=true for the reviewed on-board trimmer instead of driving a supply pin from an external trimmer. With power_cycle_isolation, isolation_vdd is the unswitched 5 V rail and isolation_enable is the reset-supervisor release that stays low until the switched rail has recovered. The analog output connector is an architecture-owned connector requirement, never an analog-conditioner parameter.",
+        "For current sense, bind each load_return_in_<n> to a distinct load contact (neither supply rail). The compiler derives load_return_out_<n> on actual vminus; tie the low-side connector contact to that same reference, not a separately named return signal. Compact example for one measurement: channel_count=1 with a 5 V current-sense supply, connector.pin1 → sense.load_return_in_1, sense.analog_out_1 → mcu.adc_0, and connector.ties={\"pin2\":\"GND\"} when vminus=GND. A dual amplifier package does not require a second load channel, output or ADC input.",
         "MCP6002-I/SN with untrimmed MCP9700AT-E/TT temperature channels also supports a 3.3 V analog rail and consumers rated at least 3.3 V. The other reviewed MCP6002-I/SN, LM358DR and TLV9062IDR circuits require the 5 V rail. Named sensors, output spans, bandwidths, and transfers outside these documented circuits are refused rather than guessed.",
         "Generic humidity uses sourceable SHT30-ARP-B2.5KS analog sensors, not I2C SHT30-DIS. An explicit HIH-4010-001 remains exact. For a requested humidity reset button set reset_button=true on this conditioner: the compiler owns one physical button and a 10k pull-up on the sensors' actual active-low nRESET. No separate power-cycle/reset-switch requirement is needed for that sensor reset. This option is refused for sensors without reviewed reset contacts.",
     ),

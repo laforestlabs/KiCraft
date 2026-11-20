@@ -355,6 +355,15 @@ the failing check rather than shipping a broken file set.
 - Resolved curated bundles can provide project-local symbols, footprints and
   models. An unresolved or unqualified part remains blocking; a matching name
   or stock count alone does not establish electrical or physical suitability.
+- `analog-conditioner@1` counts active measurements, not amplifier sections:
+  `channel_count` supports `1`, `2`, `4`, and `8` (default `2`). For one 5 V
+  low-side current measurement, wire `connector.pin1` to
+  `sense.load_return_in_1` and `sense.analog_out_1` to `mcu.adc_0`. If
+  `vminus=GND`, set the connector's `ties` to `{"pin2":"GND"}` instead of
+  declaring a separate return signal.
+- A generic header with numbered `pinN` contacts keeps its header geometry.
+  Numbered rail and tie contacts count toward its width even when they have no
+  named signal; for example, a ground tie on `pin6` still requires pad 6.
 - State persists as `.kicraft/state.json` in the project directory —
   gitignore it (or commit it; it's plain JSON and reviewable).
 
